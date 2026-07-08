@@ -28,6 +28,11 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
     
+    # TTS Configuration
+    TTS_API_KEY = os.getenv("TTS_API_KEY", "")
+    TTS_API_URL = os.getenv("TTS_API_URL", "https://tts.ign3el.com/v1/audio/speech")
+
+
     @classmethod
     def get_info(cls) -> dict:
         """Get current configuration info"""

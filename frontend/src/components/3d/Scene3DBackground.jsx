@@ -1,8 +1,7 @@
 import { useMemo } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { Canvas, useFrame } from '@react-three/fiber'
 import { Stars, Html, Float } from '@react-three/drei'
-import { useFrame } from '@react-three/fiber'
-import { useState, useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 // Floating particles in the background
 function Particles({ count = 200, spread = 50, speed = 0.05 }) {
@@ -15,9 +14,6 @@ function Particles({ count = 200, spread = 50, speed = 0.05 }) {
     }
     return arr
   }, [count, spread])
-
-  const [offset, setOffset] = useState(0)
-  useFrame(() => setOffset(o => o + speed * 0.01))
 
   return (
     <points>

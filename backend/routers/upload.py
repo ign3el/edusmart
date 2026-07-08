@@ -2,6 +2,7 @@ import logging
 import io
 import httpx
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from config import Config
 from fastapi.responses import Response
 from pydantic import BaseModel
 from langdetect import detect, LangDetectException
@@ -16,8 +17,8 @@ router = APIRouter(
     tags=["Upload"],
 )
 
-TTS_API_URL = "https://tts.ign3el.com"
-TTS_API_KEY = "TTS_AHTE_2026!"
+TTS_API_URL = Config.TTS_API_URL
+TTS_API_KEY = Config.TTS_API_KEY
 
 class TextExtractionResponse(BaseModel):
     text: str

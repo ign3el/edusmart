@@ -1,5 +1,4 @@
-import { useMemo, useState } from 'react'
-import { useFrame } from '@react-three/fiber'
+import { useMemo } from 'react'
 
 export function AuroraBackground() {
   const colors = ['#6366f1', '#06b6d4', '#10b981', '#818cf8', '#22d3ee']
@@ -32,12 +31,6 @@ export function AuroraBackground() {
 }
 
 function AuroraPlane({ color, z, scale, opacity, speed }) {
-  const [phase, setPhase] = useState(0)
-  
-  useFrame((state, delta) => {
-    setPhase(p => p + delta * speed)
-  })
-
   return (
     <mesh 
       position={[0, 0, z]} 

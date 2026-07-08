@@ -1,5 +1,4 @@
-import { useMemo, useState } from 'react'
-import { useFrame } from '@react-three/fiber'
+import { useMemo } from 'react'
 
 export function Particles3D({ count = 200, spread = 50, speed = 0.05 }) {
   const positions = useMemo(() => {
@@ -11,9 +10,6 @@ export function Particles3D({ count = 200, spread = 50, speed = 0.05 }) {
     }
     return arr
   }, [count, spread])
-
-  const [offset, setOffset] = useState(0)
-  useFrame(() => setOffset(o => o + speed * 0.01))
 
   return (
     <points>
