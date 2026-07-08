@@ -69,8 +69,9 @@ export function PerlinFluid() {
     }
   })
 
-  // Skip on reduced motion
-  if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  // Skip on reduced motion or mobile for performance
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
+  if (isMobile || (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) {
     return null
   }
 

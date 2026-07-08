@@ -10,6 +10,7 @@ export function R3FProvider({ children }) {
         gl={{ antialias: !isMobile, alpha: true }}
         style={{ width: '100%', height: '100%' }}
         dpr={isMobile ? 1 : [1, 2]}
+        frameloop={isMobile ? 'demand' : 'always'}
       >
         <Suspense fallback={null}>{children}</Suspense>
       </Canvas>
