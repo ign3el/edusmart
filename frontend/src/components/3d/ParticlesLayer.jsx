@@ -1,6 +1,4 @@
 import { useMemo } from 'react'
-import { useFrame } from '@react-three/fiber'
-import { useState } from 'react'
 
 // Floating particles in the background
 export function ParticlesLayer({ count = 200, spread = 50, speed = 0.05 }) {
@@ -13,10 +11,6 @@ export function ParticlesLayer({ count = 200, spread = 50, speed = 0.05 }) {
     }
     return arr
   }, [count, spread])
-
-  const [offset, setOffset] = useState(0)
-  useFrame(() => setOffset(o => o + speed * 0.01))
-
   return (
     <points>
       <bufferGeometry>
