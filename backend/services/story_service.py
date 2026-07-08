@@ -758,13 +758,6 @@ Output ONLY the JSON object."""
                     scene_num=scene_num
                 )
                 return scene_num, img_bytes
-            async with semaphore:
-                return await self.generate_image(
-                    prompt=scene['image_prompt'],
-                    scene_text=scene.get('narrative_text', ''),
-                    story_seed=story_seed,
-                    is_mobile=is_mobile
-                )
         
         print(f"🎨 Starting parallel image generation for {len(scenes)} scenes (max_workers={max_workers}, mobile={is_mobile})")
         

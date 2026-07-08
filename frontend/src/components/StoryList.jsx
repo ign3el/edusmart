@@ -115,9 +115,15 @@ const StoryList = ({ onPlayStory }) => {
                                         <button 
                                             className="play-story-button"
                                             disabled={playingStoryId === story.story_id}
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 setPlayingStoryId(story.story_id);
-                                                onPlayStory(story.story_id);
+                                                try {
+                                                    await onPlayStory(story.story_id);
+                                                } catch (err) {
+                                                    console.error('Failed to play story:', err);
+                                                } finally {
+                                                    setPlayingStoryId(null);
+                                                }
                                             }}
                                         >
                                             {playingStoryId === story.story_id ? 'Loading...' : 'Play'}
