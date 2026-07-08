@@ -698,7 +698,7 @@ async def check_duplicate(
                 with get_db_cursor() as cursor:
                     # Get all matching story IDs and sort by created_at DESC to get most recent
                     story_ids = [m["story_id"] for m in saved_matches]
-                    placeholders = ','.join(['%s'] * len(story_ids))
+                    placeholders = ", ".join(["%s"] * len(story_ids))
                     
                     cursor.execute(f"""
                         SELECT story_id, name, created_at, user_id
@@ -707,7 +707,7 @@ async def check_duplicate(
                         AND user_id = %s
                         ORDER BY created_at DESC
                         LIMIT 1
-                    """, (*story_ids, current_user["id"]))
+                    """, tuple(story_ids) + (current_user["id"],))
                     
                     db_story = cursor.fetchone()
                     
