@@ -856,7 +856,8 @@ async def upload_story(
     
     # Save original file to temp folder
     filename = file.filename or "uploaded_file"
-    temp_file_path = os.path.join(temp_dir, filename)
+    safe_filename = re.sub(r'[^\w\-.]', '_', filename).lstrip('.')
+    temp_file_path = os.path.join(temp_dir, safe_filename)
     with open(temp_file_path, "wb") as f:
         f.write(file_content)
     
@@ -1573,11 +1574,12 @@ async def export_job(job_id: str, current_user: dict = Depends(get_current_user)
     
     zip_buffer.seek(0)
     
+    safe_title = re.sub(r'[^\w\-]', '_', status.get('title', 'story')).strip('_')[:100]
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f"attachment; filename={status['title'].replace(' ', '_')}.zip"
+            "Content-Disposition": f"attachment; filename={safe_title}.zip"
         }
     )
 
@@ -1628,11 +1630,12 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
     
     zip_buffer.seek(0)
     
+    safe_title = re.sub(r'[^\w\-]', '_', story.get('name', 'story')).strip('_')[:100]
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f"attachment; filename={story['name'].replace(' ', '_')}.zip"
+            "Content-Disposition": f"attachment; filename={safe_title}.zip"
         }
     )
 
