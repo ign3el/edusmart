@@ -3,6 +3,7 @@ import { ParticlesLayer } from './ParticlesLayer'
 import { AuroraLayer } from './AuroraLayer'
 import { ShapesLayer } from './ShapesLayer'
 import { PerlinFluid } from './PerlinFluid'
+import { DiamondLogo } from './DiamondLogo'
 
 export function SceneContent() {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
@@ -15,6 +16,7 @@ export function SceneContent() {
       <AuroraLayer />
       <ShapesLayer count={isMobile ? 6 : 12} />
       <PerlinFluid />
+      <DiamondLogo />
       <ambientLight intensity={0.3} color="#6366f1" />
       <directionalLight position={[10, 10, 5]} intensity={0.5} color="#6366f1" />
       <pointLight position={[-10, -10, 10]} intensity={0.3} color="#06b6d4" />
