@@ -241,29 +241,94 @@ function MainApp() {
       return
     }
     
-    // Simulate upload progress
-    if (DEBUG) console.log('📊 Starting upload progress simulation')
-    let progress = 0
-    const interval = setInterval(() => {
-      progress += Math.random() * 30
-      if (progress >= 90) progress = 90
-      setUploadProgress(Math.round(progress))
-    }, 300)
-    
-    // Complete upload
-    setTimeout(() => {
-      clearInterval(interval)
+    // Real upload with XHR progress tracking
+    if (DEBUG) console.log('📊 Starting real upload with progress tracking')
+    const uploadData = new FormData()
+    uploadData.append('file', file)
+    uploadData.append('grade_level', gradeLevel)
+    uploadData.append('voice', voice)
+    uploadData.append('speed', speed)
+    if (response.data.file_hash) {
+      uploadData.append('file_hash', response.data.file_hash)
+    }
+    uploadData.append('force_new', (duplicateInfo !== null).toString())
+    uploadData.append('user_agent', navigator.userAgent)
+
+    const xhr = new XMLHttpRequest()
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        setUploadProgress(Math.round((e.loaded / e.total) * 90))
+      }
+    })
+    xhr.addEventListener('load', () => {
       setUploadProgress(100)
-      if (DEBUG) console.log('✅ Upload complete, navigating to confirm')
-      
-      // Proceed after completion
       setTimeout(() => {
         setShowUploadProgress(false)
-        navigateTo('confirm')
-        setError(null) 
-        setIsSaved(false)
-      }, 800)
-    }, 2000)
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const result = JSON.parse(xhr.responseText)
+            const jobId = result.job_id
+            setCurrentJobId(jobId)
+            navigateTo('generating')
+            // Start polling for job status
+            const pollTimer = setInterval(async () => {
+              try {
+                const statusRes = await fetch(`${API_URL}/api/status/${jobId}`)
+                if (!statusRes.ok) throw new Error('Could not fetch status')
+                const job = await statusRes.json()
+                if (job.status === 'processing') {
+                  setProgress((prev) => Math.max(prev, job.progress ?? prev))
+                  if (job.total_scenes > 0) {
+                    setTotalScenes(job.total_scenes)
+                    setCompletedSceneCount(job.completed_scene_count || 0)
+                  }
+                  if (job.result && job.result.scenes && job.result.scenes.length > 0) {
+                    if (!storyData || storyData.scenes.length === 0) {
+                      setStoryData(job.result)
+                      navigateTo('playing')
+                    } else {
+                      setStoryData(job.result)
+                    }
+                  }
+                } else if (job.status === 'completed') {
+                  clearInterval(pollTimer)
+                  setStoryData(job.result)
+                  setProgress(100)
+                  if (job.total_scenes > 0) {
+                    setTotalScenes(job.total_scenes)
+                    setCompletedSceneCount(job.total_scenes)
+                  }
+                  if (step !== 'playing') {
+                    navigateTo('playing')
+                  }
+                } else if (job.status === 'failed') {
+                  clearInterval(pollTimer)
+                  throw new Error(job.error || 'AI Generation failed.')
+                }
+              } catch (err) {
+                clearInterval(pollTimer)
+                setError('Connection lost: ' + err.message)
+                navigateTo('upload')
+              }
+            }, 2000)
+          } catch (parseErr) {
+            setError('Invalid response from server')
+            navigateTo('upload')
+          }
+        } else {
+          setError('Upload failed with status: ' + xhr.status)
+          navigateTo('upload')
+        }
+      }, 500)
+    })
+    xhr.addEventListener('error', () => {
+      setShowUploadProgress(false)
+      setError('Upload failed due to network error')
+      navigateTo('upload')
+    })
+    xhr.open('POST', API_URL + '/api/upload')
+    xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`)
+    xhr.send(uploadData)
   }
 
   const handleReuploadClick = () => {
