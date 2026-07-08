@@ -990,7 +990,7 @@ async def handle_duplicate_choice(
 
 # Progressive endpoints for scene-by-scene loading
 @app.get("/api/story/{story_id}/status")
-async def get_story_status(story_id: str) -> Dict[str, Any]:
+async def get_story_status(story_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get overall story status with scene completion info."""
     logger.info(f"🔍 Getting story status for: {story_id}")
     
@@ -1272,7 +1272,7 @@ async def get_scene_status(story_id: str, scene_index: int) -> Dict[str, Any]:
 
 
 @app.get("/api/status/{job_id}")
-async def get_status(job_id: str) -> Dict[str, Any]:
+async def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     # Check if it's a progressive story
     status = job_manager.get_story_status(job_id)
     if status:
@@ -1523,7 +1523,7 @@ async def delete_story(story_id: str, user: User = Depends(get_current_user)):
     return {"message": "Story deleted successfully"}
 
 @app.get("/api/export-job/{job_id}")
-async def export_job(job_id: str):
+async def export_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """
     Export a job (story generation) as a ZIP file for offline use.
     Includes all scenes with images and audio files.
@@ -1645,7 +1645,7 @@ async def get_tts_status(story_id: str):
     return await gemini.get_tts_status(story_id)
 
 @app.get("/api/story/{story_id}/scene/{scene_num}/audio")
-async def get_scene_audio(story_id: str, scene_num: int):
+async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = Depends(get_current_user)):
     """Get scene audio (from cache or generated/saved folder) with waterfall fallbacks"""
     import os
     import aiofiles
