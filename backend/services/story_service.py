@@ -820,7 +820,7 @@ REQUIREMENTS:
                         priority_prompt
                     ]
                 )
-            response = self._call_with_exponential_backoff(_generate_priority_scene)
+            response = self._call_with_exponential_backoff(_generate_scene)
         
             if response and response.text:
                 try:
