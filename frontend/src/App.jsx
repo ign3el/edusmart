@@ -211,6 +211,7 @@ function MainApp() {
     setUploadProgress(0)
     
     // Calculate file hash and check for duplicates
+    let fileHashLocal = null
     try {
       const formData = new FormData()
       formData.append('file', file)
@@ -232,7 +233,8 @@ function MainApp() {
       }
       
       // Store hash for later use
-      setFileHash(response.data.file_hash)
+      fileHashLocal = response.data.file_hash
+      setFileHash(fileHashLocal)
       if (DEBUG) console.log('✅ No duplicate, continuing upload')
     } catch (err) {
       if (DEBUG) console.error('❌ Error checking duplicate:', err)
@@ -248,8 +250,8 @@ function MainApp() {
     uploadData.append('grade_level', gradeLevel)
     uploadData.append('voice', voice)
     uploadData.append('speed', speed)
-    if (response.data.file_hash) {
-      uploadData.append('file_hash', response.data.file_hash)
+    if (fileHashLocal) {
+      uploadData.append('file_hash', fileHashLocal)
     }
     uploadData.append('force_new', (duplicateInfo !== null).toString())
     uploadData.append('user_agent', navigator.userAgent)
