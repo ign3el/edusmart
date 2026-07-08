@@ -11,44 +11,21 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
   const [isPWA, setIsPWA] = useState(false)
   const deferredPromptRef = useRef(null)
 
-  // Handle PWA install prompt
   useEffect(() => {
     const handleBeforeInstallPrompt = (e) => {
-      console.log('📱 beforeinstallprompt event fired!', {
-        userAgent: navigator.userAgent.substring(0, 100),
-        standalone: window.matchMedia('(display-mode: standalone)').matches,
-        isIOS: /iPhone|iPad|iPod/.test(navigator.userAgent)
-      })
       e.preventDefault()
       deferredPromptRef.current = e
       setShowInstallPrompt(true)
-      console.log('💾 PWA install prompt ready - Install App button should appear')
     }
-
     const handleAppInstalled = () => {
       setShowInstallPrompt(false)
       setIsPWA(true)
-      console.log('✅ App installed successfully')
     }
-
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
     window.addEventListener('appinstalled', handleAppInstalled)
-
-    // Check if already installed
     if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true) {
       setIsPWA(true)
-      console.log('✅ App is already in standalone mode')
     }
-
-    console.log('🔍 PWA listener attached - waiting for beforeinstallprompt event...')
-    console.log('🌐 Device info:', {
-      standalone: window.matchMedia('(display-mode: standalone)').matches,
-      isIOS: /iPhone|iPad|iPod/.test(navigator.userAgent),
-      isAndroid: /Android/.test(navigator.userAgent),
-      isChrome: /Chrome/.test(navigator.userAgent),
-      hasServiceWorker: 'serviceWorker' in navigator
-    })
-
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
       window.removeEventListener('appinstalled', handleAppInstalled)
@@ -59,13 +36,10 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
     if (deferredPromptRef.current) {
       deferredPromptRef.current.prompt()
       const { outcome } = await deferredPromptRef.current.userChoice
-      if (outcome === 'accepted') {
-        setIsPWA(true)
-        setShowInstallPrompt(false)
-      }
+      if (outcome === 'accepted') { setIsPWA(true); setShowInstallPrompt(false) }
       deferredPromptRef.current = null
     } else {
-      alert('Install prompt is not available yet. Please use the browser menu to install or revisit after a bit of usage.');
+      alert('Install prompt is not available yet. Please use the browser menu to install or revisit after a bit of usage.')
     }
   }
 
@@ -89,25 +63,8 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
   }
 
   const handleAction = (action) => {
-    if (action) {
-      action()
-    }
+    if (action) action()
     setIsMobileOpen(false)
-  }
-
-  // Debug logging for mobile menu
-  if (isMobileOpen) {
-    console.log('🍔 Mobile Menu Debug:', {
-      user: !!user,
-      userEmail: user?.email,
-      isAdmin,
-      onHome: !!onHome,
-      onLoadStories: !!onLoadStories,
-      onOfflineManager: !!onOfflineManager,
-      onAdminClick: !!onAdminClick,
-      onNewStory: !!onNewStory,
-      onLogout: !!onLogout
-    })
   }
 
   return (
@@ -126,69 +83,45 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
         </motion.div>
       </button>
 
-      {/* Desktop Menu (Always visible) */}
+      {/* Desktop Menu (Always visible - RELIABLE text buttons) */}
       <nav className="desktop-menu">
         {onHome && (
-          <button
-            onClick={() => handleAction(onHome)}
-            className="menu-btn"
-          >
+          <button onClick={() => handleAction(onHome)} className="menu-btn">
             🏠 Home
           </button>
         )}
         {onLoadStories && (
-          <button
-            onClick={() => handleAction(onLoadStories)}
-            className="menu-btn"
-          >
+          <button onClick={() => handleAction(onLoadStories)} className="menu-btn">
             📚 Load Story
           </button>
         )}
         {onOfflineManager && (
-          <button
-            onClick={() => handleAction(onOfflineManager)}
-            className="menu-btn"
-          >
-            📂 Offline Manager
+          <button onClick={() => handleAction(onOfflineManager)} className="menu-btn">
+            📂 Offline
           </button>
         )}
         {isAdmin && onAdminClick && (
-          <button
-            onClick={() => handleAction(onAdminClick)}
-            className="menu-btn admin"
-          >
-            ⚙️ Admin Panel
+          <button onClick={() => handleAction(onAdminClick)} className="menu-btn admin">
+            ⚙️ Admin
           </button>
         )}
         {isPlayingStory && onSaveStory && (
-          <button
-            onClick={() => handleAction(onSaveStory)}
-            className="menu-btn primary"
-          >
+          <button onClick={() => handleAction(onSaveStory)} className="menu-btn primary">
             💾 Save
           </button>
         )}
         {isPlayingStory && onDownloadStory && (
-          <button
-            onClick={() => handleAction(onDownloadStory)}
-            className="menu-btn primary"
-          >
+          <button onClick={() => handleAction(onDownloadStory)} className="menu-btn primary">
             📥 Download
           </button>
         )}
         {currentStory?.persistent_path && (
-          <button
-            onClick={() => handleAction(onShowFileViewer)}
-            className="menu-btn"
-          >
+          <button onClick={() => handleAction(onShowFileViewer)} className="menu-btn">
             📄 View File
           </button>
         )}
         {onNewStory && (
-          <button
-            onClick={() => handleAction(onNewStory)}
-            className="menu-btn primary"
-          >
+          <button onClick={() => handleAction(onNewStory)} className="menu-btn primary">
             ✨ New Story
           </button>
         )}
@@ -201,25 +134,18 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
           {isCheckingUpdate ? '⏳' : '🔄'} Update
         </button>
         {onProfile && (
-          <button
-            onClick={() => handleAction(onProfile)}
-            className="menu-btn profile"
-            title="Account"
-          >
+          <button onClick={() => handleAction(onProfile)} className="menu-btn profile" title="Account">
             {user?.email?.split('@')[0] || '👤'}
           </button>
         )}
         {onLogout && (
-          <button
-            onClick={() => handleAction(onLogout)}
-            className="menu-btn logout"
-          >
+          <button onClick={() => handleAction(onLogout)} className="menu-btn logout">
             🚪 Logout
           </button>
         )}
       </nav>
 
-      {/* Mobile Drawer - rendered via Portal outside app container */}
+      {/* Mobile Drawer - via Portal */}
       {createPortal(
         <AnimatePresence>
           {isMobileOpen && (
@@ -240,20 +166,11 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
               >
                 <div className="drawer-header">
                   <h3>Menu</h3>
-                  <button
-                    onClick={() => setIsMobileOpen(false)}
-                    className="drawer-close-btn"
-                  >
-                    ✕
-                  </button>
+                  <button onClick={() => setIsMobileOpen(false)} className="drawer-close-btn">✕</button>
                 </div>
-
                 <div className="drawer-content">
                   {user && (
-                    <div
-                      className="user-profile-card"
-                      onClick={() => handleAction(onProfile)}
-                    >
+                    <div className="user-profile-card" onClick={() => handleAction(onProfile)}>
                       <div className="user-avatar">
                         {user.email?.charAt(0).toUpperCase()}
                       </div>
@@ -263,140 +180,46 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
                       </div>
                     </div>
                   )}
-
                   <div className="section-container">
                     <div>
                       <h4 className="section-header">Navigation</h4>
-                      {onHome && (
-                        <button
-                          onClick={() => handleAction(onHome)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">🏠</span>
-                          <span>Home</span>
-                        </button>
-                      )}
-                      {onLoadStories && (
-                        <button
-                          onClick={() => handleAction(onLoadStories)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">📚</span>
-                          <span>Load Saved Story</span>
-                        </button>
-                      )}
-                      {onOfflineManager && (
-                        <button
-                          onClick={() => handleAction(onOfflineManager)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">📂</span>
-                          <span>Offline Manager</span>
-                        </button>
-                      )}
-                      {onNewStory && (
-                        <button
-                          onClick={() => handleAction(onNewStory)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">✨</span>
-                          <span>New Story</span>
-                        </button>
-                      )}
-                      {isPlayingStory && onSaveStory && (
-                        <button
-                          onClick={() => handleAction(onSaveStory)}
-                          className="drawer-btn primary"
-                        >
-                          <span className="icon">💾</span>
-                          <span>Save Story</span>
-                        </button>
-                      )}
-                      {isPlayingStory && onDownloadStory && (
-                        <button
-                          onClick={() => handleAction(onDownloadStory)}
-                          className="drawer-btn primary"
-                        >
-                          <span className="icon">📥</span>
-                          <span>Download Story</span>
-                        </button>
-                      )}
-                      {currentStory?.persistent_path && (
-                        <button
-                          onClick={() => handleAction(onShowFileViewer)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">📄</span>
-                          <span>View Current File</span>
-                        </button>
-                      )}
+                      {onHome && <button onClick={() => handleAction(onHome)} className="drawer-btn"><span className="icon">🏠</span><span>Home</span></button>}
+                      {onLoadStories && <button onClick={() => handleAction(onLoadStories)} className="drawer-btn"><span className="icon">📚</span><span>Load Saved Story</span></button>}
+                      {onOfflineManager && <button onClick={() => handleAction(onOfflineManager)} className="drawer-btn"><span className="icon">📂</span><span>Offline Manager</span></button>}
+                      {onNewStory && <button onClick={() => handleAction(onNewStory)} className="drawer-btn"><span className="icon">✨</span><span>New Story</span></button>}
+                      {isPlayingStory && onSaveStory && <button onClick={() => handleAction(onSaveStory)} className="drawer-btn primary"><span className="icon">💾</span><span>Save Story</span></button>}
+                      {isPlayingStory && onDownloadStory && <button onClick={() => handleAction(onDownloadStory)} className="drawer-btn primary"><span className="icon">📥</span><span>Download Story</span></button>}
+                      {currentStory?.persistent_path && <button onClick={() => handleAction(onShowFileViewer)} className="drawer-btn"><span className="icon">📄</span><span>View Current File</span></button>}
                     </div>
-
                     {isAdmin && onAdminClick && (
                       <>
                         <div className="section-divider"></div>
                         <div>
                           <h4 className="section-header">Admin</h4>
-                          <button
-                            onClick={() => handleAction(onAdminClick)}
-                            className="drawer-btn"
-                          >
-                            <span className="icon">⚙️</span>
-                            <span>Admin Panel</span>
-                          </button>
+                          <button onClick={() => handleAction(onAdminClick)} className="drawer-btn"><span className="icon">⚙️</span><span>Admin Panel</span></button>
                         </div>
                       </>
                     )}
-
                     <div className="section-divider"></div>
                     <div>
                       <h4 className="section-header">Account</h4>
-                      <button
-                        onClick={() => {
-                          handleCheckUpdate();
-                          setIsMobileOpen(false);
-                        }}
-                        className="drawer-btn"
-                        disabled={isCheckingUpdate}
-                      >
-                        <span className="icon">{isCheckingUpdate ? '⏳' : '🔄'}</span>
-                        <span>Check for Updates</span>
+                      <button onClick={() => { handleCheckUpdate(); setIsMobileOpen(false) }} className="drawer-btn" disabled={isCheckingUpdate}>
+                        <span className="icon">{isCheckingUpdate ? '⏳' : '🔄'}</span><span>Check for Updates</span>
                       </button>
-                      {!isPWA && (
-                        <button
-                          onClick={() => {
-                            handleInstallPWA();
-                            setIsMobileOpen(false);
-                          }}
-                          className="drawer-btn primary"
-                        >
-                          <span className="icon">📲</span>
-                          <span>Install App</span>
+                      {!isPWA ? (
+                        <button onClick={() => { handleInstallPWA(); setIsMobileOpen(false) }} className="drawer-btn primary">
+                          <span className="icon">📲</span><span>Install App</span>
                         </button>
+                      ) : (
+                        <div className="status-indicator"><span className="icon">✓</span><span>App Installed</span></div>
                       )}
-                      {isPWA && (
-                        <div className="status-indicator">
-                          <span className="icon">✓</span>
-                          <span>App Installed</span>
-                        </div>
-                      )}
-                      {onLogout && (
-                        <button
-                          onClick={() => handleAction(onLogout)}
-                          className="drawer-btn"
-                        >
-                          <span className="icon">🚪</span>
-                          <span>Logout</span>
-                        </button>
-                      )}
+                      {onLogout && <button onClick={() => handleAction(onLogout)} className="drawer-btn"><span className="icon">🚪</span><span>Logout</span></button>}
                     </div>
                   </div>
                 </div>
               </motion.div>
             </>
           )}
-          {/* @ts-ignore */}
-          {/* @ts-ignore */}
         </AnimatePresence>,
         document.body
       )}

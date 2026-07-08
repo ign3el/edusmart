@@ -1,770 +1,353 @@
-import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { FiPlay, FiPause, FiSkipForward, FiSkipBack, FiRotateCw } from 'react-icons/fi';
-import './StoryPlayer.css';
-import Quiz from './Quiz';
-import { getTtsStatus, getSceneAudioUrl } from '../services/api';
+import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { FiPlay, FiPause, FiSkipForward, FiSkipBack, FiRotateCw, FiMenu, FiX, FiBookOpen, FiDownload, FiSave, FiChevronLeft, FiChevronRight } from 'react-icons/fi'
+import { buildFullUrl } from '../utils/urlHelpers'
+import Quiz from './Quiz'
+import './StoryPlayer.css'
 
-// Helper function to build full URL, handling absolute URLs, data URLs, and API paths
-const buildFullUrl = (url) => {
-  if (!url) {
-    return '';
-  }
+const API_URL = import.meta.env.VITE_API_URL || ''
 
-  // Check if already absolute (http/https) or data URL
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
-    return url;
-  }
+const StoryPlayer = forwardRef(({
+  storyData,
+  avatar,
+  onRestart,
+  onSave,
+  onDownloadOffline,
+  isSaved = false,
+  isOffline = false,
+  savedStoryId = null,
+  currentJobId = null,
+  totalScenes = 0,
+  completedSceneCount = 0,
+}, ref) => {
+  const [currentScene, setCurrentScene] = useState(0)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [showQuiz, setShowQuiz] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [showActionMenu, setShowActionMenu] = useState(false)
+  const [imageLoaded, setImageLoaded] = useState(false)
+  const [imageError, setImageError] = useState(false)
+  const [audioError, setAudioError] = useState(false)
+  const [isDownloading, setIsDownloading] = useState(false)
+  const [downloadMessage, setDownloadMessage] = useState('')
+  const [generatingMessage, setGeneratingMessage] = useState('')
+  const userPausedRef = useRef(false)
+  const savedTimeRef = useRef(0)
+  const audioRef = useRef(null)
 
-  // Check if it's an API path (starts with /api/)
-  if (url.startsWith('/api/')) {
-    // Use the current window's origin to build the full URL
-    return `${window.location.origin}${url}`;
-  }
+  const scenes = storyData?.scenes || []
+  const actualTotal = totalScenes > 0 ? totalScenes : scenes.length
+  const scene = scenes[currentScene]
 
-  // For other relative paths, prepend the API domain from environment or current origin
-  const apiDomain = import.meta.env.VITE_API_URL || window.location.origin;
-  return `${apiDomain}${url}`;
-};
+  // URLs
+  const fullImageUrl = buildFullUrl(scene?.image_url)
+  const fullAudioUrl = buildFullUrl(scene?.audio_url)
 
-const StoryPlayer = forwardRef(({ storyData, avatar, onRestart, onSave, onDownloadOffline, isSaved = false, isOffline = false, savedStoryId = null, currentJobId = null, totalScenes = 0, completedSceneCount = 0 }, ref) => {
-  const [currentScene, setCurrentScene] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [showQuiz, setShowQuiz] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadMessage, setDownloadMessage] = useState('');
-  const [showActionMenu, setShowActionMenu] = useState(false);
-  const [imageLoaded, setImageLoaded] = useState(false);
-  const [imageError, setImageError] = useState(false);
-  const [generatingMessage, setGeneratingMessage] = useState('');
-  // Track saved playback position
-  const [ttsReady, setTtsReady] = useState([]); // Track which scenes have TTS ready
-  const [ttsPolling, setTtsPolling] = useState(false);
-  const audioRef = useRef(null);
-  const savedTimeRef = useRef(0);
-  const imageCache = useRef({});
-  const pollingIntervalRef = useRef(null);
-
-  const scenes = storyData?.scenes || [];
-  const actualTotalScenes = totalScenes > 0 ? totalScenes : scenes.length;
-  const scene = scenes[currentScene];
-
-  // Use progressive TTS endpoint if polling is active and scene is ready
-  const sceneHasTts = ttsReady.includes(currentScene);
-  const fullAudioUrl = currentJobId && sceneHasTts
-    ? getSceneAudioUrl(currentJobId, currentScene) // 0-indexed to match backend
-    : buildFullUrl(scene?.audio_url);
-  const fullImageUrl = buildFullUrl(scene?.image_url);
-  const uploadUrl = buildFullUrl(storyData?.upload_url);
-
-  // Debug logging for URL construction
-  useEffect(() => {
-    if (scene?.audio_url) {
-      ('🎵 Audio URL Debug:', {
-        original: scene.audio_url,
-        built: fullAudioUrl,
-        isAbsolute: fullAudioUrl.startsWith('http')
-      });
-    }
-    if (scene?.image_url) {
-      ('🖼️ Image URL Debug:', {
-        original: scene.image_url,
-        built: fullImageUrl,
-        isAbsolute: fullImageUrl.startsWith('http')
-      });
-    }
-  }, [scene, fullAudioUrl, fullImageUrl]);
-
-  // Audio error state
-  const [audioError, setAudioError] = useState(false);
-  const [audioRetryCount, setAudioRetryCount] = useState(0);
-
-  // Expose download function to parent component
+  // Expose download trigger
   useImperativeHandle(ref, () => ({
-    triggerDownload: () => handleOfflineDownload()
-  }));
+    triggerDownload: () => handleOfflineDownload(),
+  }))
 
-  // Preload all scene images when story loads
+  // Reset on scene change
   useEffect(() => {
-    scenes.forEach((scene, index) => {
-      const imageUrl = buildFullUrl(scene?.image_url);
-      if (imageUrl && !imageCache.current[imageUrl]) {
-        const img = new Image();
-        img.onload = () => {
-          imageCache.current[imageUrl] = true;
-        };
-        img.src = imageUrl;
-      }
-    });
-  }, [scenes]);
+    setProgress(0)
+    setCurrentTime(0)
+    setDuration(0)
+    savedTimeRef.current = 0
+    setImageLoaded(false)
+    setImageError(false)
+    setAudioError(false)
+    userPausedRef.current = false
 
-  // Progressive TTS Polling - Start polling when story loads
-  useEffect(() => {
-    if (!currentJobId || isOffline) return; // Only poll for active jobs
-
-    const pollTtsStatus = async () => {
-      try {
-        const status = await getTtsStatus(currentJobId);
-        if (status && status.scenes_ready) {
-          setTtsReady(status.scenes_ready);
-
-          // Stop polling when all scenes are ready
-          if (status.is_complete) {
-            setTtsPolling(false);
-            if (pollingIntervalRef.current) {
-              clearInterval(pollingIntervalRef.current);
-              pollingIntervalRef.current = null;
-            }
-          }
-        }
-      } catch (error) {
-        console.warn('TTS status polling error:', error);
-      }
-    };
-
-    // Start polling if not already polling
-    if (!ttsPolling && !pollingIntervalRef.current) {
-      setTtsPolling(true);
-      pollTtsStatus(); // Initial poll
-      pollingIntervalRef.current = setInterval(pollTtsStatus, 3000); // Poll every 3s
-    }
-
-    // Cleanup on unmount
-    return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
-    };
-  }, [currentJobId, isOffline, ttsPolling]);
-
-  // Preload next scene's image and audio in background (for immediate next scene)
-  useEffect(() => {
-    if (currentScene < scenes.length - 1) {
-      const nextScene = scenes[currentScene + 1];
-      const nextImageUrl = buildFullUrl(nextScene?.image_url);
-      const nextAudioUrl = buildFullUrl(nextScene?.audio_url);
-
-      // Preload next image
-      if (nextImageUrl && !imageCache.current[nextImageUrl]) {
-        const img = new Image();
-        img.onload = () => {
-          imageCache.current[nextImageUrl] = true;
-        };
-        img.src = nextImageUrl;
-      }
-
-      // Preload next audio
-      if (nextAudioUrl && !imageCache.current[nextAudioUrl]) {
-        const audio = new Audio();
-        audio.onloadeddata = () => {
-          imageCache.current[nextAudioUrl] = true;
-        };
-        audio.src = nextAudioUrl;
-      }
-    }
-  }, [currentScene, scenes]);
-
-  useEffect(() => {
-    // Pre-test image accessibility (silent)
+    // Preload image
     if (fullImageUrl) {
-      const testImg = new Image();
-      testImg.onload = () => {
-        ('✅ Image pre-test successful:', fullImageUrl);
-      };
-      testImg.onerror = () => {
-        console.warn('⚠️ Image pre-test failed:', fullImageUrl);
-      };
-      testImg.src = fullImageUrl;
+      const img = new Image()
+      img.onload = () => setImageLoaded(true)
+      img.onerror = () => setImageError(true)
+      img.src = fullImageUrl
     }
-  }, [currentScene, fullImageUrl, imageLoaded, imageError]);
 
-  // Handle Play/Pause Toggle - Robust state management
-  const [userPaused, setUserPaused] = useState(false);
-  const [systemPaused, setSystemPaused] = useState(false);
-
-  // Save current time when user pauses
-  const handlePause = () => {
+    // Reset audio
     if (audioRef.current) {
-      setSavedTime(audioRef.current.currentTime);
-      ('⏸️ User paused at:', audioRef.current.currentTime);
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+      audioRef.current.src = fullAudioUrl || ''
+      audioRef.current.load()
     }
-  };
+  }, [currentScene, fullImageUrl, fullAudioUrl])
 
-  // Resume from saved time when user plays
-
-
-  // Handle audio events
-  // Handle audio events
+  // Audio event handlers
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    const audio = audioRef.current
+    if (!audio) return
 
-    const handlePlayEvent = () => {
-      setSystemPaused(false);
-      setIsPlaying(true);
-
-      // If we have a saved time and we're starting from 0 (or near 0), seek to saved time
-      // This handles cases where audio src reload might have reset time
-      if (savedTimeRef.current > 0.1 && audio.currentTime < 0.1) {
-        audio.currentTime = savedTimeRef.current;
-      }
-    };
-
-    const handlePauseEvent = () => {
-      // Always save time on pause
-      if (audio.currentTime > 0) {
-        savedTimeRef.current = audio.currentTime;
-      }
-
-      if (!userPaused) {
-        setSystemPaused(true);
-      }
-    };
-
+    const handlePlay = () => {
+      userPausedRef.current = false
+      setIsPlaying(true)
+    }
+    const handlePause = () => {
+      if (audio.currentTime > 0) savedTimeRef.current = audio.currentTime
+    }
     const handleEnded = () => {
-      setSystemPaused(false);
-      setUserPaused(false);
-      savedTimeRef.current = 0;
-    };
-
-    audio.addEventListener('play', handlePlayEvent);
-    audio.addEventListener('pause', handlePauseEvent);
-    audio.addEventListener('ended', handleEnded);
-
-    return () => {
-      audio.removeEventListener('play', handlePlayEvent);
-      audio.removeEventListener('pause', handlePauseEvent);
-      audio.removeEventListener('ended', handleEnded);
-    };
-  }, [audioRef.current, userPaused]);
-
-  // Combined play/pause logic
-  useEffect(() => {
-    if (audioRef.current) {
-      const shouldPlay = isPlaying && !userPaused && !systemPaused;
-      const isCurrentlyPlaying = !audioRef.current.paused;
-
-      if (shouldPlay && !isCurrentlyPlaying) {
-        const playPromise = audioRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise.catch(err => {
-            console.error("Audio play failed:", err);
-            setIsPlaying(false);
-            setUserPaused(true);
-          });
-        }
-      } else if (!shouldPlay && isCurrentlyPlaying) {
-        audioRef.current.pause();
-      }
-    }
-  }, [isPlaying, userPaused, systemPaused]);
-
-  // Handle Scene Change and Source Loading
-  useEffect(() => {
-    // Reset progress and time for new scene
-    setProgress(0);
-    setCurrentTime(0);
-    setDuration(0);
-    setSavedTime(0); // Reset saved time when scene changes
-    setImageLoaded(false);
-    setImageError(false);
-    setAudioError(false);
-
-    // Pre-load image to ensure onLoad fires
-    if (fullImageUrl) {
-      const img = new Image();
-      img.onload = () => {
-        setImageLoaded(true);
-      };
-      img.onerror = () => {
-        setImageError(true);
-      };
-      img.src = fullImageUrl;
-    }
-
-    if (audioRef.current) {
-      // Stop current audio immediately to prevent overlap
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-
-      // Update to new scene's audio with cache-busting for fresh load
-      const audioUrlWithCacheBust = fullAudioUrl ?
-        `${fullAudioUrl}${fullAudioUrl.includes('?') ? '&' : '?'}v=${audioRetryCount}` : '';
-
-      audioRef.current.src = audioUrlWithCacheBust;
-      audioRef.current.load(); // Force the browser to load the new scene's audio
-
-      // Add error handler for audio
-      const handleAudioError = (e) => {
-        console.error('Audio loading error:', e.target.error);
-        setAudioError(true);
-      };
-
-      audioRef.current.addEventListener('error', handleAudioError);
-
-      // If isPlaying is true, wait for audio to be ready before playing
-      if (isPlaying) {
-        const handleCanPlay = () => {
-          if (audioRef.current && isPlaying && !audioError) {
-            const playPromise = audioRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise.catch(err => {
-                console.error('Scene change auto-play failed:', err);
-                setIsPlaying(false);
-                setAudioError(true);
-              });
-            }
-          }
-          audioRef.current?.removeEventListener('canplay', handleCanPlay);
-        };
-        audioRef.current.addEventListener('canplay', handleCanPlay);
-      }
-
-      return () => {
-        if (audioRef.current) {
-          audioRef.current.removeEventListener('error', handleAudioError);
-        }
-      };
-    }
-  }, [currentScene, fullAudioUrl, fullImageUrl, isPlaying, audioRetryCount]);
-
-  const handleQuizClick = () => {
-    ('🎯 Quiz button clicked - starting quiz...')
-    setIsPlaying(false)
-    setShowQuiz(true)
-  };
-
-  const goToNextScene = () => {
-    if (currentScene < scenes.length - 1) {
-      // Stop current audio before changing scene
-      if (audioRef.current) {
-        audioRef.current.pause();
-        // Don't reset currentTime here - it will be reset in the scene change useEffect
-      }
-      setCurrentScene(currentScene + 1);
-      setGeneratingMessage('');
-      // Auto-play next scene
-      setIsPlaying(true);
-    } else if (currentScene < actualTotalScenes - 1) {
-      // Trying to go to a scene that hasn't been generated yet
-      setGeneratingMessage(`Scene ${currentScene + 2} is still being generated. Please wait...`);
-      setTimeout(() => setGeneratingMessage(''), 3000);
-    } else {
-      setIsPlaying(false);
-      setShowQuiz(true);
-    }
-  };
-
-  const goToPrevScene = () => {
-    if (currentScene > 0) {
-      // Stop current audio before changing scene
-      if (audioRef.current) {
-        audioRef.current.pause();
-        // Don't reset currentTime here - it will be reset in the scene change useEffect
-      }
-      setCurrentScene(currentScene - 1);
-      setGeneratingMessage('');
-      // Auto-play previous scene
-      setIsPlaying(true);
-    }
-  };
-
-  const handleTimeUpdate = () => {
-    if (audioRef.current && audioRef.current.duration) {
-      const newProgress = (audioRef.current.currentTime / audioRef.current.duration) * 100;
-      setProgress(newProgress);
-      setCurrentTime(audioRef.current.currentTime);
-      setDuration(audioRef.current.duration);
-    }
-  };
-
-  const handleSeek = (e) => {
-    if (audioRef.current && audioRef.current.duration) {
-      const rect = e.currentTarget.getBoundingClientRect();
-      // Handle both click and touch events
-      const clientX = e.type && e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
-      const x = clientX - rect.left;
-      const percentage = x / rect.width;
-      const newTime = percentage * audioRef.current.duration;
-      audioRef.current.currentTime = newTime;
-      setCurrentTime(newTime);
-      setProgress(percentage * 100);
-    }
-  };
-
-  const formatTime = (time) => {
-    if (isNaN(time)) return '0:00';
-    const minutes = Math.floor(time / 60);
-    const seconds = Math.floor(time % 60);
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  };
-
-  const handleAudioEnded = () => {
-    // Only auto-advance if we're still on the same scene that finished playing
-    // This prevents issues when user manually changes scenes while audio is playing
-    if (audioRef.current && audioRef.current.currentTime > 0) {
+      savedTimeRef.current = 0
+      userPausedRef.current = false
+      // Auto-advance
       if (currentScene < scenes.length - 1) {
-        goToNextScene();
+        setCurrentScene(s => s + 1)
+        setIsPlaying(true)
       } else {
-        setIsPlaying(false);
-        setShowQuiz(true);
+        setIsPlaying(false)
+        setShowQuiz(true)
       }
     }
-  };
-
-  const handleDotClick = (index) => {
-    // Check if scene is available
-    if (index >= scenes.length) {
-      setGeneratingMessage(`Scene ${index + 1} is still being generated. Please wait...`);
-      setTimeout(() => setGeneratingMessage(''), 3000);
-      return;
+    const handleError = () => {
+      setAudioError(true)
+      setIsPlaying(false)
     }
 
-    // Stop current audio before changing scene
-    if (audioRef.current) {
-      audioRef.current.pause();
-      // Don't reset currentTime here - it will be reset in the scene change useEffect
+    audio.addEventListener('play', handlePlay)
+    audio.addEventListener('pause', handlePause)
+    audio.addEventListener('ended', handleEnded)
+    audio.addEventListener('error', handleError)
+    return () => {
+      audio.removeEventListener('play', handlePlay)
+      audio.removeEventListener('pause', handlePause)
+      audio.removeEventListener('ended', handleEnded)
+      audio.removeEventListener('error', handleError)
     }
-    setCurrentScene(index);
-    setGeneratingMessage('');
-    // Auto-play selected scene
-    setIsPlaying(true);
-  };
+  }, [currentScene, scenes.length])
 
   const togglePlay = () => {
-    if (audioRef.current) {
-      const isCurrentlyPlaying = !audioRef.current.paused;
-
-      if (isCurrentlyPlaying) {
-        // Capture current time BEFORE pausing
-        const currentPosition = audioRef.current.currentTime;
-        audioRef.current.pause();
-        savedTimeRef.current = currentPosition; // Update saved time ref
-        setIsPlaying(false);
-        ('⏸️ User paused at:', currentPosition);
-      } else {
-        // Use ref to bypass state closure issues
-        const targetTime = savedTimeRef.current > 0 ? savedTimeRef.current : 0;
-        audioRef.current.currentTime = targetTime;
-
-        // If audio error occurred, retry loading
-        if (audioError) {
-          setAudioRetryCount(prev => prev + 1);
-          setAudioError(false);
-          return;
-        }
-
-        audioRef.current.play()
-          .then(() => {
-            setIsPlaying(true);
-            ('▶️ Audio resumed from:', targetTime);
-          })
-          .catch(err => {
-            console.error('Play error:', err);
-            setAudioError(true);
-          });
-      }
+    if (!audioRef.current) return
+    if (audioRef.current.paused) {
+      if (audioError) setAudioError(false)
+      const targetTime = savedTimeRef.current > 0 ? savedTimeRef.current : 0
+      audioRef.current.currentTime = targetTime
+      audioRef.current.play().catch(() => setAudioError(true))
+    } else {
+      savedTimeRef.current = audioRef.current.currentTime
+      audioRef.current.pause()
+      userPausedRef.current = true
+      setIsPlaying(false)
     }
-  };
+  }
 
-  const retryAudio = () => {
-    setAudioRetryCount(prev => prev + 1);
-    setAudioError(false);
-  };
+  const handleSeek = (e) => {
+    if (!audioRef.current?.duration) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    audioRef.current.currentTime = ratio * audioRef.current.duration
+  }
+
+  const handleTimeUpdate = () => {
+    const a = audioRef.current
+    if (a?.duration) {
+      setProgress((a.currentTime / a.duration) * 100)
+      setCurrentTime(a.currentTime)
+      setDuration(a.duration)
+    }
+  }
+
+  const goToScene = (idx) => {
+    if (audioRef.current) audioRef.current.pause()
+    setGeneratingMessage('')
+    setIsPlaying(true)
+    setCurrentScene(idx)
+  }
+
+  const formatTime = (t) => {
+    if (!t || isNaN(t)) return '0:00'
+    return `${Math.floor(t / 60)}:${Math.floor(t % 60).toString().padStart(2, '0')}`
+  }
 
   const handleOfflineDownload = async () => {
-    // Determine which ID to use for export
-    const exportId = savedStoryId || currentJobId;
-    const isJobExport = !savedStoryId && currentJobId;
-
+    const exportId = savedStoryId || currentJobId
     if (!exportId) {
-      // Fallback: local save for truly offline generated stories
-      const storyName = prompt('Enter story name for offline save:', storyData.title || 'My Story');
-      if (storyName?.trim()) {
-        const storyId = `local_${Date.now()}`;
-        const localStory = {
-          id: storyId,
-          name: storyName.trim(),
-          storyData: storyData,
-          savedAt: Date.now(),
-          isOffline: true
-        };
+      const name = prompt('Story name:', storyData?.title || 'My Story')
+      if (name?.trim()) {
         try {
-          localStorage.setItem(`edusmart_story_${storyId}`, JSON.stringify(localStory));
-          // Trigger storage event for OfflineManager to refresh
-          window.dispatchEvent(new StorageEvent('storage', {
-            key: `edusmart_story_${storyId}`,
-            newValue: JSON.stringify(localStory),
-            storageArea: localStorage
-          }));
-          alert(`✅ Story "${storyName}" saved locally for offline viewing!\n\nYou can access it anytime from the Offline Manager, even without internet.`);
-        } catch (error) {
-          alert('Failed to save locally: ' + error.message);
-        }
+          localStorage.setItem(`edusmart_story_${Date.now()}`, JSON.stringify({
+            id: `local_${Date.now()}`, name: name.trim(), storyData, savedAt: Date.now(), isOffline: true,
+          }))
+          setDownloadMessage('✅ Saved offline!')
+        } catch { setDownloadMessage('❌ Failed') }
+        setTimeout(() => setDownloadMessage(''), 3000)
       }
-      return;
+      return
     }
-
-    setIsDownloading(true);
-    setDownloadMessage('Zipping file...');
-
+    setIsDownloading(true)
+    setDownloadMessage('Preparing...')
     try {
-      const endpoint = isJobExport ? `/api/export-job/${exportId}` : `/api/export-story/${exportId}`;
-      const response = await fetch(endpoint, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-        }
-      });
-      if (!response.ok) throw new Error('Failed to download story');
-
-      setDownloadMessage('Downloading...');
-      const blob = await response.blob();
-
-      setDownloadMessage('Saving file...');
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      const safeName = (storyData.title || 'My Story').replace(/\s+/g, '_');
-      link.href = url;
-      link.download = `${safeName}_${exportId.substring(0, 8)}.zip`;
-
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-
-      setDownloadMessage('Complete! ✓');
-      setTimeout(() => {
-        setDownloadMessage('');
-        setIsDownloading(false);
-      }, 2000);
-    } catch (error) {
-      setDownloadMessage(`Error: ${error.message}`);
-      setTimeout(() => {
-        setDownloadMessage('');
-        setIsDownloading(false);
-      }, 3000);
-    }
-  };
-
-  if (showQuiz && storyData?.quiz) {
-    ('✅ Rendering Quiz - questions:', storyData.quiz.length)
-    return (
-      <div className="story-player">
-        <Quiz
-          questions={storyData.quiz}
-          onComplete={onRestart}
-          onBackToStory={() => setShowQuiz(false)}
-          storyId={savedStoryId}
-        />
-      </div>
-    );
-  }
-
-  if (showQuiz && !storyData?.quiz) {
-    ('⚠️ Quiz mode but no quiz data available')
-      ('📊 storyData structure:', {
-        hasStoryData: !!storyData,
-        storyDataKeys: storyData ? Object.keys(storyData) : [],
-        hasQuiz: !!storyData?.quiz,
-        scenes: storyData?.scenes?.length
+      const res = await fetch(`${API_URL}/api/export/${exportId}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
-  }
-
-  if (!scene) {
-    return (
-      <div className="story-player">
-        <p>Story is loading...</p>
-        <button className="restart-btn" onClick={onRestart}>
-          <FiRotateCw /> Try Again
-        </button>
-      </div>
-    );
+      if (!res.ok) throw new Error('Export failed')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = `${storyData?.title || 'story'}-${exportId.slice(0, 8)}.zip`
+      document.body.appendChild(a); a.click(); document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      setDownloadMessage('✅ Downloaded!')
+    } catch { setDownloadMessage('❌ Failed') }
+    setIsDownloading(false)
+    setTimeout(() => setDownloadMessage(''), 3000)
   }
 
   return (
     <div className="story-player">
-      <audio
-        ref={audioRef}
-        onTimeUpdate={handleTimeUpdate}
-        onEnded={handleAudioEnded}
-        preload="auto"
-        crossOrigin="anonymous"
-        onError={(e) => {
-          console.error('Audio element error:', e.target.error);
-          setAudioError(true);
-        }}
-      />
+      {/* Background gradient */}
+      <div className="player-bg" />
 
-      <div className="player-header">
-        <h2>🎬 {storyData.title || "Story Time"}</h2>
-      </div>
+      {/* Audio element */}
+      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} preload="metadata" crossOrigin="anonymous" />
 
-      {/* Audio Error Notification */}
-      {audioError && (
-        <div className="audio-error-banner">
-          <p>🔊 Audio unavailable - {scene?.audio_url ? 'loading failed' : 'no audio file'}</p>
-          <button onClick={retryAudio} className="retry-btn">
-            Retry Audio
-          </button>
-        </div>
-      )}
-
-      <div className="scene-display">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentScene}
-            initial={{ opacity: 0, x: 50 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -50 }}
-            transition={{ duration: 0.5 }}
-            className="scene-content"
-          >
-            <div className="scene-image">
-              {fullImageUrl && !imageError ? (
-                <img
-                  src={fullImageUrl}
-                  alt={`Scene ${currentScene + 1}`}
-                  onLoad={(e) => {
-                    if (!imageLoaded) setImageLoaded(true);
-                    if (imageError) setImageError(false);
-                  }}
-                  onError={(e) => {
-                    if (!imageError) setImageError(true);
-                    if (imageLoaded) setImageLoaded(false);
-                  }}
-                  crossOrigin="anonymous"
-                />
-              ) : (
-                <div className="placeholder-image">
-                  <p>{imageError ? 'Image unavailable' : (scene?.image_description || "Loading image...")}</p>
-                </div>
-              )}
-            </div>
-            <div className="scene-right">
-              <div className="scene-narration">
-                <p className="narration-text">{scene.text}</p>
-              </div>
-
-              <div className="player-controls inline-controls">
-                {/* Audio Progress Bar */}
-                <div className="audio-progress-section">
-                  <span className="time-display">{formatTime(currentTime)}</span>
-                  <div className="audio-progress-bar" onClick={handleSeek} onTouchStart={handleSeek}>
-                    <div className="audio-progress-fill" style={{ width: `${progress}%` }} />
-                    <div className="audio-progress-handle" style={{ left: `${progress}%` }} />
-                  </div>
-                  <span className="time-display">{formatTime(duration)}</span>
-                </div>
-
-                <div className="scene-counter">
-                  Scene {currentScene + 1} of {actualTotalScenes}
-                  {currentJobId && ttsPolling && (
-                    <span className="generating-indicator"> • {ttsReady.filter(Boolean).length}/{actualTotalScenes} audio ready</span>
-                  )}
-                </div>
-
-                {generatingMessage && (
-                  <div className="generating-message">{generatingMessage}</div>
-                )}
-
-                <div className="control-buttons">
-                  <button
-                    onClick={goToPrevScene}
-                    disabled={currentScene === 0}
-                    className="control-btn"
-                  >
-                    <FiSkipBack />
-                  </button>
-
-                  <button onClick={togglePlay} className="control-btn play-btn">
-                    {isPlaying ? <FiPause /> : <FiPlay />}
-                  </button>
-
-                  <button onClick={currentScene === scenes.length - 1 ? handleQuizClick : goToNextScene} className="control-btn next-btn" title={currentScene === scenes.length - 1 ? 'Take Quiz' : 'Next Scene'}>
-                    {currentScene === scenes.length - 1 ? "📝 Quiz" : <FiSkipForward />}
-                  </button>
-                </div>
-
-                <div className="scene-dots">
-                  {Array.from({ length: actualTotalScenes }, (_, index) => {
-                    const isAvailable = index < scenes.length;
-                    const isActive = index === currentScene;
-                    const isCompleted = index < currentScene;
-
-                    return (
-                      <button
-                        key={`dot-${index}`}
-                        className={`dot ${isActive ? 'active' : ''} ${isCompleted ? 'completed' : ''} ${!isAvailable ? 'unavailable' : ''}`}
-                        onClick={() => handleDotClick(index)}
-                        title={!isAvailable ? `Scene ${index + 1} is still generating` : `Go to scene ${index + 1}`}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        </AnimatePresence>
-      </div>
-
-      <div className="action-buttons-overlay">
-        {/* Action menu removed - now using global FloatingMenu */}
-      </div>
-
+      {/* Floating messages */}
       {downloadMessage && (
-        <motion.div
-          className="download-popup"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 20 }}
-        >
-          <div className="download-popup-content">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {downloadMessage !== 'Complete! ✓' && !downloadMessage.startsWith('Error') ? <div className="spinner"></div> : <span style={{ fontSize: '1.2rem' }}>✓</span>}
-              <p style={{ margin: 0 }}>{downloadMessage}</p>
-            </div>
-
-            <div className="progress-bar-container">
-              <div
-                className="progress-bar"
-                style={{
-                  width: downloadMessage === 'Zipping file...' ? '25%' :
-                    downloadMessage === 'Downloading...' ? '60%' :
-                      downloadMessage === 'Saving file...' ? '85%' : '100%',
-                  transition: 'width 0.4s ease'
-                }}
-              ></div>
-            </div>
-
-            <div className="progress-steps">
-              <div className={`progress-step ${downloadMessage === 'Zipping file...' ? 'active' : downloadMessage === 'Downloading...' || downloadMessage === 'Saving file...' || downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                <div className="step-dot">1</div>
-                <span>Zip</span>
-              </div>
-              <div className={`progress-step ${downloadMessage === 'Downloading...' ? 'active' : downloadMessage === 'Saving file...' || downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                <div className="step-dot">2</div>
-                <span>Download</span>
-              </div>
-              <div className={`progress-step ${downloadMessage === 'Saving file...' ? 'active' : downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                <div className="step-dot">3</div>
-                <span>Save</span>
-              </div>
-              <div className={`progress-step ${downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                <div className="step-dot">✓</div>
-                <span>Done</span>
-              </div>
-            </div>
-          </div>
+        <motion.div className="player-toast" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+          {downloadMessage}
         </motion.div>
       )}
+      {generatingMessage && (
+        <motion.div className="player-toast generating" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+          {generatingMessage}
+        </motion.div>
+      )}
+
+      {/* Error banners */}
+      <AnimatePresence>
+        {(audioError || imageError) && (
+          <motion.div className="player-error" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+            {audioError && <span>🔊 Audio unavailable <button className="err-btn" onClick={() => { setAudioError(false); setSavedTimeRef({ current: 0 }) }}>Retry</button></span>}
+            {imageError && <span>🖼️ Image failed to load</span>}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Header */}
+      <header className="player-header">
+        <button className="icon-btn" onClick={onRestart} aria-label="Restart"><FiRotateCw size={18} /></button>
+        <div className="header-title-area">
+          <h1 className="story-title">{storyData?.title || 'Untitled Story'}</h1>
+          <span className="scene-badge">Scene {currentScene + 1} of {actualTotal}</span>
+        </div>
+        <button className="icon-btn" onClick={() => setShowActionMenu(!showActionMenu)} aria-label="Menu">
+          {showActionMenu ? <FiX size={18} /> : <FiMenu size={18} />}
+        </button>
+      </header>
+
+      {/* Action menu */}
+      <AnimatePresence>
+        {showActionMenu && (
+          <motion.div className="action-menu" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
+            <button className="action-item" onClick={() => { setShowActionMenu(false); onRestart() }}><FiRotateCw size={16} /> Restart</button>
+            <button className="action-item" onClick={() => { setShowActionMenu(false); setShowQuiz(true) }}><FiBookOpen size={16} /> Quiz</button>
+            {onSave && !isSaved && (
+              <button className="action-item" onClick={() => { setShowActionMenu(false); onSave() }}><FiSave size={16} /> Save</button>
+            )}
+            <button className="action-item" onClick={() => { setShowActionMenu(false); handleOfflineDownload() }}><FiDownload size={16} /> Download</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main content */}
+      <main className="player-content">
+        {/* Scene image */}
+        <div className="scene-image-container">
+          {!imageLoaded && !imageError && (
+            <div className="image-skeleton">
+              <div className="skeleton-pulse" />
+              <span>📖 Scene {currentScene + 1}</span>
+            </div>
+          )}
+          {imageError && (
+            <div className="image-fallback">
+              <span>📖</span>
+              <span>Scene {currentScene + 1}</span>
+            </div>
+          )}
+          {fullImageUrl && (
+            <img
+              src={fullImageUrl}
+              alt={`Scene ${currentScene + 1}`}
+              className={`scene-image ${imageLoaded ? 'loaded' : ''}`}
+              onLoad={() => setImageLoaded(true)}
+              onError={() => setImageError(true)}
+            />
+          )}
+          {/* Scene dots overlay */}
+          <div className="scene-dots-overlay">
+            {scenes.map((_, i) => (
+              <button
+                key={i}
+                className={`dot ${i === currentScene ? 'active' : ''}`}
+                onClick={() => goToScene(i)}
+                aria-label={`Scene ${i + 1}`}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Narration text */}
+        <div className="narration-area">
+          {scene?.text ? (
+            <motion.p
+              key={currentScene}
+              className="narration-text"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4 }}
+            >
+              {scene.text}
+            </motion.p>
+          ) : (
+            <p className="narration-empty">Scene content loading...</p>
+          )}
+        </div>
+
+        {/* Audio progress */}
+        <div className="audio-row">
+          <span className="time">{formatTime(currentTime)}</span>
+          <div className="progress-track" onClick={handleSeek} onTouchStart={handleSeek}>
+            <motion.div className="progress-fill" style={{ width: `${progress}%` }} />
+            <div className="progress-thumb" style={{ left: `${progress}%` }} />
+          </div>
+          <span className="time">{formatTime(duration)}</span>
+        </div>
+
+        {/* Controls */}
+        <div className="controls">
+          <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={currentScene === 0}>
+            <FiSkipBack size={22} />
+          </button>
+          <button className={`ctrl-btn play-btn ${isPlaying ? 'is-playing' : ''}`} onClick={togglePlay}>
+            {isPlaying ? <FiPause size={26} /> : <FiPlay size={26} />}
+          </button>
+          <button className="ctrl-btn" onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))} disabled={currentScene >= scenes.length - 1}>
+            <FiSkipForward size={22} />
+          </button>
+        </div>
+
+        {/* Quiz button */}
+        <button className="quiz-btn" onClick={() => { setIsPlaying(false); setShowQuiz(true) }}>
+          <FiBookOpen size={18} /> Take Quiz
+        </button>
+      </main>
+
+      {/* Quiz modal */}
+      <AnimatePresence>
+        {showQuiz && (
+          <motion.div className="quiz-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <Quiz quiz={storyData?.quiz || []} onClose={() => setShowQuiz(false)} onRestart={onRestart} storyTitle={storyData?.title} />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
-  );
-});
+  )
+})
 
-StoryPlayer.displayName = 'StoryPlayer';
-
-export default StoryPlayer;
+StoryPlayer.displayName = 'StoryPlayer'
+export default StoryPlayer

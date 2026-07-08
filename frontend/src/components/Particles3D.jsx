@@ -1,0 +1,35 @@
+import { useMemo, useState } from 'react'
+import { useFrame } from '@react-three/fiber'
+
+export function Particles3D({ count = 200, spread = 50, speed = 0.05 }) {
+  const positions = useMemo(() => {
+    const arr = new Float32Array(count * 3)
+    for (let i = 0; i < count * 3; i += 3) {
+      arr[i] = (Math.random() - 0.5) * spread
+      arr[i + 1] = (Math.random() - 0.5) * spread
+      arr[i + 2] = (Math.random() - 0.5) * spread
+    }
+    return arr
+  }, [count, spread])
+
+  const [offset, setOffset] = useState(0)
+  useFrame(() => setOffset(o => o + speed * 0.01))
+
+  return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" array={positions} itemSize={3} />
+      </bufferGeometry>
+      <pointsMaterial
+        size={0.3}
+        transparent
+        opacity={0.6}
+        color="#6366f1"
+        sizeAttenuation
+        depthWrite={false}
+      />
+    </points>
+  )
+}
+
+export default Particles3D

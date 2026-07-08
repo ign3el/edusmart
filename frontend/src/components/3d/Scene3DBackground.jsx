@@ -1,0 +1,158 @@
+import { useMemo } from 'react'
+import { Canvas } from '@react-three/fiber'
+import { Stars, Html, Float } from '@react-three/drei'
+import { useFrame } from '@react-three/fiber'
+import { useState, useEffect } from 'react'
+
+// Floating particles in the background
+function Particles({ count = 200, spread = 50, speed = 0.05 }) {
+  const positions = useMemo(() => {
+    const arr = new Float32Array(count * 3)
+    for (let i = 0; i < count * 3; i += 3) {
+      arr[i] = (Math.random() - 0.5) * spread
+      arr[i + 1] = (Math.random() - 0.5) * spread
+      arr[i + 2] = (Math.random() - 0.5) * spread
+    }
+    return arr
+  }, [count, spread])
+
+  const [offset, setOffset] = useState(0)
+  useFrame(() => setOffset(o => o + speed * 0.01))
+
+  return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" array={positions} itemSize={3} />
+      </bufferGeometry>
+      <pointsMaterial
+        size={0.3}
+        transparent
+        opacity={0.6}
+        color="#6366f1"
+        sizeAttenuation
+        depthWrite={false}
+      />
+    </points>
+  )
+}
+
+// Aurora-like gradient planes
+function AuroraPlanes() {
+  const colors = ['#6366f1', '#06b6d4', '#10b981', '#818cf8', '#22d3ee']
+  
+  return (
+    <group>
+      {colors.map((color, i) => (
+        <mesh key={i} position={[0, 0, -15 - i * 5]} rotation={[-Math.PI / 2, 0, 0]} scale={40 + i * 10}>
+          <planeGeometry args={[1, 1, 64, 64]} />
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.03}
+            side={2}
+            depthWrite={false}
+          />
+        </mesh>
+      ))}
+    </group>
+  )
+}
+
+// Floating geometric shapes
+function FloatingShapes() {
+  const shapes = useMemo(() => 
+    Array.from({ length: 12 }, (_, i) => ({
+      id: i,
+      x: (Math.random() - 0.5) * 80,
+      y: (Math.random() - 0.5) * 80,
+      z: (Math.random() - 0.5) * 80,
+      rotSpeed: Math.random() * 0.002 + 0.001,
+      scale: Math.random() * 0.5 + 0.5,
+      type: Math.floor(Math.random() * 3), // 0: box, 1: sphere, 2: torus
+    }))
+  , [])
+
+  return (
+    <group>
+      {shapes.map(({ id, x, y, z, rotSpeed, scale, type }) => (
+        <Float key={id} rotationIntensity={0.5} floatIntensity={2} position={[x, y, z]}>
+          <mesh rotation={[0, rotSpeed * performance.now() * 0.001, 0]} scale={scale}>
+            {type === 0 && <boxGeometry args={[1, 1, 1]} />}
+            {type === 1 && <sphereGeometry args={[0.8, 16, 16]} />}
+            {type === 2 && <torusGeometry args={[0.6, 0.2, 16, 32]} />}
+            <meshPhysicalMaterial
+              color={['#6366f1', '#06b6d4', '#10b981'][id % 3]}
+              transparent
+              opacity={0.15}
+              transmission={0.3}
+              roughness={0.1}
+              metalness={0.2}
+              clearcoat={1}
+              clearcoatRoughness={0.1}
+            />
+          </mesh>
+        </Float>
+      ))}
+    </group>
+  )
+}
+
+function Vignette() {
+  return null
+}
+
+export function Scene3DBackground({ className = '', style = {} }) {
+  const prefersReducedMotion = typeof window !== 'undefined' && 
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  if (prefersReducedMotion) {
+    return (
+      <div className={className} style={{ ...style, width: '100%', height: '100%' }}>
+        <Vignette />
+      </div>
+    )
+  }
+
+  return (
+    <div className={className} style={{ ...style, width: '100%', height: '100%' }}>
+      <Canvas
+        camera={{ position: [0, 0, 30], fov: 60 }}
+        style={{ width: '100%', height: '100%', display: 'block' }}
+        gl={{ antialias: true, alpha: true, preserveDrawingBuffer: false }}
+      >
+        <color attach="background" args={['#0b0f1a']} />
+        <fog attach="fog" args={['#0b0f1a', 10, 100]} />
+        
+        {/* Stars from drei */}
+        <Stars 
+          radius={100} 
+          depth={100} 
+          count={2000} 
+          saturation={0.2} 
+          factor={4} 
+          size={0.5}
+          color="#6366f1"
+        />
+        
+        {/* Custom particles */}
+        <Particles count={300} spread={80} speed={0.02} />
+        
+        {/* Aurora gradient planes */}
+        <AuroraPlanes />
+        
+        {/* Floating geometric shapes */}
+        <FloatingShapes />
+        
+        {/* Subtle ambient light */}
+        <ambientLight intensity={0.3} color="#6366f1" />
+        <directionalLight position={[10, 10, 5]} intensity={0.5} color="#6366f1" />
+        <pointLight position={[-10, -10, 10]} intensity={0.3} color="#06b6d4" />
+        
+        {/* Vignette overlay */}
+        <Vignette />
+      </Canvas>
+    </div>
+  )
+}
+
+export default Scene3DBackground

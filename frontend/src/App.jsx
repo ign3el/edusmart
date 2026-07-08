@@ -13,6 +13,7 @@ import FileUpload from './components/FileUpload'
 import FileConfirmation from './components/FileConfirmation'
 import AvatarSelector from './components/AvatarSelector'
 import StoryPlayer from './components/StoryPlayer'
+import Scene3DBackground from './components/3d/Scene3DBackground'
 import SaveStoryModal from './components/SaveStoryModal'
 import LoadStory from './components/LoadStory'
 import OfflineManager from './components/OfflineManager'
@@ -23,6 +24,7 @@ import DuplicateStoryModal from './components/DuplicateStoryModal'
 import TeacherCard from './components/TeacherCard'
 import NavigationMenu from './components/NavigationMenu'
 import StoryActionsBar from './components/StoryActionsBar'
+import ErrorBoundary from './components/ErrorBoundary'
 const AdminPanel = lazy(() => import('./components/AdminPanel'));
 import './App.css'
 
@@ -488,6 +490,7 @@ function MainApp() {
   }
 
   return (
+    <ErrorBoundary>
     <div className="app">
       <header className="app-header">
         <div className="app-header-content">
@@ -513,6 +516,11 @@ function MainApp() {
       </header>
 
       <main className="app-main">
+        {step !== 'playing' && (
+          <ErrorBoundary fallback={<div className="bg-fallback" />}>
+            <Scene3DBackground className="global-3d-background" />
+          </ErrorBoundary>
+        )}
         <div className="content-shell">
           {error && (
             <div className="error-message">
@@ -534,42 +542,43 @@ function MainApp() {
             )}
 
             {step === 'home' && (
-              <motion.div key="home" className="home-container">
-                <div className="home-topline">
-                  <h2>Choose how you want to begin</h2>
-                  <span className="pill">Smart, fast, and offline-ready</span>
-                </div>
-                <div className="home-buttons">
-                  <motion.button 
-                    className="home-btn create-btn"
-                    onClick={() => navigateTo('upload')}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    <div className="emoji">✨</div>
-                    <strong>Create New Story</strong>
-                    <span>Upload a lesson file and let AI turn it into a story</span>
-                  </motion.button>
-                  <motion.button 
-                    className="home-btn load-btn"
-                    onClick={() => navigateTo('load')}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    <div className="emoji">📚</div>
-                    <strong>Load Online Story</strong>
-                    <span>Pull down a saved adventure from the cloud</span>
-                  </motion.button>
-                  <motion.button 
-                    className="home-btn offline-btn"
-                    onClick={() => navigateTo('offline')}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    <div className="emoji">📱</div>
-                    <strong>Offline Manager</strong>
-                    <span>Manage locally stored stories without an internet connection</span>
-                  </motion.button>
+              <motion.div key="home" className="home-wrapper">
+                <div className="home-content-overlay">
+                  <div className="home-pill">✨ AI-Powered Storymaker</div>
+                  <h1 className="home-title">Turn Lessons into Adventures</h1>
+                  <p className="home-subtitle">Upload a PDF, choose your grade level, and let AI create an immersive story with custom images and voiceovers.</p>
+                  <div className="home-buttons">
+                    <motion.button 
+                      className="home-btn"
+                      onClick={() => navigateTo('upload')}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <div className="emoji">✨</div>
+                      <strong>Create New Story</strong>
+                      <span>Upload a lesson file and let AI turn it into a story</span>
+                    </motion.button>
+                    <motion.button 
+                      className="home-btn"
+                      onClick={() => navigateTo('load')}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <div className="emoji">📚</div>
+                      <strong>Load Online Story</strong>
+                      <span>Pull down a saved adventure from the cloud</span>
+                    </motion.button>
+                    <motion.button 
+                      className="home-btn"
+                      onClick={() => navigateTo('offline')}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <div className="emoji">📱</div>
+                      <strong>Offline Manager</strong>
+                      <span>Manage locally stored stories without an internet connection</span>
+                    </motion.button>
+                  </div>
                 </div>
               </motion.div>
             )}
@@ -636,9 +645,8 @@ function MainApp() {
 
           {step === 'generating' && (
             <motion.div key="generating" className="generating-container">
-              <div className="loading-spinner"></div>
+              <div className="loading-spinner" />
               <h2>Creating Your Story...</h2>
-              
               <div className="progress-container">
                 <div className="progress-bar-bg">
                   <motion.div 
@@ -655,7 +663,6 @@ function MainApp() {
                   </p>
                 )}
               </div>
-              
               <p className="small-text">Generating custom images and voiceovers...</p>
             </motion.div>
           )}
@@ -861,6 +868,7 @@ function MainApp() {
         </div>
       </main>
     </div>
+    </ErrorBoundary>
   )
 }
 
