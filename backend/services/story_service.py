@@ -774,7 +774,13 @@ Output ONLY the JSON object."""
         images = {}
         for i, result in enumerate(results):
             if result and not isinstance(result, Exception):
-                images[i] = result
+                # Unpack tuple: bounded_generate returns (scene_num, img_bytes)
+                if isinstance(result, tuple):
+                    scene_num, img_bytes = result
+                    if img_bytes:
+                        images[scene_num] = img_bytes
+                else:
+                    images[i] = result
             else:
                 error_msg = str(result) if isinstance(result, Exception) else "Unknown error"
                 print(f"⚠️  Image generation failed for scene {i}: {error_msg[:100]}")
