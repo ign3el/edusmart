@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FiPlay, FiPause, FiSkipForward, FiSkipBack, FiRotateCw, FiLoader } from 'react-icons/fi';
+import apiClient from '../services/api';
 import './StoryPlayer.css';
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 /**
  * Progressive Story Player
@@ -25,10 +24,8 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
     
     const fetchStatus = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/story/${storyId}/status`);
-        if (!response.ok) return;
-        
-        const data = await response.json();
+        const response = await apiClient.get(`/api/story/${storyId}/status`);
+        const data = response.data;
         setStoryStatus(data.status);
         setScenes(data.scenes || []);
         
@@ -75,7 +72,7 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
       if (isSceneReady) {
-        audioRef.current.src = `${API_URL}${scene.audio_url}`;
+        audioRef.current.src = `${apiClient.defaults.baseURL}${scene.audio_url}`;
         audioRef.current.load();
       }
     }
@@ -125,7 +122,7 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
           ) : (
             <motion.img
               key={currentScene}
-              src={`${API_URL}${scene.image_url}`}
+              src={`${apiClient.defaults.baseURL}${scene.image_url}`}
               alt={`Scene ${currentScene + 1}`}
               className="scene-image"
               initial={{ opacity: 0 }}

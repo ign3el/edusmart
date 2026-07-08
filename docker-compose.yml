@@ -27,6 +27,8 @@ services:
       # TTS Configuration
       - CHATTERBOX_URL=http://kokoro-tts:8880
       - KOKORO_URL=http://kokoro-tts:8880
+      - TTS_API_KEY=${TTS_API_KEY:-}
+      - TTS_API_URL=${TTS_API_URL:-https://tts.ign3el.com/v1/audio/speech}
       - PIPER_URL=http://piper-tts:5000
       # Database Configuration
       - MYSQL_HOST=${MYSQL_HOST:-10.0.0.147}
