@@ -49,7 +49,7 @@ class Config:
             },
             "caching": {
                 "enabled": cls.USE_CACHE,
-                "redis_url": cls.REDIS_URL,
+                "redis_url": cls.REDIS_URL.split('@')[-1] if '@' in cls.REDIS_URL else cls.REDIS_URL,
                 "ttl_seconds": cls.CACHE_TTL
             }
         }

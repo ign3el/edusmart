@@ -30,7 +30,7 @@ from services.tts_service import kokoro_tts
 from services.hash_service import hash_service
 from job_state import job_manager
 from story_storage import storage_manager, cleanup_scheduler_task, database_cleanup_scheduler_task
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
 # Type checking imports for Pylance
 if TYPE_CHECKING:
@@ -112,7 +112,6 @@ app.include_router(upload_router)
 # --- Non-Auth related application logic ---
 
 # Type annotation for gemini service to help Pylance
-from typing import Dict, Any, List, TYPE_CHECKING
 
 # Explicitly declare the methods Pylance should recognize
 # This helps with static analysis while maintaining runtime functionality
@@ -158,6 +157,10 @@ async def serve_story_file(story_id: str, filename: str):
     import os
     from pathlib import Path
     from fastapi.responses import FileResponse
+    
+    # Validate story_id format (UUID v4)
+    if not re.match(r"^[a-f0-9\-]{36}$", story_id):
+        raise HTTPException(status_code=400, detail="Invalid story ID format")
     
     logger.info(f"📁 File request: story_id={story_id}, filename={filename}")
     
@@ -277,6 +280,10 @@ async def serve_generated_story_file(story_id: str, filename: str):
     import os
     from pathlib import Path
     from fastapi.responses import FileResponse
+    
+    # Validate story_id format (UUID v4)
+    if not re.match(r"^[a-f0-9\-]{36}$", story_id):
+        raise HTTPException(status_code=400, detail="Invalid story ID format")
     
     logger.info(f"📁 Generated story file request: story_id={story_id}, filename={filename}")
     
@@ -603,8 +610,11 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
             # This prevents RunPod 10s idle timeout if TTS takes longer than Image gen
             if len(scenes) > 1:
                 logger.info("🔗 Chaining background image generation immediately...")
-                asyncio.create_task(
+                _bg_img_task = asyncio.create_task(
                     generate_remaining_images_background(scenes[1:], story_seed, force_mobile)
+                )
+                _bg_img_task.add_done_callback(
+                    lambda t: logger.error(f"Background image generation failed: {t.exception()}") if t.exception() else None
                 )
                 
             return img_0
@@ -949,7 +959,8 @@ async def handle_duplicate_choice(
         
         # Save file to new temp folder
         filename = file.filename or "uploaded_file"
-        temp_file_path = os.path.join(temp_dir, filename)
+        safe_filename = re.sub(r'[^\w\-.]', '+', filename).lstrip('.')
+        temp_file_path = os.path.join(temp_dir, safe_filename)
         with open(temp_file_path, "wb") as f:
             f.write(file_content)
         
@@ -1255,7 +1266,7 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
 
 
 @app.get("/api/story/{story_id}/scene/{scene_index}")
-async def get_scene_status(story_id: str, scene_index: int) -> Dict[str, Any]:
+async def get_scene_status(story_id: str, scene_index: int, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get specific scene data."""
     scene_id = f"{story_id}_scene_{scene_index}"
     scene = job_manager.get_scene(scene_id)
@@ -1642,7 +1653,7 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
 # --- PROGRESSIVE TTS ENDPOINTS ---
 
 @app.get("/api/story/{story_id}/tts-status")
-async def get_tts_status(story_id: str):
+async def get_tts_status(story_id: str, current_user: dict = Depends(get_current_user)):
     """Get specialized progressive TTS generation status"""
     # Use gemini service's status tracking
     return await gemini.get_tts_status(story_id)

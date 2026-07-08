@@ -1,8 +1,10 @@
 import logging
+import time
+from collections import defaultdict
 from typing import Optional
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, validator
 
@@ -37,6 +39,22 @@ def _is_dev_mode():
     Both conditions must be met to bypass authentication. This prevents accidental
     production bypasses when ENV is misconfigured."""
     return os.getenv("ENV") == "development" and bool(os.getenv("DEV_BYPASS_SECRET"))
+
+# --- Rate Limiter ---
+class RateLimiter:
+    def __init__(self):
+        self.attempts = defaultdict(list)  # ip -> [timestamps]
+    
+    def check(self, key: str, max_attempts: int = 5, window_seconds: int = 60) -> bool:
+        """Returns True if allowed, False if rate limited"""
+        now = time.time()
+        self.attempts[key] = [t for t in self.attempts[key] if now - t < window_seconds]
+        if len(self.attempts[key]) >= max_attempts:
+            return False
+        self.attempts[key].append(now)
+        return True
+
+_rate_limiter = RateLimiter()
 
 # Create a new router for auth endpoints
 router = APIRouter(
@@ -161,12 +179,17 @@ def signup(request: SignupRequest):
     return user
 
 @router.post("/token", response_model=TokenResponse)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """
     Handles user login via standard OAuth2 form data.
     Verifies credentials and returns a JWT access token.
     Note: The 'username' field accepts EITHER username OR email.
     """
+    # Rate limiting
+    ip = request.client.host if request else "unknown"
+    if not _rate_limiter.check(ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
+    
     # Development mode: Skip authentication (requires both ENV=development and DEV_BYPASS_SECRET)
     if _is_dev_mode():
         logger.info("✓ Development mode: Skipping authentication")
