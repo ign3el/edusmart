@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { generateTestSpeech } from '../services/api';
 import VoiceSettings from './VoiceSettings';
 import './TtsLab.css';
@@ -15,6 +15,14 @@ const TtsLab = () => {
     // Refs for Web Audio API
     const audioContextRef = useRef(null);
     const sourceNodeRef = useRef(null);
+
+    useEffect(() => {
+      return () => {
+        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+          audioContextRef.current.close();
+        }
+      };
+    }, []);
 
     const handlePlay = async () => {
         if (isPlaying) {
