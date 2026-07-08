@@ -54,6 +54,34 @@ function AuroraPlanes() {
   )
 }
 
+// Individual floating shape with animated rotation
+function FloatingShape({ rotSpeed, scale, type, color }) {
+  const meshRef = useRef()
+  useFrame((state) => {
+    if (meshRef.current) {
+      meshRef.current.rotation.y = state.clock.elapsedTime * rotSpeed
+      meshRef.current.rotation.x = Math.sin(state.clock.elapsedTime * rotSpeed * 0.5) * 0.3
+    }
+  })
+  return (
+    <mesh ref={meshRef} scale={scale}>
+      {type === 0 && <boxGeometry args={[1, 1, 1]} />}
+      {type === 1 && <sphereGeometry args={[0.8, 16, 16]} />}
+      {type === 2 && <torusGeometry args={[0.6, 0.2, 16, 32]} />}
+      <meshPhysicalMaterial
+        color={color}
+        transparent
+        opacity={0.15}
+        transmission={0.3}
+        roughness={0.1}
+        metalness={0.2}
+        clearcoat={1}
+        clearcoatRoughness={0.1}
+      />
+    </mesh>
+  )
+}
+
 // Floating geometric shapes
 function FloatingShapes() {
   const shapes = useMemo(() => 
@@ -62,31 +90,18 @@ function FloatingShapes() {
       x: (Math.random() - 0.5) * 80,
       y: (Math.random() - 0.5) * 80,
       z: (Math.random() - 0.5) * 80,
-      rotSpeed: Math.random() * 0.002 + 0.001,
+      rotSpeed: Math.random() * 2 + 1,
       scale: Math.random() * 0.5 + 0.5,
       type: Math.floor(Math.random() * 3), // 0: box, 1: sphere, 2: torus
+      color: ['#6366f1', '#06b6d4', '#10b981'][i % 3],
     }))
   , [])
 
   return (
     <group>
-      {shapes.map(({ id, x, y, z, rotSpeed, scale, type }) => (
+      {shapes.map(({ id, x, y, z, rotSpeed, scale, type, color }) => (
         <Float key={id} rotationIntensity={0.5} floatIntensity={2} position={[x, y, z]}>
-          <mesh rotation={[0, rotSpeed * performance.now() * 0.001, 0]} scale={scale}>
-            {type === 0 && <boxGeometry args={[1, 1, 1]} />}
-            {type === 1 && <sphereGeometry args={[0.8, 16, 16]} />}
-            {type === 2 && <torusGeometry args={[0.6, 0.2, 16, 32]} />}
-            <meshPhysicalMaterial
-              color={['#6366f1', '#06b6d4', '#10b981'][id % 3]}
-              transparent
-              opacity={0.15}
-              transmission={0.3}
-              roughness={0.1}
-              metalness={0.2}
-              clearcoat={1}
-              clearcoatRoughness={0.1}
-            />
-          </mesh>
+          <FloatingShape rotSpeed={rotSpeed} scale={scale} type={type} color={color} />
         </Float>
       ))}
     </group>

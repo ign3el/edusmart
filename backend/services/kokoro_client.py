@@ -19,9 +19,9 @@ def generate_tts(text: str, voice: str = "af_sarah", speed: float = 1.0) -> byte
     Raises:
         Exception: If the TTS service fails or returns an error.
     """
-    # Secure Endpoint Configuration
-    endpoint = "https://tts.ign3el.com/v1/audio/speech"
-    api_key = "TTS_AHTE_2026!"
+    from config import Config
+    endpoint = Config.TTS_API_URL
+    api_key = Config.TTS_API_KEY
     
     payload = {
         "model": "kokoro",

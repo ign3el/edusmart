@@ -51,9 +51,10 @@ def test_tts(request: TtsTestRequest):
     """
     try:
         if request.voice == "ar_teacher":
+            from config import Config
             # Route to Piper TTS (Secure External Endpoint) for Arabic
-            piper_url = "https://tts.ign3el.com/tts"
-            headers = {"TTS_API_KEY": "TTS_AHTE_2026!"}
+            piper_url = Config.TTS_API_URL.rsplit("/v1", 1)[0] + "/tts"
+            headers = {"TTS_API_KEY": Config.TTS_API_KEY}
             # Piper typically accepts GET requests with text param
             resp = requests.get(piper_url, params={"text": request.text}, headers=headers, timeout=10)
             
