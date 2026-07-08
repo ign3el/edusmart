@@ -275,7 +275,9 @@ function MainApp() {
             // Start polling for job status
             const pollTimer = setInterval(async () => {
               try {
-                const statusRes = await fetch(`${API_URL}/api/status/${jobId}`)
+                const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
+                  headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+                })
                 if (!statusRes.ok) throw new Error('Could not fetch status')
                 const job = await statusRes.json()
                 if (job.status === 'processing') {
@@ -415,7 +417,9 @@ function MainApp() {
       // Polling Loop
       const pollTimer = setInterval(async () => {
         try {
-          const statusRes = await fetch(`/api/status/${job_id}`)
+          const statusRes = await fetch(`${API_URL}/api/status/${job_id}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+          })
           if (!statusRes.ok) throw new Error("Could not fetch status")
           
           const job = await statusRes.json()
