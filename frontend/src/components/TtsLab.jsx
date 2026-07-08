@@ -15,6 +15,7 @@ const TtsLab = () => {
     // Refs for Web Audio API
     const audioContextRef = useRef(null);
     const sourceNodeRef = useRef(null);
+    const generationRef = useRef(0);
 
     useEffect(() => {
       return () => {
@@ -34,6 +35,9 @@ const TtsLab = () => {
         setError('');
         
         try {
+            generationRef.current++;
+            const currentGen = generationRef.current;
+
             // Initialize AudioContext on user interaction
             if (!audioContextRef.current) {
                 audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -49,8 +53,10 @@ const TtsLab = () => {
             source.start(0);
 
             source.onended = () => {
-                setIsPlaying(false);
-                sourceNodeRef.current = null;
+                if (generationRef.current === currentGen) {
+                    setIsPlaying(false);
+                    sourceNodeRef.current = null;
+                }
             };
 
             sourceNodeRef.current = source;

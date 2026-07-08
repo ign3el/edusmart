@@ -36,6 +36,7 @@ const StoryPlayer = forwardRef(({
   const userPausedRef = useRef(false)
   const savedTimeRef = useRef(0)
   const audioRef = useRef(null)
+  const lastUpdateRef = useRef(0)
 
   const scenes = storyData?.scenes || []
   const actualTotal = totalScenes > 0 ? totalScenes : scenes.length
@@ -143,6 +144,9 @@ const StoryPlayer = forwardRef(({
   }
 
   const handleTimeUpdate = () => {
+    const now = performance.now()
+    if (now - lastUpdateRef.current < 250) return
+    lastUpdateRef.current = now
     const a = audioRef.current
     if (a?.duration) {
       setProgress((a.currentTime / a.duration) * 100)
@@ -203,7 +207,7 @@ const StoryPlayer = forwardRef(({
       <div className="player-bg" />
 
       {/* Audio element */}
-      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} preload="metadata" crossOrigin="anonymous" />
+      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} preload="metadata" />
 
       {/* Floating messages */}
       {downloadMessage && (
@@ -221,7 +225,7 @@ const StoryPlayer = forwardRef(({
       <AnimatePresence>
         {(audioError || imageError) && (
           <motion.div className="player-error" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
-            {audioError && <span>🔊 Audio unavailable <button className="err-btn" onClick={() => { setAudioError(false); setSavedTimeRef({ current: 0 }) }}>Retry</button></span>}
+            {audioError && <span>🔊 Audio unavailable <button className="err-btn" onClick={() => { setAudioError(false); savedTimeRef.current = 0 }}>Retry</button></span>}
             {imageError && <span>🖼️ Image failed to load</span>}
           </motion.div>
         )}

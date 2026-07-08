@@ -75,9 +75,26 @@ function MainApp() {
   const [uploadFileName, setUploadFileName] = useState('')
   const [showUploadProgress, setShowUploadProgress] = useState(false)
   const fileInputRef = useRef(null)
+  const pollTimerRef = useRef(null)
+  const storyDataRef = useRef(null)
+  const stepRef = useRef(step)
   const [showUpdateNotification, setShowUpdateNotification] = useState(false)
 
   // Initialize version tracking and check for updates
+  useEffect(() => {
+    storyDataRef.current = storyData
+  }, [storyData])
+
+  useEffect(() => {
+    stepRef.current = step
+  }, [step])
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+    }
+  }, [])
+
   useEffect(() => {
     updateService.initializeVersion();
     
@@ -273,7 +290,7 @@ function MainApp() {
             setCurrentJobId(jobId)
             navigateTo('generating')
             // Start polling for job status
-            const pollTimer = setInterval(async () => {
+            pollTimerRef.current = setInterval(async () => {
               try {
                 const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
                   headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
@@ -287,7 +304,7 @@ function MainApp() {
                     setCompletedSceneCount(job.completed_scene_count || 0)
                   }
                   if (job.result && job.result.scenes && job.result.scenes.length > 0) {
-                    if (!storyData || storyData.scenes.length === 0) {
+                    if (!storyDataRef.current || storyDataRef.current.scenes.length === 0) {
                       setStoryData(job.result)
                       navigateTo('playing')
                     } else {
@@ -302,15 +319,15 @@ function MainApp() {
                     setTotalScenes(job.total_scenes)
                     setCompletedSceneCount(job.total_scenes)
                   }
-                  if (step !== 'playing') {
+                  if (stepRef.current !== 'playing') {
                     navigateTo('playing')
                   }
                 } else if (job.status === 'failed') {
-                  clearInterval(pollTimer)
+                  clearInterval(pollTimerRef.current)
                   throw new Error(job.error || 'AI Generation failed.')
                 }
               } catch (err) {
-                clearInterval(pollTimer)
+                clearInterval(pollTimerRef.current)
                 setError('Connection lost: ' + err.message)
                 navigateTo('upload')
               }
@@ -415,7 +432,7 @@ function MainApp() {
       setCurrentJobId(job_id)
 
       // Polling Loop
-      const pollTimer = setInterval(async () => {
+      pollTimerRef.current = setInterval(async () => {
         try {
           const statusRes = await fetch(`${API_URL}/api/status/${job_id}`, {
             headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
@@ -435,7 +452,7 @@ function MainApp() {
             
             // Show story immediately when first scene is ready
             if (job.result && job.result.scenes && job.result.scenes.length > 0) {
-              if (!storyData || storyData.scenes.length === 0) {
+              if (!storyDataRef.current || storyDataRef.current.scenes.length === 0) {
                 // First scene is ready - show it immediately
                 setStoryData(job.result)
                 navigateTo('playing')
@@ -446,7 +463,7 @@ function MainApp() {
               }
             }
           } else if (job.status === 'completed') {
-            clearInterval(pollTimer)
+            clearInterval(pollTimerRef.current)
             setStoryData(job.result)
             setProgress(100)
             if (job.total_scenes > 0) {
@@ -454,15 +471,15 @@ function MainApp() {
               setCompletedSceneCount(job.total_scenes)
             }
             // Only navigate if not already playing
-            if (step !== 'playing') {
+            if (stepRef.current !== 'playing') {
               navigateTo('playing')
             }
           } else if (job.status === 'failed') {
-            clearInterval(pollTimer)
+            clearInterval(pollTimerRef.current)
             throw new Error(job.error || "AI Generation failed.")
           }
         } catch (err) {
-          clearInterval(pollTimer)
+          clearInterval(pollTimerRef.current)
           setError("Connection lost: " + err.message)
           navigateTo('upload')
         }
@@ -476,9 +493,16 @@ function MainApp() {
 
   const handleRestart = async () => {
     // Cleanup unsaved story
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
     if (currentJobId && !isSaved) {
       try {
-        await fetch(`/api/cleanup/${currentJobId}`, { method: 'DELETE' })
+        await fetch(`${API_URL}/api/delete-story/${currentJobId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+        })
       } catch (error) {
         if (DEBUG) console.error('Cleanup failed:', error)
       }

@@ -108,9 +108,7 @@ function FloatingShapes() {
   )
 }
 
-function Vignette() {
-  return null
-}
+
 
 export function Scene3DBackground({ className = '', style = {} }) {
   const prefersReducedMotion = typeof window !== 'undefined' && 
@@ -119,7 +117,6 @@ export function Scene3DBackground({ className = '', style = {} }) {
   if (prefersReducedMotion) {
     return (
       <div className={className} style={{ ...style, width: '100%', height: '100%' }}>
-        <Vignette />
       </div>
     )
   }
@@ -159,8 +156,7 @@ export function Scene3DBackground({ className = '', style = {} }) {
         <directionalLight position={[10, 10, 5]} intensity={0.5} color="#6366f1" />
         <pointLight position={[-10, -10, 10]} intensity={0.3} color="#06b6d4" />
         
-        {/* Vignette overlay */}
-        <Vignette />
+
       </Canvas>
     </div>
   )
