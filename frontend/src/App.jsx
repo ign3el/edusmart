@@ -13,7 +13,7 @@ import FileUpload from './components/FileUpload'
 import FileConfirmation from './components/FileConfirmation'
 import AvatarSelector from './components/AvatarSelector'
 import StoryPlayer from './components/StoryPlayer'
-import Scene3DBackground from './components/3d/Scene3DBackground'
+const Scene3DBackground = lazy(() => import('./components/3d/Scene3DBackground'));
 import SaveStoryModal from './components/SaveStoryModal'
 import LoadStory from './components/LoadStory'
 import OfflineManager from './components/OfflineManager'
@@ -519,7 +519,9 @@ function MainApp() {
       <main className="app-main">
         {step !== 'playing' && (
           <ErrorBoundary fallback={<div className="bg-fallback" />}>
-            <Scene3DBackground className="global-3d-background" />
+            <Suspense fallback={null}>
+              <Scene3DBackground className="global-3d-background" />
+            </Suspense>
           </ErrorBoundary>
         )}
         <div className="content-shell">
