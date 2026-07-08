@@ -320,13 +320,13 @@ const StoryPlayer = forwardRef(({
 
         {/* Controls */}
         <div className="controls">
-          <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={currentScene === 0}>
+          <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={currentScene === 0} aria-label="Previous scene">
             <FiSkipBack size={22} />
           </button>
-          <button className={`ctrl-btn play-btn ${isPlaying ? 'is-playing' : ''}`} onClick={togglePlay}>
+          <button className={`ctrl-btn play-btn ${isPlaying ? 'is-playing' : ''}`} onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play story'}>
             {isPlaying ? <FiPause size={26} /> : <FiPlay size={26} />}
           </button>
-          <button className="ctrl-btn" onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))} disabled={currentScene >= scenes.length - 1}>
+          <button className="ctrl-btn" onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))} disabled={currentScene >= scenes.length - 1} aria-label="Next scene">
             <FiSkipForward size={22} />
           </button>
         </div>

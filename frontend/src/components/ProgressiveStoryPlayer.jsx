@@ -155,7 +155,7 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
         
         {/* Controls */}
         <div className="player-controls">
-          <button onClick={handlePrev} disabled={currentScene === 0}>
+          <button onClick={handlePrev} disabled={currentScene === 0} aria-label="Previous scene">
             <FiSkipBack />
           </button>
           
@@ -163,11 +163,12 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
             onClick={() => setIsPlaying(!isPlaying)} 
             disabled={!isSceneReady}
             className="play-btn"
+            aria-label={isPlaying ? 'Pause' : 'Play story'}
           >
             {isPlaying ? <FiPause /> : <FiPlay />}
           </button>
           
-          <button onClick={handleNext} disabled={currentScene === scenes.length - 1}>
+          <button onClick={handleNext} disabled={currentScene === scenes.length - 1} aria-label="Next scene">
             <FiSkipForward />
           </button>
         </div>
@@ -179,11 +180,11 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
         
         {/* Action buttons */}
         <div className="action-buttons">
-          <button onClick={onRestart}>
+          <button onClick={onRestart} aria-label="New story">
             <FiRotateCw /> New Story
           </button>
           {!isSaved && storyStatus === 'completed' && (
-            <button onClick={onSave} className="save-btn">
+            <button onClick={onSave} className="save-btn" aria-label="Save story">
               Save Story
             </button>
           )}
