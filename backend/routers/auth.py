@@ -32,6 +32,12 @@ def get_dev_user():
     """Return mock user for development mode."""
     return DEV_USER.copy()
 
+def _is_dev_mode():
+    """Check if development mode is enabled with both ENV=development AND DEV_BYPASS_SECRET set.
+    Both conditions must be met to bypass authentication. This prevents accidental
+    production bypasses when ENV is misconfigured."""
+    return os.getenv("ENV") == "development" and bool(os.getenv("DEV_BYPASS_SECRET"))
+
 # Create a new router for auth endpoints
 router = APIRouter(
     prefix="/api/auth",
@@ -91,7 +97,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     Raises 401 Unauthorized if the token is invalid, expired, or user not found.
     """
     # Development mode: Return mock user
-    if os.getenv("ENV") == "development":
+    if _is_dev_mode():
         return get_dev_user()
     
     email = verify_token(token)
@@ -161,8 +167,8 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     Verifies credentials and returns a JWT access token.
     Note: The 'username' field accepts EITHER username OR email.
     """
-    # Development mode: Skip authentication
-    if os.getenv("ENV") == "development":
+    # Development mode: Skip authentication (requires both ENV=development and DEV_BYPASS_SECRET)
+    if _is_dev_mode():
         logger.info("✓ Development mode: Skipping authentication")
         access_token = create_access_token(data={"sub": DEV_USER['email']})
         return {"access_token": access_token, "token_type": "bearer"}
