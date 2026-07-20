@@ -1,13 +1,18 @@
 import logging
 import io
 import httpx
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from config import Config
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langdetect import detect, LangDetectException
 from pypdf import PdfReader
 import docx
+
+from .auth import get_current_user
+from database_models import User
+
+TTS_PREVIEW_MAX_CHARS = 1000
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -26,19 +31,28 @@ class TextExtractionResponse(BaseModel):
     suggested_engine: str
 
 class TTSPreviewRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=TTS_PREVIEW_MAX_CHARS)
     voice: str
     speed: float = 1.0
 
 @router.post("/extract-text", response_model=TextExtractionResponse)
-async def extract_text_from_file(file: UploadFile = File(...)):
+async def extract_text_from_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
     """
     Uploads a file, extracts text, detects language, and suggests a TTS engine.
     Supports .txt, .pdf, and .docx files.
+    Requires authentication and enforces MAX_UPLOAD_SIZE to prevent abuse.
     """
     try:
         # Read file content
         content = await file.read()
+        if len(content) > Config.MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {Config.MAX_UPLOAD_SIZE // (1024 * 1024)}MB."
+            )
         filename = file.filename.lower() if file.filename else ""
         text = ""
         
@@ -93,10 +107,14 @@ async def extract_text_from_file(file: UploadFile = File(...)):
 
 
 @router.post("/tts-preview")
-async def tts_preview(request: TTSPreviewRequest):
+async def tts_preview(
+    request: TTSPreviewRequest,
+    current_user: User = Depends(get_current_user)
+):
     """
     Proxy endpoint for TTS preview to avoid CORS issues.
     Routes to appropriate TTS service based on voice.
+    Requires authentication; text length capped to prevent API cost abuse.
     """
     try:
         # Determine endpoint based on voice
@@ -107,8 +125,31 @@ async def tts_preview(request: TTSPreviewRequest):
                 "text": request.text,
                 "speaker_id": request.voice
             }
+            outgoing_headers = {
+                'Content-Type': 'application/json',
+                'TTS_API_KEY': TTS_API_KEY
+            }
         else:
-            # English - use Kokoro endpoint
+            # English and others - prefer local Kokoro first to avoid external auth/cors issues
+            try:
+                from services.kokoro_client import generate_tts
+                audio_bytes = generate_tts(
+                    text=request.text,
+                    voice=request.voice,
+                    speed=float(request.speed or 1.0)
+                )
+                if audio_bytes:
+                    return Response(
+                        content=audio_bytes,
+                        media_type="audio/mpeg",
+                        headers={
+                            "Content-Disposition": "inline; filename=preview.mp3"
+                        }
+                    )
+            except Exception as local_exc:
+                logger.warning(f"Local Kokoro TTS preview failed: {local_exc}")
+
+            # Fallback to hosted OpenAI-compatible endpoint
             endpoint = f"{TTS_API_URL}/v1/audio/speech"
             payload = {
                 "model": "kokoro",
@@ -117,22 +158,23 @@ async def tts_preview(request: TTSPreviewRequest):
                 "response_format": "mp3",
                 "speed": request.speed
             }
+            outgoing_headers = {
+                'Content-Type': 'application/json',
+                'TTS_API_KEY': TTS_API_KEY
+            }
 
-        # Make request to TTS API
+        # Make request to external TTS API
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 endpoint,
                 json=payload,
-                headers={
-                    'Content-Type': 'application/json',
-                    'TTS_API_KEY': TTS_API_KEY
-                }
+                headers=outgoing_headers
             )
-            
+
             if response.status_code != 200:
                 logger.error(f"TTS API error: {response.status_code} - {response.text}")
                 raise HTTPException(status_code=response.status_code, detail="TTS service error")
-            
+
             # Return audio response
             return Response(
                 content=response.content,
@@ -145,6 +187,8 @@ async def tts_preview(request: TTSPreviewRequest):
     except httpx.TimeoutException:
         logger.error("TTS API timeout")
         raise HTTPException(status_code=504, detail="TTS service timeout")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in TTS preview: {e}")
         raise HTTPException(status_code=500, detail=str(e))

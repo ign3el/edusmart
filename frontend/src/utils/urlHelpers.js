@@ -1,3 +1,18 @@
+// Story media (/api/saved-stories/, /api/generated-stories/) requires auth +
+// ownership on the backend. <img>/<audio> tags can't send an Authorization
+// header, so the token is passed as a query param instead - this appends it.
+const withAuthToken = (url) => {
+  if (!/^\/api\/(saved|generated)-stories\//.test(url)) {
+    return url
+  }
+  const token = localStorage.getItem('auth_token')
+  if (!token) {
+    return url
+  }
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}token=${encodeURIComponent(token)}`
+}
+
 // Helper function to build full URL, handling absolute URLs, data URLs, and API paths
 export const buildFullUrl = (url) => {
   if (!url) {
@@ -12,12 +27,12 @@ export const buildFullUrl = (url) => {
   // Check if it's an API path (starts with /api/)
   if (url.startsWith('/api/')) {
     // Use the current window's origin to build the full URL
-    return `${window.location.origin}${url}`
+    return `${window.location.origin}${withAuthToken(url)}`
   }
 
   // For other relative paths, prepend the API domain from environment or current origin
   const apiDomain = import.meta.env.VITE_API_URL || window.location.origin
-  return `${apiDomain}${url}`
+  return `${apiDomain}${withAuthToken(url)}`
 }
 
 export const debounce = (fn, delay) => {

@@ -1,7 +1,7 @@
 // Service Worker for EduSmart Stories
 // Implements App Shell architecture with offline-first strategy
 
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'build-20260720105849';
 const APP_SHELL_CACHE = `edusmart-shell-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `edusmart-runtime-${CACHE_VERSION}`;
 
@@ -70,15 +70,43 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Strategy 1: Cache-First for App Shell (HTML, CSS, JS)
+  // Strategy 1a: Network-First for the HTML shell. The shell references
+  // hashed JS/CSS filenames that change every build, so it must never be
+  // served stale - cache-first here was the bug that kept users frozen on
+  // old bundles forever (nginx already sends no-cache for these, but that's
+  // irrelevant to the Cache Storage API, which this fetch handler consults
+  // instead of the network entirely under cache-first).
   if (
     request.destination === 'document' ||
+    url.pathname === '/' ||
+    url.pathname.endsWith('.html')
+  ) {
+    event.respondWith(
+      fetch(request).then((response) => {
+        if (response.status === 200) {
+          const responseToCache = response.clone();
+          caches.open(APP_SHELL_CACHE).then((cache) => {
+            cache.put(request, responseToCache);
+          });
+        }
+        return response;
+      }).catch(() => {
+        // Offline - fall back to whatever shell we last had cached.
+        return caches.match(request).then((cached) => cached || caches.match('/index.html'));
+      })
+    );
+    return;
+  }
+
+  // Strategy 1b: Cache-First for hashed JS/CSS chunks. Safe because Vite
+  // gives every build's assets a new content-hashed filename - an old
+  // cached chunk simply becomes unreferenced (and gets swept on the next
+  // CACHE_VERSION bump) rather than ever being served in place of a new one.
+  if (
     request.destination === 'script' ||
     request.destination === 'style' ||
     url.pathname.endsWith('.css') ||
-    url.pathname.endsWith('.js') ||
-    url.pathname === '/' ||
-    url.pathname.endsWith('.html')
+    url.pathname.endsWith('.js')
   ) {
     event.respondWith(
       caches.match(request).then((cachedResponse) => {
@@ -86,10 +114,7 @@ self.addEventListener('fetch', (event) => {
           console.log('[Service Worker] Serving from cache:', request.url);
           return cachedResponse;
         }
-        
-        // Not in cache, fetch from network and cache it
         return fetch(request).then((response) => {
-          // Only cache successful responses
           if (response.status === 200) {
             const responseToCache = response.clone();
             caches.open(APP_SHELL_CACHE).then((cache) => {
@@ -97,9 +122,6 @@ self.addEventListener('fetch', (event) => {
             });
           }
           return response;
-        }).catch(() => {
-          // If offline and not in cache, return offline page
-          return caches.match('/index.html');
         });
       })
     );

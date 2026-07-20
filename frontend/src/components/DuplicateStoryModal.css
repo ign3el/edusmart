@@ -144,7 +144,9 @@
 }
 
 .duplicate-icon {
-  font-size: 3rem;
+  display: flex;
+  justify-content: center;
+  color: var(--text-accent-1);
   margin-bottom: 1rem;
   animation: pulse 2s ease-in-out infinite;
 }
@@ -304,7 +306,8 @@
 }
 
 .button-icon {
-  font-size: 2rem;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
 

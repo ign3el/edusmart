@@ -22,6 +22,9 @@
 }
 
 .back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0.75rem 1.25rem;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--edge);
@@ -154,6 +157,10 @@
 .edit-button,
 .save-button,
 .cancel-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
   padding: 0.9rem 1.25rem;
   border-radius: 12px;
   font-weight: 700;
@@ -207,6 +214,10 @@
 }
 
 .change-password-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   width: 100%;
   padding: 1rem 1.5rem;
   background: linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(109, 228, 255, 0.2));
@@ -299,6 +310,10 @@
 }
 
 .logout-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   width: 100%;
   padding: 1rem 1.5rem;
   background: rgba(255, 59, 48, 0.1);

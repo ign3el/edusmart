@@ -20,8 +20,7 @@ def generate_tts(text: str, voice: str = "af_sarah", speed: float = 1.0) -> byte
         Exception: If the TTS service fails or returns an error.
     """
     from config import Config
-    endpoint = Config.TTS_API_URL
-    api_key = Config.TTS_API_KEY
+    endpoint = f"{Config.KOKORO_URL}/v1/audio/speech"
     
     payload = {
         "model": "kokoro",
@@ -32,7 +31,6 @@ def generate_tts(text: str, voice: str = "af_sarah", speed: float = 1.0) -> byte
     }
     
     headers = {
-        "TTS_API_KEY": api_key,
         "Content-Type": "application/json"
     }
     

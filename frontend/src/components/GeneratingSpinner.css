@@ -1,0 +1,35 @@
+.generating-spinner {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  display: grid;
+  place-items: center;
+}
+
+.generating-spinner-halo {
+  position: absolute;
+  inset: -14px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.45), rgba(6, 182, 212, 0.15) 60%, transparent 75%);
+  filter: blur(4px);
+}
+
+.generating-spinner-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid rgba(99, 102, 241, 0.12);
+  border-top-color: #6366f1;
+  border-right-color: #06b6d4;
+  animation: generating-spin 0.9s linear infinite;
+}
+
+@keyframes generating-spin {
+  to { transform: rotate(360deg); }
+}
+
+.generating-spinner-icon {
+  position: relative;
+  color: var(--accent-4, #818cf8);
+  filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.6));
+}

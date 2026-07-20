@@ -34,6 +34,14 @@ class HashService:
     def _save_hash_cache(self):
         """Save hash cache to disk"""
         try:
+            # Drop expired entries before writing - now that negative results are
+            # cached too (every upload, not just actual duplicates), this file
+            # would otherwise grow by one entry per unique file ever checked.
+            now = time.time()
+            self.hash_cache = {
+                k: v for k, v in self.hash_cache.items()
+                if now - v.get("timestamp", 0) < (86400 if v.get("duplicate_info") else 300)
+            }
             self.hash_cache_file.parent.mkdir(parents=True, exist_ok=True)
             # Convert Path objects to strings before JSON serialization
             serializable_cache = {}
@@ -130,11 +138,18 @@ class HashService:
                                 "source": "metadata",
                                 "metadata": metadata
                             })
-                            continue  # Found in metadata, no need to scan files
+                        if cached_hash:
+                            # Metadata has an authoritative hash for this story and
+                            # we already compared it above - falling through to
+                            # re-hash every generated file in the directory just to
+                            # re-confirm a non-match turned every upload into an
+                            # O(every file in every past story) SHA-256 scan, done
+                            # synchronously before the job is even created.
+                            continue
                 except Exception:
                     pass
-            
-            # Scan all files in story directory
+
+            # Fallback for legacy stories with no cached hash in metadata
             for file_path in story_dir.rglob("*"):
                 if file_path.is_file() and not file_path.name.endswith('.json'):
                     try:
@@ -160,19 +175,24 @@ class HashService:
             file_name: Optional filename for context
             
         Returns:
-            Dict with duplicate info or None
+            Dict with duplicate info including story metadata
         """
         file_hash = self.generate_bytes_hash(file_bytes)
-        
-        # Check cache first (for performance)
+
+        # Check cache first (for performance). "No duplicate" results are cached
+        # too (short TTL) - not just matches - because the frontend always calls
+        # /api/check-duplicate immediately before /api/upload calls this same
+        # function again for the same file, seconds apart. Without caching the
+        # (far more common) negative result, every single upload paid for the
+        # full directory scan twice in a row.
         cache_key = f"{file_hash}"
         if cache_key in self.hash_cache:
             cached = self.hash_cache[cache_key]
-            # Check if cache is still valid (less than 24 hours old)
-            if time.time() - cached.get("timestamp", 0) < 86400:
+            ttl = 86400 if cached.get("duplicate_info") else 300
+            if time.time() - cached.get("timestamp", 0) < ttl:
                 logger.info(f"Hash found in cache: {file_hash[:16]}...")
                 return cached.get("duplicate_info")
-        
+
         # Scan both directories
         saved_matches = self.scan_directory_for_hash(file_hash, self.saved_stories_dir)
         generated_matches = self.scan_directory_for_hash(file_hash, self.generated_stories_dir)
@@ -180,22 +200,63 @@ class HashService:
         all_matches = saved_matches + generated_matches
         
         if all_matches:
+            # Get the first match (most recent) and read its metadata
+            first_match = all_matches[0]
+            story_id = first_match.get("story_id", "")
+            
+            # Try to read metadata for this story
+            created_by = "Unknown"
+            created_at = "Unknown"
+            story_title = "Unknown"
+            
+            for match in all_matches:
+                meta = None
+                # If match came from metadata scan, use it directly
+                if match.get("source") == "metadata" and match.get("metadata"):
+                    meta = match["metadata"]
+                else:
+                    # For file_scan matches, read metadata.json from parent dir
+                    metadata_path = os.path.join(os.path.dirname(match.get("path", "")), "metadata.json")
+                    if os.path.exists(metadata_path):
+                        try:
+                            with open(metadata_path, 'r') as f:
+                                meta = json.load(f)
+                        except Exception as e:
+                            logger.warning(f"Could not read metadata for {story_id}: {e}")
+                
+                if meta:
+                    created_by = meta.get("user_email", meta.get("username", meta.get("created_by", "Unknown")))
+                    created_at = meta.get("created_at", meta.get("timestamp", "Unknown"))
+                    story_title = meta.get("title", meta.get("story_title", "Unknown"))
+                    break
+            
             duplicate_info = {
                 "hash": file_hash,
+                "story_id": story_id,
+                "created_by": created_by,
+                "created_at": created_at,
+                "story_title": story_title,
+                "is_duplicate": True,
                 "matches": all_matches,
                 "saved_stories": saved_matches,
                 "generated_stories": generated_matches
             }
             
-            # Update cache
             self.hash_cache[cache_key] = {
                 "timestamp": time.time(),
                 "duplicate_info": duplicate_info
             }
             self._save_hash_cache()
-            
+
             return duplicate_info
-        
+
+        # Cache the negative result too (short TTL - see comment above)
+        self.hash_cache[cache_key] = {
+            "timestamp": time.time(),
+            "duplicate_info": None
+        }
+        self._save_hash_cache()
+
         return None
     
     def update_story_metadata_hash(self, story_id: str, file_hash: str, in_saved: bool = False):

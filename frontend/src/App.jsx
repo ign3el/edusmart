@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Sparkles, BookOpen, Smartphone, AlertTriangle, ShieldAlert, RefreshCw } from 'lucide-react'
 import { useAuth } from './context/AuthContext'
 import apiClient from './services/api'
 import updateService from './services/updateService'
@@ -11,10 +12,11 @@ import ForgotPassword from './components/ForgotPassword'
 import ResetPassword from './components/ResetPassword'
 import FileUpload from './components/FileUpload'
 import FileConfirmation from './components/FileConfirmation'
-import AvatarSelector from './components/AvatarSelector'
+import GeneratingSpinner from './components/GeneratingSpinner'
 import StoryPlayer from './components/StoryPlayer'
 const Scene3DBackground = lazy(() => import('./components/3d/Scene3DBackground'));
 import SaveStoryModal from './components/SaveStoryModal'
+import SaveFeedbackModal from './components/SaveFeedbackModal'
 import LoadStory from './components/LoadStory'
 import OfflineManager from './components/OfflineManager'
 import UserProfile from './components/UserProfile'
@@ -23,7 +25,7 @@ import UploadProgressOverlay from './components/UploadProgressOverlay'
 import DuplicateStoryModal from './components/DuplicateStoryModal'
 import TeacherCard from './components/TeacherCard'
 import NavigationMenu from './components/NavigationMenu'
-import StoryActionsBar from './components/StoryActionsBar'
+import BrandMark from './components/BrandMark'
 import ErrorBoundary from './components/ErrorBoundary'
 const AdminPanel = lazy(() => import('./components/AdminPanel'));
 import './App.css'
@@ -76,9 +78,12 @@ function MainApp() {
   const [showUploadProgress, setShowUploadProgress] = useState(false)
   const fileInputRef = useRef(null)
   const pollTimerRef = useRef(null)
+  const generationStartRef = useRef(0)
+  const [generatingStage, setGeneratingStage] = useState(0)
   const storyDataRef = useRef(null)
   const stepRef = useRef(step)
   const [showUpdateNotification, setShowUpdateNotification] = useState(false)
+  const [saveFeedback, setSaveFeedback] = useState(null)
 
   // Initialize version tracking and check for updates
   useEffect(() => {
@@ -116,6 +121,31 @@ function MainApp() {
     setShowUpdateNotification(false);
   };
 
+  // Manual "Check for Updates" from the nav menu used to be its own alert()/confirm()
+  // flow, separate from the auto-detected update path above. Routes through the
+  // same showUpdateNotification toast and saveFeedback modal instead, so there's
+  // one consistent, non-native UI for updates rather than two.
+  const handleCheckForUpdate = async () => {
+    try {
+      const hasUpdate = await updateService.checkForUpdates()
+      if (hasUpdate) {
+        setShowUpdateNotification(true)
+      } else {
+        setSaveFeedback({
+          variant: 'success',
+          title: "You're up to date",
+          message: 'EduSmart is already running the latest version.',
+        })
+      }
+    } catch (err) {
+      setSaveFeedback({
+        variant: 'error',
+        title: 'Update check failed',
+        message: 'Could not check for updates. Please try again.',
+      })
+    }
+  };
+
   // Handle browser back button to navigate within app steps
   useEffect(() => {
     const handlePopState = (event) => {
@@ -141,11 +171,163 @@ function MainApp() {
     setStep(newStep)
   }
 
+  // Shared by both upload paths (handleFileUpload's real upload, generateStory's
+  // avatar-based flow) so there's a single place that knows how to interpret a
+  // /api/status/{job_id} tick — the two previously had separate, drifting copies
+  // of this logic, which is how one of them ended up with a real bug.
+  const pollJobStatus = async (jobId) => {
+    try {
+      const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+      })
+      if (!statusRes.ok) throw new Error('Could not fetch status')
+
+      const job = await statusRes.json()
+
+      const elapsedSinceStart = Date.now() - generationStartRef.current
+      setGeneratingStage(elapsedSinceStart < 8000 ? 0 : elapsedSinceStart < 20000 ? 1 : 2)
+
+      if (job.status === 'processing') {
+        setProgress((prev) => Math.max(prev, job.progress ?? prev))
+
+        if (job.total_scenes > 0) {
+          setTotalScenes(job.total_scenes)
+          setCompletedSceneCount(job.completed_scene_count || 0)
+        }
+
+        if (job.result && job.result.scenes && job.result.scenes.length > 0) {
+          if (!storyDataRef.current || storyDataRef.current.scenes.length === 0) {
+            setStoryData(job.result)
+            navigateTo('playing')
+          } else {
+            setStoryData(job.result)
+          }
+        }
+      } else if (job.status === 'completed') {
+        clearInterval(pollTimerRef.current)
+        setStoryData(job.result)
+        setProgress(100)
+        if (job.total_scenes > 0) {
+          setTotalScenes(job.total_scenes)
+          setCompletedSceneCount(job.total_scenes)
+        }
+        if (stepRef.current !== 'playing') {
+          navigateTo('playing')
+        }
+      } else if (job.status === 'failed') {
+        clearInterval(pollTimerRef.current)
+        throw new Error(job.error || 'AI Generation failed.')
+      }
+    } catch (err) {
+      clearInterval(pollTimerRef.current)
+      setError('Connection lost: ' + err.message)
+      navigateTo('upload')
+    }
+  }
+
+  // Mobile browsers throttle/suspend setInterval heavily in a backgrounded or
+  // screen-locked tab — the "scenes ready" count can silently freeze for minutes
+  // even though the backend kept working. Re-poll immediately the moment the tab
+  // becomes visible again instead of waiting for the next (possibly very late) tick.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && pollTimerRef.current && currentJobId) {
+        pollJobStatus(currentJobId)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [currentJobId])
+
+  // Remember which story is on screen so an accidental refresh doesn't wipe it.
+  // The backend keeps unsaved generated stories around too (only handleRestart's
+  // explicit delete-story call removes one early) - this is just a pointer, not
+  // a copy of the story itself, rehydrated via the same endpoints already used
+  // elsewhere in this file. Offline stories are skipped - OfflineManager already
+  // owns their persistence.
+  const ACTIVE_SESSION_KEY = 'edusmart_active_session'
+  useEffect(() => {
+    if (step === 'playing' && !isOfflineMode) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({
+        jobId: currentJobId, savedStoryId, ts: Date.now(),
+      }))
+    } else if (step === 'home') {
+      localStorage.removeItem(ACTIVE_SESSION_KEY)
+    }
+  }, [step, currentJobId, savedStoryId, isOfflineMode])
+
+  const rehydratedRef = useRef(false)
+  useEffect(() => {
+    if (!isAuthenticated || rehydratedRef.current) return
+    rehydratedRef.current = true
+
+    let pointer
+    try {
+      pointer = JSON.parse(localStorage.getItem(ACTIVE_SESSION_KEY) || 'null')
+    } catch {
+      pointer = null
+    }
+    if (!pointer) return
+    // Cap at 24h, matching the backend's own generated-story TTL - no point
+    // trying to resurrect a pointer to something guaranteed already cleaned up.
+    if (Date.now() - (pointer.ts || 0) > 24 * 60 * 60 * 1000) {
+      localStorage.removeItem(ACTIVE_SESSION_KEY)
+      return
+    }
+
+    (async () => {
+      try {
+        if (pointer.savedStoryId) {
+          const response = await apiClient.get(`/api/load-story/${pointer.savedStoryId}`)
+          if (response.data?.story_data && stepRef.current === 'home') {
+            setStoryData(response.data.story_data)
+            setSelectedAvatar({ id: 'loaded', name: response.data.name })
+            setIsSaved(true)
+            setSavedStoryId(pointer.savedStoryId)
+            navigateTo('playing')
+          }
+          return
+        }
+        if (pointer.jobId) {
+          const statusRes = await fetch(`${API_URL}/api/status/${pointer.jobId}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+          })
+          if (!statusRes.ok) throw new Error('Session expired')
+          const job = await statusRes.json()
+          if (stepRef.current !== 'home') return
+
+          if (job.status === 'completed' && job.result) {
+            setStoryData(job.result)
+            setCurrentJobId(pointer.jobId)
+            setProgress(100)
+            if (job.total_scenes > 0) {
+              setTotalScenes(job.total_scenes)
+              setCompletedSceneCount(job.total_scenes)
+            }
+            navigateTo('playing')
+          } else if (job.status === 'processing' && job.result?.scenes?.length > 0) {
+            setStoryData(job.result)
+            setCurrentJobId(pointer.jobId)
+            generationStartRef.current = Date.now()
+            navigateTo('playing')
+            pollTimerRef.current = setInterval(() => pollJobStatus(pointer.jobId), 2000)
+          } else {
+            localStorage.removeItem(ACTIVE_SESSION_KEY)
+          }
+        }
+      } catch {
+        // Expected/benign - session simply aged out or story was deleted.
+        // No error banner for what isn't the user's fault or action.
+        localStorage.removeItem(ACTIVE_SESSION_KEY)
+      }
+    })()
+  }, [isAuthenticated])
+
   // If not logged in and not loading, show auth screen
   if (isLoading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
-        <div style={{ color: 'white', fontSize: '20px' }}>Loading...</div>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#050810' }}>
+        <div style={{ color: '#f8fafc', fontSize: '20px' }}>Loading...</div>
       </div>
     )
   }
@@ -154,16 +336,15 @@ function MainApp() {
     if (signupSuccess) {
       return (
         <div className="auth-container" style={{
-          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
           height: '100vh',
           color: 'white'
         }}>
-          <motion.div 
-            className="auth-box" 
-            initial={{ opacity: 0, y: 20 }} 
+          <motion.div
+            className="auth-box"
+            initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
           >
             <h2>Signup Successful!</h2>
@@ -180,8 +361,7 @@ function MainApp() {
     }
 
     return (
-      <div style={{
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+      <div className="auth-page" style={{
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
@@ -289,49 +469,10 @@ function MainApp() {
             const jobId = result.job_id
             setCurrentJobId(jobId)
             navigateTo('generating')
+            generationStartRef.current = Date.now()
+            setGeneratingStage(0)
             // Start polling for job status
-            pollTimerRef.current = setInterval(async () => {
-              try {
-                const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
-                  headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
-                })
-                if (!statusRes.ok) throw new Error('Could not fetch status')
-                const job = await statusRes.json()
-                if (job.status === 'processing') {
-                  setProgress((prev) => Math.max(prev, job.progress ?? prev))
-                  if (job.total_scenes > 0) {
-                    setTotalScenes(job.total_scenes)
-                    setCompletedSceneCount(job.completed_scene_count || 0)
-                  }
-                  if (job.result && job.result.scenes && job.result.scenes.length > 0) {
-                    if (!storyDataRef.current || storyDataRef.current.scenes.length === 0) {
-                      setStoryData(job.result)
-                      navigateTo('playing')
-                    } else {
-                      setStoryData(job.result)
-                    }
-                  }
-                } else if (job.status === 'completed') {
-                  clearInterval(pollTimer)
-                  setStoryData(job.result)
-                  setProgress(100)
-                  if (job.total_scenes > 0) {
-                    setTotalScenes(job.total_scenes)
-                    setCompletedSceneCount(job.total_scenes)
-                  }
-                  if (stepRef.current !== 'playing') {
-                    navigateTo('playing')
-                  }
-                } else if (job.status === 'failed') {
-                  clearInterval(pollTimerRef.current)
-                  throw new Error(job.error || 'AI Generation failed.')
-                }
-              } catch (err) {
-                clearInterval(pollTimerRef.current)
-                setError('Connection lost: ' + err.message)
-                navigateTo('upload')
-              }
-            }, 2000)
+            pollTimerRef.current = setInterval(() => pollJobStatus(jobId), 2000)
           } catch (parseErr) {
             setError('Invalid response from server')
             navigateTo('upload')
@@ -400,6 +541,8 @@ function MainApp() {
       setError(null)
       setProgress(0)
       setIsSaved(false)
+      generationStartRef.current = Date.now()
+      setGeneratingStage(0)
 
       const formData = new FormData()
       formData.append('file', uploadedFile)
@@ -432,63 +575,17 @@ function MainApp() {
       setCurrentJobId(job_id)
 
       // Polling Loop
-      pollTimerRef.current = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${API_URL}/api/status/${job_id}`, {
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
-          })
-          if (!statusRes.ok) throw new Error("Could not fetch status")
-          
-          const job = await statusRes.json()
-
-          if (job.status === 'processing') {
-            setProgress((prev) => Math.max(prev, job.progress ?? prev))
-            
-            // Update total scenes count when available
-            if (job.total_scenes > 0) {
-              setTotalScenes(job.total_scenes)
-              setCompletedSceneCount(job.completed_scene_count || 0)
-            }
-            
-            // Show story immediately when first scene is ready
-            if (job.result && job.result.scenes && job.result.scenes.length > 0) {
-              if (!storyDataRef.current || storyDataRef.current.scenes.length === 0) {
-                // First scene is ready - show it immediately
-                setStoryData(job.result)
-                navigateTo('playing')
-                // Don't clear interval - continue polling for remaining scenes
-              } else {
-                // Update story data with newly completed scenes
-                setStoryData(job.result)
-              }
-            }
-          } else if (job.status === 'completed') {
-            clearInterval(pollTimerRef.current)
-            setStoryData(job.result)
-            setProgress(100)
-            if (job.total_scenes > 0) {
-              setTotalScenes(job.total_scenes)
-              setCompletedSceneCount(job.total_scenes)
-            }
-            // Only navigate if not already playing
-            if (stepRef.current !== 'playing') {
-              navigateTo('playing')
-            }
-          } else if (job.status === 'failed') {
-            clearInterval(pollTimerRef.current)
-            throw new Error(job.error || "AI Generation failed.")
-          }
-        } catch (err) {
-          clearInterval(pollTimerRef.current)
-          setError("Connection lost: " + err.message)
-          navigateTo('upload')
-        }
-      }, 2000)
+      pollTimerRef.current = setInterval(() => pollJobStatus(job_id), 2000)
 
     } catch (err) {
       setError(err.message)
       navigateTo('upload')
     }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem(ACTIVE_SESSION_KEY)
+    logout()
   }
 
   const handleRestart = async () => {
@@ -530,7 +627,11 @@ function MainApp() {
     setShowSaveModal(false)
     setIsSaved(true)
     setSavedStoryId(storyId)
-    alert(`✅ Story "${storyName}" saved successfully!`)
+    setSaveFeedback({
+      variant: 'success',
+      title: 'Story saved!',
+      message: `"${storyName}" is now in your library.`,
+    })
   }
 
   const handleLoadOffline = (loadedStoryData, storyName) => {
@@ -554,7 +655,11 @@ function MainApp() {
       }
       
       localStorage.setItem(`edusmart_story_${storyId}`, JSON.stringify(localStory))
-      alert(`✅ Story "${storyName}" saved locally!`)
+      setSaveFeedback({
+        variant: 'success',
+        title: 'Saved locally!',
+        message: `"${storyName}" is available offline.`,
+      })
       return storyId
     } catch (error) {
       throw new Error('Failed to save locally: ' + error.message)
@@ -590,7 +695,7 @@ function MainApp() {
     <div className="app">
       <header className="app-header">
         <div className="app-header-content">
-          <h1>EduSmart</h1>
+          <BrandMark />
           <p className="header-subtitle">AI-Powered Storymaker</p>
         </div>
         {isAuthenticated && (
@@ -603,10 +708,11 @@ function MainApp() {
             onOfflineManager={() => navigateTo('offline')}
             onAdminClick={() => navigateTo('admin')}
             onProfile={() => navigateTo('profile')}
-            onLogout={logout}
+            onLogout={handleLogout}
             onSaveStory={step === 'playing' && !isSaved ? handleSaveStory : null}
             onDownloadStory={step === 'playing' ? () => storyPlayerRef.current?.triggerDownload() : null}
             isPlayingStory={step === 'playing'}
+            onCheckUpdate={handleCheckForUpdate}
           />
         )}
       </header>
@@ -622,57 +728,66 @@ function MainApp() {
         <div className="content-shell">
           {error && (
             <div className="error-message">
-              <p>⚠️ {error}</p>
+              <p><AlertTriangle size={18} aria-hidden="true" /> {error}</p>
               <button onClick={() => setError(null)}>Try Again</button>
             </div>
           )}
           
           <AnimatePresence mode="wait">
             {step === 'admin' && (
-              <Suspense fallback={<div className="loading-message">Loading Admin Panel...</div>}>
-                <motion.div key="admin-panel" className="step-container">
-                  <AdminPanel 
-                    onPlayStory={handlePlayStoryFromAdmin}
-                    onBack={() => navigateTo('home')}
-                  />
+              user?.is_admin ? (
+                <Suspense fallback={<div className="loading-message">Loading Admin Panel...</div>}>
+                  <motion.div key="admin-panel" className="step-container">
+                    <AdminPanel 
+                      onPlayStory={handlePlayStoryFromAdmin}
+                      onBack={() => navigateTo('home')}
+                    />
+                  </motion.div>
+                </Suspense>
+              ) : (
+                <motion.div key="admin-denied" className="step-container">
+                  <div className="error-message">
+                    <p><ShieldAlert size={18} aria-hidden="true" /> Admin access required</p>
+                    <button onClick={() => navigateTo('home')}>Return Home</button>
+                  </div>
                 </motion.div>
-              </Suspense>
+              )
             )}
 
             {step === 'home' && (
               <motion.div key="home" className="home-wrapper">
                 <div className="home-content-overlay">
-                  <div className="home-pill">✨ AI-Powered Storymaker</div>
+                  <div className="home-pill"><Sparkles size={14} aria-hidden="true" /> AI-Powered Storymaker</div>
                   <h1 className="home-title">Turn Lessons into Adventures</h1>
                   <p className="home-subtitle">Upload a PDF, choose your grade level, and let AI create an immersive story with custom images and voiceovers.</p>
                   <div className="home-buttons">
-                    <motion.button 
+                    <motion.button
                       className="home-btn"
                       onClick={() => navigateTo('upload')}
-                      whileHover={{ scale: 1.02 }}
+                      whileHover={{ scale: 1.02, y: -4 }}
                       whileTap={{ scale: 0.98 }}
                     >
-                      <div className="emoji">✨</div>
+                      <div className="home-btn-icon home-btn-icon-primary"><Sparkles size={22} aria-hidden="true" /></div>
                       <strong>Create New Story</strong>
                       <span>Upload a lesson file and let AI turn it into a story</span>
                     </motion.button>
-                    <motion.button 
+                    <motion.button
                       className="home-btn"
                       onClick={() => navigateTo('load')}
-                      whileHover={{ scale: 1.02 }}
+                      whileHover={{ scale: 1.02, y: -4 }}
                       whileTap={{ scale: 0.98 }}
                     >
-                      <div className="emoji">📚</div>
+                      <div className="home-btn-icon home-btn-icon-secondary"><BookOpen size={22} aria-hidden="true" /></div>
                       <strong>Load Online Story</strong>
                       <span>Pull down a saved adventure from the cloud</span>
                     </motion.button>
-                    <motion.button 
+                    <motion.button
                       className="home-btn"
                       onClick={() => navigateTo('offline')}
-                      whileHover={{ scale: 1.02 }}
+                      whileHover={{ scale: 1.02, y: -4 }}
                       whileTap={{ scale: 0.98 }}
                     >
-                      <div className="emoji">📱</div>
+                      <div className="home-btn-icon home-btn-icon-tertiary"><Smartphone size={22} aria-hidden="true" /></div>
                       <strong>Offline Manager</strong>
                       <span>Manage locally stored stories without an internet connection</span>
                     </motion.button>
@@ -736,14 +851,14 @@ function MainApp() {
               <UserProfile 
                 user={user}
                 onBack={() => navigateTo('home')}
-                onLogout={logout}
+                onLogout={handleLogout}
               />
             </motion.div>
           )}
 
           {step === 'generating' && (
             <motion.div key="generating" className="generating-container">
-              <div className="loading-spinner" />
+              <GeneratingSpinner />
               <h2>Creating Your Story...</h2>
               <div className="progress-container">
                 <div className="progress-bar-bg">
@@ -761,7 +876,13 @@ function MainApp() {
                   </p>
                 )}
               </div>
-              <p className="small-text">Generating custom images and voiceovers...</p>
+              <p className="small-text">
+                {[
+                  'Reading your document...',
+                  'Writing your story...',
+                  'Bringing your first scene to life...',
+                ][generatingStage]}
+              </p>
             </motion.div>
           )}
 
@@ -786,12 +907,23 @@ function MainApp() {
         </AnimatePresence>
 
           {showSaveModal && (
-            <SaveStoryModal 
+            <SaveStoryModal
               jobId={currentJobId}
               onSave={handleSaveComplete}
               onCancel={() => setShowSaveModal(false)}
             />
           )}
+
+          <AnimatePresence>
+            {saveFeedback && (
+              <SaveFeedbackModal
+                variant={saveFeedback.variant}
+                title={saveFeedback.title}
+                message={saveFeedback.message}
+                onDismiss={() => setSaveFeedback(null)}
+              />
+            )}
+          </AnimatePresence>
 
           {showReuploadModal && (
             <ReuploadConfirmModal
@@ -832,6 +964,8 @@ function MainApp() {
                       return
                     }
                     
+                    const quizData = storyStatus.quiz || []
+                    const parsedQuiz = typeof quizData === 'string' ? (() => { try { return JSON.parse(quizData) } catch(e) { return [] } })() : quizData
                     const formattedStory = {
                       title: storyStatus.title || 'Saved Story',
                       scenes: storyStatus.scenes.map((scene, idx) => {
@@ -843,7 +977,7 @@ function MainApp() {
                           audioUrl: scene.audio_url || ''
                         }
                       }),
-                      quiz: storyStatus.quiz || []
+                      quiz: parsedQuiz
                     }
                     
                     if (DEBUG) console.log('✅ Formatted story:', formattedStory)
@@ -899,17 +1033,17 @@ function MainApp() {
                 top: '20px',
                 right: '20px',
                 zIndex: 10000,
-                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                background: 'linear-gradient(135deg, #6366f1 0%, #06b6d4 100%)',
                 padding: '1rem 1.5rem',
                 borderRadius: '12px',
-                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+                boxShadow: '0 8px 32px rgba(99, 102, 241, 0.35)',
                 color: 'white',
                 maxWidth: '400px',
                 border: '1px solid rgba(255, 255, 255, 0.2)'
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '0.75rem' }}>
-                <span style={{ fontSize: '1.5rem' }}>🔄</span>
+                <RefreshCw size={22} aria-hidden="true" />
                 <div>
                   <h4 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>Update Available</h4>
                   <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', opacity: 0.9 }}>
@@ -924,7 +1058,7 @@ function MainApp() {
                     flex: 1,
                     padding: '0.65rem 1.2rem',
                     background: 'white',
-                    color: '#667eea',
+                    color: '#6366f1',
                     border: 'none',
                     borderRadius: '8px',
                     fontWeight: 600,

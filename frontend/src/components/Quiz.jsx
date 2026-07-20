@@ -1,34 +1,61 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import {
+  Trophy, RefreshCw, BookOpen, FileText, Brain, Check, X,
+  MapPin, Lightbulb, CheckCircle2, AlertTriangle
+} from 'lucide-react';
 import { markQuizComplete } from '../services/api';
+import ScoreBurst from './ScoreBurst';
 import './Quiz.css';
 
-const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
-  const [currentQuestion, setCurrentQuestion] = useState(0);
-  const [score, setScore] = useState(0);
-  const [showResults, setShowResults] = useState(false);
+// Progress is keyed per-story so closing the quiz (or losing the tab to a
+// refresh, now that App.jsx also survives that) and reopening it later picks
+// up on the same question with the same score, instead of starting over.
+const progressKey = (storyId) => `edusmart_quiz_progress_${storyId}`;
+
+function loadProgress(storyId) {
+  if (!storyId) return null;
+  try {
+    const raw = localStorage.getItem(progressKey(storyId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
+  const saved = loadProgress(storyId);
+  const [currentQuestion, setCurrentQuestion] = useState(saved?.currentQuestion ?? 0);
+  const [score, setScore] = useState(saved?.score ?? 0);
+  const [showResults, setShowResults] = useState(saved?.showResults ?? false);
   const [selectedOption, setSelectedOption] = useState(null);
   const [isCorrect, setIsCorrect] = useState(null);
-  const [userAnswers, setUserAnswers] = useState([]);
-  const [reviewMode, setReviewMode] = useState(false);
+  const [userAnswers, setUserAnswers] = useState(saved?.userAnswers ?? []);
+  const [reviewMode, setReviewMode] = useState(saved?.reviewMode ?? false);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Persist on every change so an interrupted quiz can resume later. Cleared
+  // once results are first shown - a finished quiz doesn't need "resume",
+  // and this avoids reopening straight into stale results after a retake.
+  useEffect(() => {
+    if (!storyId) return;
+    if (showResults) {
+      localStorage.removeItem(progressKey(storyId));
+      return;
+    }
+    localStorage.setItem(progressKey(storyId), JSON.stringify({
+      currentQuestion, score, userAnswers, showResults, reviewMode,
+    }));
+  }, [storyId, currentQuestion, score, userAnswers, showResults, reviewMode]);
 
   // Handle missing or invalid quiz data
   const validQuestions = Array.isArray(questions) && questions.length > 0 ? questions : [];
 
-  // Fallback: Generate quiz from story data if quiz is missing
-  const generateFallbackQuiz = () => {
-    console.log('🔄 Generating fallback quiz from available data...');
-    // This would be called if questions are missing
-    // For now, we'll show a message
-  };
-
   // Check for quiz data issues
   React.useEffect(() => {
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      console.warn('⚠️ Quiz component received no questions data');
-      console.log('Expected: Array of question objects');
-      console.log('Received:', questions);
+      console.warn('Quiz component received no questions data');
+      if (import.meta.env.DEV) console.log('Expected: Array of question objects, received:', questions);
     }
   }, [questions]);
 
@@ -50,7 +77,12 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
     // Handle both old and new quiz structure
     const correctAnswer = currentQ.correct_answer || currentQ.answer;
     const questionText = currentQ.question_text || currentQ.question;
-    const correct = option === correctAnswer;
+
+    // Extract letter from option (e.g., "A. Option text" -> "A")
+    const selectedLetter = option.match(/^([A-D])\./)?.[1];
+    const correctLetter = correctAnswer.match(/^([A-D])\./)?.[1] || correctAnswer;
+
+    const correct = selectedLetter === correctLetter;
     setIsCorrect(correct);
 
     // Track user answer with proper state update
@@ -81,7 +113,7 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
         if (storyId) {
           try {
             await markQuizComplete(storyId);
-            console.log('✓ Quiz marked as completed');
+            if (import.meta.env.DEV) console.log('Quiz marked as completed');
           } catch (error) {
             console.error('Failed to mark quiz complete:', error);
           }
@@ -93,15 +125,16 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
   if (showResults && !reviewMode) {
     return (
       <motion.div className="quiz-container results" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-        <h2>🎉 Learning Complete!</h2>
+        <h2><Trophy size={22} aria-hidden="true" /> Learning Complete!</h2>
         <div className="score-circle">
+          <ScoreBurst />
           <span>{score}</span> / {questions.length}
         </div>
         <p>{score === questions.length ? "Perfect Score! Excellent work!" : "Great job! Keep learning!"}</p>
         <div className="result-buttons">
-          <button onClick={retakeQuiz} className="retake-btn">🔄 Retake Quiz</button>
-          <button onClick={() => setReviewMode(true)} className="review-btn">📖 Review Answers</button>
-          {onBackToStory && <button onClick={onBackToStory} className="story-btn">📖 Back to Story</button>}
+          <button onClick={retakeQuiz} className="retake-btn"><RefreshCw size={16} aria-hidden="true" /> Retake Quiz</button>
+          <button onClick={() => setReviewMode(true)} className="review-btn"><BookOpen size={16} aria-hidden="true" /> Review Answers</button>
+          {onBackToStory && <button onClick={onBackToStory} className="story-btn"><BookOpen size={16} aria-hidden="true" /> Back to Story</button>}
           <button onClick={onComplete} className="finish-btn">Back to Library</button>
         </div>
       </motion.div>
@@ -111,60 +144,80 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
   if (reviewMode) {
     return (
       <motion.div className="quiz-container review-mode" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-        <h2>📖 Answer Review</h2>
+        <h2><BookOpen size={22} aria-hidden="true" /> Answer Review</h2>
         <div className="review-list">
-          {userAnswers.map((answer, index) => (
-            <motion.div
-              key={index}
-              className={`review-item ${answer.isCorrect ? 'correct-answer' : 'wrong-answer'}`}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.1 }}
-            >
-              <div className="review-header">
-                <span className="review-number">Question {index + 1}</span>
-                <span className={`review-badge ${answer.isCorrect ? 'badge-correct' : 'badge-wrong'}`}>
-                  {answer.isCorrect ? '✓ Correct' : '✗ Wrong'}
-                </span>
-                {answer.source && (
-                  <span className="source-badge">
-                    {answer.source === 'extracted' ? '📄 From Document' : '🧠 Generated'}
+          {userAnswers.map((answer, index) => {
+            const currentQ = questions[index];
+            const options = currentQ?.options || [];
+            return (
+              <motion.div
+                key={index}
+                className={`review-item ${answer.isCorrect ? 'correct-answer' : 'wrong-answer'}`}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.1 }}
+              >
+                <div className="review-header">
+                  <span className="review-number">Question {index + 1}</span>
+                  {answer.source && (
+                    <span className="source-badge">
+                      {answer.source === 'extracted' ? <><FileText size={14} aria-hidden="true" /> From Document</> : <><Brain size={14} aria-hidden="true" /> Generated</>}
+                    </span>
+                  )}
+                  <span className={`review-badge ${answer.isCorrect ? 'badge-correct' : 'badge-wrong'}`}>
+                    {answer.isCorrect ? <><Check size={14} aria-hidden="true" /> Correct</> : <><X size={14} aria-hidden="true" /> Wrong</>}
                   </span>
-                )}
-              </div>
-              <h4>{answer.question}</h4>
-              <div className="review-answers">
-                <p className="user-answer">
-                  <strong>Your answer:</strong>
-                  <span className={answer.isCorrect ? 'text-correct' : 'text-wrong'}>
-                    {answer.selected}
-                  </span>
-                </p>
-                {!answer.isCorrect && (
-                  <p className="correct-answer-text">
-                    <strong>Correct answer:</strong>
-                    <span className="text-correct">{answer.correct}</span>
-                  </p>
-                )}
-              </div>
-              {answer.document_section && (
-                <div className="document-section">
-                  <strong>📍 Section:</strong> {answer.document_section}
                 </div>
-              )}
-              <div className="explanation">
-                <strong>💡 Explanation:</strong>
-                <p>{answer.explanation}</p>
-              </div>
-            </motion.div>
-          ))}
+                <h4>{answer.question}</h4>
+                <div className="review-answers">
+                  <div className="options-review-list">
+                    {options.map((opt, i) => {
+                      const letter = String.fromCharCode(65 + i);
+                      const isSelected = answer.selected === opt;
+                      const isCorrectOption = answer.correct === opt;
+                      let rowClass = 'option-review';
+                      if (isCorrectOption) rowClass += ' option-review-correct';
+                      else if (isSelected && !isCorrectOption) rowClass += ' option-review-wrong';
+
+                      // Strip leading letter prefix if present (e.g., "A. Option" -> "Option")
+                      const optText = opt.replace(/^[A-D]\.\s*/, '');
+
+                      return (
+                        <div key={i} className={rowClass}>
+                          <span className="option-letter">{letter}.</span>
+                          <span className="option-text">{optText}</span>
+                          {isCorrectOption && <span className="option-tag">Correct</span>}
+                          {isSelected && !isCorrectOption && <span className="option-tag wrong-tag">Your answer</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {answer.document_section && (
+                  <div className="document-section">
+                    <strong><MapPin size={14} aria-hidden="true" /> Section:</strong> {answer.document_section}
+                  </div>
+                )}
+                <div className="explanation">
+                  <strong><Lightbulb size={14} aria-hidden="true" /> Explanation:</strong>
+                  <p>{answer.explanation}</p>
+                </div>
+                {answer.why_correct && (
+                  <div className="why-correct">
+                    <strong><CheckCircle2 size={14} aria-hidden="true" /> Why this is correct:</strong>
+                    <p>{answer.why_correct}</p>
+                  </div>
+                )}
+              </motion.div>
+            );
+          })}
         </div>
         <div className="review-footer">
           <div className="final-score">
             Final Score: <strong>{score} / {questions.length}</strong>
             ({Math.round((score / questions.length) * 100)}%)
           </div>
-          {onBackToStory && <button onClick={onBackToStory} className="story-btn">📖 Back to Story</button>}
+          {onBackToStory && <button onClick={onBackToStory} className="story-btn"><BookOpen size={16} aria-hidden="true" /> Back to Story</button>}
           <button onClick={onComplete} className="finish-btn">Back to Library</button>
         </div>
       </motion.div>
@@ -180,7 +233,7 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
         animate={{ opacity: 1 }}
       >
         <div className="error-state">
-          <h2>⚠️ Quiz Unavailable</h2>
+          <h2><AlertTriangle size={22} aria-hidden="true" /> Quiz Unavailable</h2>
           <p>The quiz data for this story is not yet available.</p>
           <p className="small">Please ensure the story generation completed successfully.</p>
           {onBackToStory && <button onClick={onBackToStory} className="finish-btn">Back to Story</button>}
@@ -201,8 +254,13 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
         Question {currentQuestion + 1} of {validQuestions.length}
         {q.source && (
           <span className="source-indicator">
-            {q.source === 'extracted' ? '📄' : '🧠'}
+            {q.source === 'extracted' ? <FileText size={16} aria-hidden="true" /> : <Brain size={16} aria-hidden="true" />}
           </span>
+        )}
+        {onClose && (
+          <button type="button" className="quiz-close-btn" onClick={onClose} aria-label="Close quiz, keep my progress">
+            <X size={18} aria-hidden="true" />
+          </button>
         )}
       </div>
 
@@ -217,12 +275,12 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
           <h3>{questionText}</h3>
           {q.document_section && (
             <div className="document-section-info">
-              📍 From: {q.document_section}
+              <MapPin size={14} aria-hidden="true" /> From: {q.document_section}
             </div>
           )}
           <div className="options-grid">
             {options.map((option, index) => (
-              <button
+              <motion.button
                 key={index}
                 onClick={() => handleAnswer(option)}
                 className={`option-btn ${selectedOption === option
@@ -230,9 +288,12 @@ const Quiz = ({ questions, onComplete, onBackToStory, storyId }) => {
                   : ''
                   }`}
                 disabled={selectedOption !== null}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.06, duration: 0.25 }}
               >
                 {option}
-              </button>
+              </motion.button>
             ))}
           </div>
         </motion.div>

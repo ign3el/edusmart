@@ -5,12 +5,21 @@
 }
 
 .teacher-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
   font-size: clamp(1.3rem, 3vw, 1.6rem);
   font-weight: 700;
   color: var(--ink-1);
   margin-bottom: 1.5rem;
   text-align: center;
   letter-spacing: -0.02em;
+}
+
+.teacher-card-title svg {
+  color: var(--accent-1);
+  flex-shrink: 0;
 }
 
 /* Grid Layout */
@@ -84,9 +93,20 @@
 }
 
 .teacher-icon {
-  font-size: 3rem;
-  line-height: 1;
-  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(6, 182, 212, 0.2));
+  color: var(--accent-4);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+  transition: transform var(--transition);
+}
+
+.teacher-card:hover .teacher-icon {
+  transform: scale(1.08) rotate(-4deg);
 }
 
 .teacher-selected-badge {

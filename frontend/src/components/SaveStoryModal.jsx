@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Save, CheckCircle2 } from 'lucide-react'
 import './SaveStoryModal.css'
 
 function SaveStoryModal({ jobId, onSave, onCancel }) {
@@ -36,7 +37,7 @@ function SaveStoryModal({ jobId, onSave, onCancel }) {
       const result = await response.json()
       
       setDownloadProgress(95)
-      setDownloadMessage('Story saved successfully! ✓')
+      setDownloadMessage('Story saved successfully!')
       
       setTimeout(() => {
         setDownloadProgress(100)
@@ -67,7 +68,7 @@ function SaveStoryModal({ jobId, onSave, onCancel }) {
         exit={{ scale: 0.8, y: 50 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h2>💾 Save Your Story</h2>
+        <h2><Save size={22} /> Save Your Story</h2>
         <p className="modal-description">Give your adventure a name so you can find it later.</p>
         <input
           type="text"
@@ -90,7 +91,9 @@ function SaveStoryModal({ jobId, onSave, onCancel }) {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
             >
-              <p className="progress-message">{downloadMessage}</p>
+              <p className="progress-message">
+                {downloadProgress >= 100 && <CheckCircle2 size={16} />} {downloadMessage}
+              </p>
               <div className="progress-bar-container">
                 <div 
                   className="progress-bar" 

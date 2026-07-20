@@ -1,121 +1,86 @@
-import { useRef, useMemo, useState } from 'react'
+import { useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { Html } from '@react-three/drei'
+import { AdditiveBlending } from 'three'
 import { SceneParticles } from './SceneParticles'
+import { StorySceneImagePlane } from './StorySceneImagePlane'
 
-// Depth-layered scene for story player with background blur, mid-layer, foreground image, ambient particles
-export function StoryDepthScene({ scene, imageUrl, imageLoaded, imageError, isMobile, sceneIndex }) {
+// Depth-layered scene for story player: background wash, mid glow ring, the real
+// scene image as a tilting/parallax 3D plane (StorySceneImagePlane), ambient particles.
+export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, pointerTiltRef }) {
   const groupRef = useRef()
-  const [hovered, setHovered] = useState(false)
 
-  // Subtle floating animation
-  useFrame((state, delta) => {
+  // Subtle floating animation — bounded oscillation, not unbounded spin, since the
+  // real scene image now lives in this group and needs to stay legible/front-facing
+  // (StorySceneImagePlane already provides its own tilt/parallax motion).
+  useFrame((state) => {
     if (groupRef.current) {
-      groupRef.current.rotation.y += delta * 0.05
+      groupRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.15) * 0.04
       groupRef.current.rotation.x = Math.sin(state.clock.elapsedTime * 0.5) * 0.02
       groupRef.current.position.y = Math.cos(state.clock.elapsedTime * 0.3) * 0.1
     }
   })
 
-  const hasImage = !imageError && imageUrl
-
   return (
-    <group ref={groupRef}>
-      {/* BACKGROUND LAYER - blurred gradient backdrop */}
-      <mesh position={[0, 0, -3]} scale={1.3}>
-        <planeGeometry args={[18, 10]} />
-        <meshBasicMaterial
-          color="#0b0f1a"
-          transparent
-          opacity={0.6}
-          side={2}
-        />
-      </mesh>
-
-      {/* MID LAYER - glow ring and ambient */}
-      <mesh position={[0, 0, -1]} scale={1.05}>
-        <planeGeometry args={[16.5, 9.5]} />
-        <meshBasicMaterial
-          color="#6366f1"
-          transparent
-          opacity={hovered ? 0.15 : 0.06}
-          side={2}
-          depthWrite={false}
-        />
-      </mesh>
-
-      {/* FOREGROUND LAYER - main scene image plane */}
-      <mesh
-        onPointerOver={() => setHovered(true)}
-        onPointerOut={() => setHovered(false)}
-        position={[0, 0, 0]}
-      >
-        <planeGeometry args={[16, 9, 32, 18]} />
-        {hasImage ? (
-          <meshStandardMaterial
-            color="#6366f1"
+    <>
+      {/* Ambient sway - decorative backdrop only. The scene image plane used to
+          live inside this same swaying group, so its constant rotation/position
+          bob compounded with the image plane's own tilt rotation (parent and
+          child transforms multiply) - silently eating into the coverage margin
+          computed for that tilt alone, and unlike user-driven tilt this sway
+          never stops, so the edges looked "distorted" even sitting still.
+          Pulled the image out to its own group below so it only ever moves by
+          its own, already-accounted-for tilt. */}
+      <group ref={groupRef}>
+        {/* BACKGROUND LAYER - blurred gradient backdrop */}
+        <mesh position={[0, 0, -3]} scale={1.3}>
+          <planeGeometry args={[18, 10]} />
+          <meshBasicMaterial
+            color="#0b0f1a"
             transparent
-            opacity={0.15}
+            opacity={0.6}
             side={2}
-            roughness={0.3}
-            metalness={0.1}
           />
-        ) : (
-          <meshStandardMaterial color="#1a1a3e" roughness={0.8} />
-        )}
-      </mesh>
+        </mesh>
 
-      {/* Image as HTML overlay on top of the 3D plane */}
-      {hasImage && (
-        <Html transform position={[0, 0, 0.05]} style={{
-          width: '100%', height: '100%', pointerEvents: 'none',
-        }}>
-          <img
-            src={imageUrl}
-            alt={`Scene ${sceneIndex + 1}`}
-            style={{
-              width: '100%', height: '100%', objectFit: 'cover', borderRadius: '8px',
-            }}
+        {/* MID LAYER - two layered glow rings in the app's accent tones, brighten
+            while the story is playing, so the image reads as lit rather than pasted
+            onto a flat backdrop. */}
+        <mesh position={[0, 0, -1.2]} scale={1.12}>
+          <planeGeometry args={[16.5, 9.5]} />
+          <meshBasicMaterial
+            color="#8b5cf6"
+            transparent
+            opacity={isPlaying ? 0.13 : 0.05}
+            side={2}
+            depthWrite={false}
+            blending={AdditiveBlending}
           />
-        </Html>
-      )}
+        </mesh>
+        <mesh position={[0, 0, -0.9]} scale={1.02}>
+          <planeGeometry args={[15.5, 8.8]} />
+          <meshBasicMaterial
+            color="#22d3ee"
+            transparent
+            opacity={isPlaying ? 0.1 : 0.04}
+            side={2}
+            depthWrite={false}
+            blending={AdditiveBlending}
+          />
+        </mesh>
+      </group>
 
-      {/* Fallback when no image */}
-      {!hasImage && (
-        <Html transform position={[0, 0, 0.1]} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: '100%', height: '100%', pointerEvents: 'none',
-        }}>
-          <div style={{ color: '#6366f1', fontSize: '1.5rem', textAlign: 'center', padding: '2rem' }}>
-            📖 Scene {sceneIndex + 1}
-          </div>
-        </Html>
-      )}
-
-      {/* Glow border */}
-      <mesh position={[0, 0, -0.05]} scale={1.02}>
-        <planeGeometry args={[16, 9]} />
-        <meshBasicMaterial
-          color="#6366f1"
-          transparent
-          opacity={hovered ? 0.3 : 0.1}
-          side={2}
-          depthWrite={false}
-        />
-      </mesh>
-
-      {/* Ambient floating glow */}
-      <Html transform position={[0, 5, 0]} style={{ pointerEvents: 'none', width: 200, height: 200 }}>
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: 'radial-gradient(circle at center, rgba(99,102,241,0.1) 0%, transparent 70%)',
-          borderRadius: '50%', filter: 'blur(40px)',
-          animation: 'pulse 3s ease-in-out infinite',
-        }} />
-      </Html>
+      {/* FOREGROUND - the real scene image as a tilting/parallax 3D plane,
+          outside the ambient-sway group on purpose (see comment above) */}
+      <StorySceneImagePlane
+        imageUrl={imageUrl}
+        prevImageUrl={prevImageUrl}
+        isMobile={isMobile}
+        isPlaying={isPlaying}
+        pointerTiltRef={pointerTiltRef}
+      />
 
       {/* PARTICLE LAYER - ambient floating particles */}
-      <SceneParticles count={isMobile ? 25 : 50} />
-    </group>
+      <SceneParticles count={isMobile ? 22 : 50} />
+    </>
   )
 }

@@ -52,11 +52,6 @@ export const getTtsStatus = async (storyId) => {
   return response.data;
 };
 
-export const getSceneAudioUrl = (storyId, sceneNum) => {
-  // Return direct URL for audio player (includes auth token via interceptor)
-  return `${API_URL}/api/story/${storyId}/scene/${sceneNum}/audio`;
-};
-
 // Quiz completion
 export const markQuizComplete = async (storyId) => {
   const response = await apiClient.post(`/api/story/${storyId}/complete-quiz`);

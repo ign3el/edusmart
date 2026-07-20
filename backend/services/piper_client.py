@@ -20,19 +20,23 @@ class PiperClient:
         self.api_key = os.getenv("PIPER_API_KEY", None) # For future use if API is secured
         self.timeout = 90  # Increased timeout for potentially longer generations
 
-    async def generate_audio(self, text: str, language: str, speed: float, silence: float) -> Optional[bytes]:
+    async def generate_audio(self, text: str, speed: float, silence: float) -> Optional[bytes]:
         """
         Generate TTS audio via Piper HTTP API.
-        
+
+        This service is a single-model, Arabic-only deployment - it has no
+        language switch. Sending a "language" key in the payload makes the
+        server error out (confirmed: 500 "Dimension out of range"), so it
+        must not be included.
+
         Args:
             text: Text to synthesize.
-            language: Language code (e.g., 'en', 'ar').
             speed: Playback speed (e.g., 1.0).
             silence: Silence in seconds between sentences.
-        
+
         Returns:
             Audio bytes (WAV) or None on failure.
-        
+
         Raises:
             TTSConnectionError: If the service cannot be reached.
         """
@@ -45,7 +49,6 @@ class PiperClient:
             # Prepare payload for Piper API
             payload = {
                 "text": text,
-                "language": language,
                 "speed": speed,
                 "silence": silence,
             }

@@ -1,71 +1,46 @@
 {
-  "37390db0a45fd0f876585daaad742ad604eedc12ae8373168fa0d7b59e887edc": {
-    "timestamp": 1770545782.871647,
+  "a463fb2524d53a18648a6e22ce5b53e938c49fffaae6962987af454a39e01b57": {
+    "timestamp": 1784496164.872438,
     "duplicate_info": {
-      "hash": "37390db0a45fd0f876585daaad742ad604eedc12ae8373168fa0d7b59e887edc",
+      "hash": "a463fb2524d53a18648a6e22ce5b53e938c49fffaae6962987af454a39e01b57",
+      "story_id": "6cea3376-d637-4ce4-9ab1-426d15996424",
+      "created_by": "Unknown",
+      "created_at": 1783580181.2563667,
+      "story_title": "Unknown",
+      "is_duplicate": true,
       "matches": [
         {
-          "story_id": "d3212c15-b39d-45c1-b9c1-78b002114388",
-          "path": "generated_stories/d3212c15-b39d-45c1-b9c1-78b002114388/DAY 1- Desert plant adaptations Notes 1 (1).pdf",
+          "story_id": "6cea3376-d637-4ce4-9ab1-426d15996424",
+          "path": "saved_stories/6cea3376-d637-4ce4-9ab1-426d15996424/Gr_5_Science_Food_and_Health_1.pdf",
           "source": "file_scan",
-          "relative_path": "DAY 1- Desert plant adaptations Notes 1 (1).pdf"
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        },
+        {
+          "story_id": "75d63aa4-9e53-4d6d-9f40-c4b499fb886a",
+          "path": "saved_stories/75d63aa4-9e53-4d6d-9f40-c4b499fb886a/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
         }
       ],
-      "saved_stories": [],
-      "generated_stories": [
+      "saved_stories": [
         {
-          "story_id": "d3212c15-b39d-45c1-b9c1-78b002114388",
-          "path": "generated_stories/d3212c15-b39d-45c1-b9c1-78b002114388/DAY 1- Desert plant adaptations Notes 1 (1).pdf",
+          "story_id": "6cea3376-d637-4ce4-9ab1-426d15996424",
+          "path": "saved_stories/6cea3376-d637-4ce4-9ab1-426d15996424/Gr_5_Science_Food_and_Health_1.pdf",
           "source": "file_scan",
-          "relative_path": "DAY 1- Desert plant adaptations Notes 1 (1).pdf"
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        },
+        {
+          "story_id": "75d63aa4-9e53-4d6d-9f40-c4b499fb886a",
+          "path": "saved_stories/75d63aa4-9e53-4d6d-9f40-c4b499fb886a/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
         }
-      ]
+      ],
+      "generated_stories": []
     }
   },
-  "b2e177fb9da4895baeb0739a98d2b0f6368775f8ee16ad3994b8ded578767674": {
-    "timestamp": 1769802093.3172135,
-    "duplicate_info": {
-      "hash": "b2e177fb9da4895baeb0739a98d2b0f6368775f8ee16ad3994b8ded578767674",
-      "matches": [
-        {
-          "story_id": "bc5bb1fe-09fd-4d48-940f-fc198d43f380",
-          "path": "generated_stories/bc5bb1fe-09fd-4d48-940f-fc198d43f380/Grade 2 Hadeeth(1).pdf",
-          "source": "file_scan",
-          "relative_path": "Grade 2 Hadeeth(1).pdf"
-        }
-      ],
-      "saved_stories": [],
-      "generated_stories": [
-        {
-          "story_id": "bc5bb1fe-09fd-4d48-940f-fc198d43f380",
-          "path": "generated_stories/bc5bb1fe-09fd-4d48-940f-fc198d43f380/Grade 2 Hadeeth(1).pdf",
-          "source": "file_scan",
-          "relative_path": "Grade 2 Hadeeth(1).pdf"
-        }
-      ]
-    }
-  },
-  "51830a383fff567e54e08b18e879e38fc2ba5d9f68be7650f0c8f2d305e66abc": {
-    "timestamp": 1783163613.6280107,
-    "duplicate_info": {
-      "hash": "51830a383fff567e54e08b18e879e38fc2ba5d9f68be7650f0c8f2d305e66abc",
-      "matches": [
-        {
-          "story_id": "f6299900-7f7d-4425-832e-0c11ed195541",
-          "path": "generated_stories/f6299900-7f7d-4425-832e-0c11ed195541/CBD_EDMS_408DDBE7-9A3A-4216-B979-AF3567F3976A.pdf",
-          "source": "file_scan",
-          "relative_path": "CBD_EDMS_408DDBE7-9A3A-4216-B979-AF3567F3976A.pdf"
-        }
-      ],
-      "saved_stories": [],
-      "generated_stories": [
-        {
-          "story_id": "f6299900-7f7d-4425-832e-0c11ed195541",
-          "path": "generated_stories/f6299900-7f7d-4425-832e-0c11ed195541/CBD_EDMS_408DDBE7-9A3A-4216-B979-AF3567F3976A.pdf",
-          "source": "file_scan",
-          "relative_path": "CBD_EDMS_408DDBE7-9A3A-4216-B979-AF3567F3976A.pdf"
-        }
-      ]
-    }
+  "d284bd8975d3e70388eb46182781d9d7fd62bbf5f0e4cbe474f7c9b0e9934031": {
+    "timestamp": 1784536674.6529138,
+    "duplicate_info": null
   }
 }

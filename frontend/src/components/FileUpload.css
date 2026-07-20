@@ -5,8 +5,16 @@
 }
 
 .file-upload h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   font-size: clamp(1.4rem, 3vw, 1.8rem);
   letter-spacing: -0.01em;
+}
+
+.file-upload h2 svg {
+  color: var(--accent-1);
+  flex-shrink: 0;
 }
 
 .subtitle {
@@ -77,8 +85,9 @@
 }
 
 .upload-icon {
-  font-size: clamp(2.6rem, 8vw, 3.2rem);
+  display: flex;
   color: var(--accent-1);
+  filter: drop-shadow(0 0 12px rgba(99, 102, 241, 0.35));
 }
 
 .dropzone p {
@@ -104,8 +113,8 @@
 }
 
 .file-preview svg {
-  font-size: 1.4rem;
   color: var(--accent-3);
+  flex-shrink: 0;
 }
 
 .file-size {

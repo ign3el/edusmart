@@ -1,14 +1,13 @@
 import { StoryDepthScene } from './3d/StoryDepthScene'
 
-export function Scene3D({ scene, imageUrl, imageLoaded, imageError, isMobile, sceneIndex }) {
+export function Scene3D({ imageUrl, prevImageUrl, isMobile, isPlaying, pointerTiltRef }) {
   return (
     <StoryDepthScene
-      scene={scene}
       imageUrl={imageUrl}
-      imageLoaded={imageLoaded}
-      imageError={imageError}
+      prevImageUrl={prevImageUrl}
       isMobile={isMobile}
-      sceneIndex={sceneIndex}
+      isPlaying={isPlaying}
+      pointerTiltRef={pointerTiltRef}
     />
   )
 }

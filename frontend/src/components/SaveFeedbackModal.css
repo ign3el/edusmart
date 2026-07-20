@@ -1,0 +1,98 @@
+.feedback-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 39, 0.85);
+  display: grid;
+  place-items: center;
+  z-index: 1200;
+  backdrop-filter: var(--blur);
+  padding: 1rem;
+}
+
+.feedback-modal-content {
+  width: min(360px, 100%);
+  background: linear-gradient(150deg, rgba(15, 22, 66, 0.92), rgba(18, 31, 77, 0.85));
+  border-radius: var(--radius-lg);
+  padding: clamp(1.6rem, 5vw, 2.1rem);
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 0.6rem;
+}
+
+.feedback-modal-content.is-success {
+  border: 1.5px solid var(--success, #22c55e);
+  box-shadow: 0 30px 60px rgba(34, 197, 94, 0.25);
+}
+
+.feedback-modal-content.is-error {
+  border: 1.5px solid var(--danger, #ef4444);
+  box-shadow: 0 30px 60px rgba(239, 68, 68, 0.25);
+}
+
+.feedback-icon-ring {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 0.3rem;
+}
+
+.is-success .feedback-icon-ring {
+  color: var(--success, #22c55e);
+}
+
+.is-error .feedback-icon-ring {
+  color: var(--danger, #ef4444);
+}
+
+.feedback-icon-glow {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: currentColor;
+  filter: blur(14px);
+  opacity: 0.35;
+  animation: feedbackGlowPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes feedbackGlowPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.92); }
+  50% { opacity: 0.5; transform: scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feedback-icon-glow {
+    animation: none;
+    opacity: 0.3;
+  }
+}
+
+.feedback-modal-content h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--ink-1);
+}
+
+.feedback-modal-content p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.9rem;
+}
+
+.feedback-dismiss-btn {
+  margin-top: 0.6rem;
+  padding: 0.6rem 1.4rem;
+  border-radius: 999px;
+  border: none;
+  background: var(--accent-gradient);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 0.85rem;
+  transition: transform var(--transition);
+}
+
+.feedback-dismiss-btn:hover {
+  transform: translateY(-2px);
+}

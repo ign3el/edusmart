@@ -22,6 +22,9 @@
 }
 
 .modal-content h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   text-align: left;
   margin: 0;
   font-size: clamp(1.35rem, 3vw, 1.7rem);
@@ -29,6 +32,12 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.modal-content h2 svg {
+  color: #a855f7;
+  -webkit-text-fill-color: initial;
+  flex-shrink: 0;
 }
 
 .modal-description {
@@ -65,6 +74,9 @@
 }
 
 .progress-message {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   margin: 0;
   font-size: 0.95rem;
   color: var(--accent-1);

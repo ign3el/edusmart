@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { ChevronLeft, Pencil, Check, X, Lock, LogOut } from 'lucide-react';
 import apiClient from '../services/api';
 import './UserProfile.css';
 
@@ -128,7 +129,7 @@ function UserProfile({ user, onBack, onLogout }) {
     <div className="user-profile">
       <div className="profile-header">
         <button onClick={onBack} className="back-button">
-          ← Back
+          <ChevronLeft size={16} /> Back
         </button>
         <h1>User Profile</h1>
       </div>
@@ -166,18 +167,18 @@ function UserProfile({ user, onBack, onLogout }) {
               />
               {!isEditing ? (
                 <button onClick={() => setIsEditing(true)} className="edit-button">
-                  ✏️ Edit
+                  <Pencil size={14} /> Edit
                 </button>
               ) : (
                 <div className="edit-actions">
                   <button onClick={handleUpdateUsername} disabled={loading} className="save-button">
-                    ✓ Save
+                    <Check size={14} /> Save
                   </button>
                   <button onClick={() => {
                     setIsEditing(false);
                     setUsername(user?.email?.split('@')[0] || '');
                   }} className="cancel-button">
-                    ✕ Cancel
+                    <X size={14} /> Cancel
                   </button>
                 </div>
               )}
@@ -207,7 +208,7 @@ function UserProfile({ user, onBack, onLogout }) {
           
           {!isChangingPassword ? (
             <button onClick={() => setIsChangingPassword(true)} className="change-password-button">
-              🔒 Change Password
+              <Lock size={16} /> Change Password
             </button>
           ) : (
             <form onSubmit={handleChangePassword} className="password-form">
@@ -311,7 +312,7 @@ function UserProfile({ user, onBack, onLogout }) {
         >
           <h2>Account Actions</h2>
           <button onClick={onLogout} className="logout-button">
-            🚪 Logout
+            <LogOut size={16} /> Logout
           </button>
         </motion.div>
       </div>

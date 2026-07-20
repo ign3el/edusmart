@@ -12,33 +12,8 @@ from auth import create_access_token, verify_token, generate_secure_token, get_p
 from database_models import User, UserOperations
 from services.email_service import send_verification_email, send_password_reset_email
 from database import get_db_cursor
-import os
 
 logger = logging.getLogger(__name__)
-
-# --- Development Mode Mock User ---
-DEV_USER = {
-    "id": 999,
-    "email": "dev@local",
-    "username": "developer",
-    "password_hash": "dev_password_hash",
-    "is_verified": True,
-    "is_premium": True,
-    "is_admin": True,
-    "last_verification_sent": None,
-    "created_at": datetime.now(),
-    "updated_at": datetime.now()
-}
-
-def get_dev_user():
-    """Return mock user for development mode."""
-    return DEV_USER.copy()
-
-def _is_dev_mode():
-    """Check if development mode is enabled with both ENV=development AND DEV_BYPASS_SECRET set.
-    Both conditions must be met to bypass authentication. This prevents accidental
-    production bypasses when ENV is misconfigured."""
-    return os.getenv("ENV") == "development" and bool(os.getenv("DEV_BYPASS_SECRET"))
 
 # --- Rate Limiter ---
 class RateLimiter:
@@ -114,10 +89,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     Dependency to get the current user from a JWT token.
     Raises 401 Unauthorized if the token is invalid, expired, or user not found.
     """
-    # Development mode: Return mock user
-    if _is_dev_mode():
-        return get_dev_user()
-    
     email = verify_token(token)
     if not email:
         raise HTTPException(
@@ -189,12 +160,6 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
     ip = request.client.host if request else "unknown"
     if not _rate_limiter.check(ip):
         raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
-    
-    # Development mode: Skip authentication (requires both ENV=development and DEV_BYPASS_SECRET)
-    if _is_dev_mode():
-        logger.info("✓ Development mode: Skipping authentication")
-        access_token = create_access_token(data={"sub": DEV_USER['email']})
-        return {"access_token": access_token, "token_type": "bearer"}
     
     # Try to authenticate with either email or username
     user = None

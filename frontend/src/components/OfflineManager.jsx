@@ -1,11 +1,25 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import JSZip from 'jszip'
+import {
+  Smartphone, Wifi, WifiOff, HardDrive, Lock, Backpack, RefreshCw, Search, X,
+  Play, Trash2, FolderInput, ChevronLeft, ChevronRight, Send, CheckCircle2, Sparkles
+} from 'lucide-react'
 import apiClient from '../services/api'
 import * as storyStorage from '../utils/storyStorage'
 import { isStandalone } from '../utils/serviceWorkerRegistration'
 import { getItemsPerPage } from '../utils/responsiveUtils'
 import './OfflineManager.css'
+
+const gridVariants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.05 } }
+}
+
+const cardVariants = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: 'easeOut' } }
+}
 
 function OfflineManager({ onLoadOffline, onBack }) {
   const [onlineStories, setOnlineStories] = useState([])
@@ -26,7 +40,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
     try {
       const stories = await storyStorage.listStories()
       setLocalStories(stories)
-      
+
       // Get storage info
       const info = await storyStorage.getStorageInfo()
       setStorageInfo(info)
@@ -40,35 +54,35 @@ function OfflineManager({ onLoadOffline, onBack }) {
     if (isOnline) {
       loadOnlineStories()
     }
-    
+
     // Check if running as PWA
     setIsPWA(isStandalone())
-    
+
     // Check if install prompt is available
     setShowInstallPrompt(typeof window.showInstallPrompt === 'function')
-    
+
     // Handle window resize for responsive pagination
     const handleResize = () => {
       // Fixed 5 items per page for offline manager
     }
-    
+
     const handleStorage = (event) => {
       if (event.key?.startsWith('edusmart_story_')) {
         loadLocalStories()
       }
     }
-    
+
     const handleOnline = () => {
       setIsOnline(true)
       loadOnlineStories()
     }
     const handleOffline = () => setIsOnline(false)
-    
+
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
     window.addEventListener('storage', handleStorage)
     window.addEventListener('resize', handleResize)
-    
+
     return () => {
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
@@ -83,27 +97,6 @@ function OfflineManager({ onLoadOffline, onBack }) {
       setOnlineStories(response.data)
     } catch (error) {
       console.error('Error loading online stories:', error)
-    }
-  }
-
-  const saveToLocal = async (storyData, storyName) => {
-    try {
-      const storyId = `local_${Date.now()}`
-      const localStory = {
-        id: storyId,
-        name: storyName,
-        storyData: storyData,
-        savedAt: Date.now(),
-        isOffline: true
-      }
-      
-      const result = await storyStorage.saveStory(localStory)
-      setLocalStories(prev => [localStory, ...prev])
-      
-      console.log(`Story saved (${result.size.toFixed(2)}MB) to ${result.storage}`)
-      return storyId
-    } catch (error) {
-      throw new Error('Failed to save locally: ' + error.message)
     }
   }
 
@@ -122,7 +115,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
 
   const deleteLocal = async (storyId) => {
     if (!confirm('Delete this local story?')) return
-    
+
     try {
       await storyStorage.deleteStory(storyId)
       setLocalStories(prev => prev.filter(s => s.id !== storyId))
@@ -132,31 +125,21 @@ function OfflineManager({ onLoadOffline, onBack }) {
     }
   }
 
-  const handleInstallPWA = async () => {
-    if (window.showInstallPrompt) {
-      const accepted = await window.showInstallPrompt()
-      if (accepted) {
-        setShowInstallPrompt(false)
-        setIsPWA(true)
-      }
-    }
-  }
-
   const exportStory = async (storyId, storyName) => {
     if (!isOnline) {
       alert('Export requires internet connection')
       return
     }
-    
+
     setDownloading(storyId)
     setDownloadMessage('Zipping file...')
-    
+
     try {
       // Step 1: Request ZIP creation
       const response = await apiClient.get(`/api/export-story/${storyId}`, {
         responseType: 'blob'
       })
-      
+
       // Step 2: Save
       setDownloadMessage('Saving file...')
       const blob = response.data
@@ -168,10 +151,10 @@ function OfflineManager({ onLoadOffline, onBack }) {
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
-      
+
       // Step 4: Complete
-      setDownloadMessage('Complete! ✓')
-      
+      setDownloadMessage('Complete!')
+
       // Clear message after delay
       setTimeout(() => {
         setDownloadMessage('')
@@ -189,22 +172,22 @@ function OfflineManager({ onLoadOffline, onBack }) {
   const importStory = async (event) => {
     const file = event.target.files[0]
     if (!file) return
-    
+
     // Reset file input
     event.target.value = null
-    
+
     setDownloading('import')
     setDownloadMessage('Extracting ZIP file...')
-    
+
     try {
       // Load ZIP file
       const zip = new JSZip()
       const zipData = await zip.loadAsync(file)
-      
+
       // Try to read story.json (new format from export)
       let storyData = null
       const storyFile = zipData.file('story.json')
-      
+
       if (storyFile) {
         // New format: story.json with embedded structure
         setDownloadMessage('Reading story data...')
@@ -216,26 +199,26 @@ function OfflineManager({ onLoadOffline, onBack }) {
         if (!metadataFile) {
           throw new Error('Invalid story package: missing story.json or metadata.json')
         }
-        
+
         setDownloadMessage('Reading story data...')
         const metadataText = await metadataFile.async('string')
         const metadata = JSON.parse(metadataText)
-        
+
         const storyDataFile = zipData.file('story_data.json')
         if (!storyDataFile) {
           throw new Error('Invalid story package: missing story_data.json')
         }
-        
+
         const storyDataText = await storyDataFile.async('string')
         storyData = JSON.parse(storyDataText)
       }
-      
+
       setDownloadMessage('Converting media to base64...')
-      
+
       // Convert all scene images and audio to base64 data URLs
       for (let i = 0; i < storyData.scenes.length; i++) {
         const scene = storyData.scenes[i]
-        
+
         // Convert image to base64
         if (scene.image_url) {
           const imagePath = scene.image_url.replace('/media/', '')
@@ -252,7 +235,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
               'svg': 'image/svg+xml'
             }
             const imageMimeType = mimeTypes[imageExt] || 'image/png'
-            
+
             const imageBlob = await imageFile.async('blob')
             // Create blob with correct MIME type
             const typedImageBlob = new Blob([imageBlob], { type: imageMimeType })
@@ -264,7 +247,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
             scene.image_url = imageDataUrl
           }
         }
-        
+
         // Convert audio to base64
         if (scene.audio_url) {
           const audioPath = scene.audio_url.replace('/media/', '')
@@ -281,7 +264,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
               'aac': 'audio/aac'
             }
             const audioMimeType = mimeTypes[audioExt] || 'audio/mpeg'
-            
+
             const audioBlob = await audioFile.async('blob')
             // Create blob with correct MIME type
             const typedAudioBlob = new Blob([audioBlob], { type: audioMimeType })
@@ -294,9 +277,9 @@ function OfflineManager({ onLoadOffline, onBack }) {
           }
         }
       }
-      
+
       setDownloadMessage('Saving to storage...')
-      
+
       // Save using storyStorage (auto-selects IndexedDB or localStorage)
       const localStoryId = `local_${Date.now()}`
       const localStory = {
@@ -306,12 +289,12 @@ function OfflineManager({ onLoadOffline, onBack }) {
         savedAt: Date.now(),
         isOffline: true
       }
-      
+
       const result = await storyStorage.saveStory(localStory)
-      console.log(`Story imported (${result.size.toFixed(2)}MB) to ${result.storage}`)
-      
-      setDownloadMessage('Complete! ✓')
-      
+      if (import.meta.env.DEV) console.log(`Story imported (${result.size.toFixed(2)}MB) to ${result.storage}`)
+
+      setDownloadMessage('Complete!')
+
       // Navigate to story player after brief delay
       setTimeout(() => {
         setDownloadMessage('')
@@ -328,26 +311,26 @@ function OfflineManager({ onLoadOffline, onBack }) {
   }
 
   const formatDate = (timestamp) => {
-    return new Date(timestamp).toLocaleDateString() + ' ' + 
+    return new Date(timestamp).toLocaleDateString() + ' ' +
            new Date(timestamp).toLocaleTimeString()
   }
 
   return (
-    <motion.div 
+    <motion.div
       className="offline-manager"
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
     >
       <div className="offline-header">
-        <h2>📱 Offline Story Manager</h2>
+        <h2><Smartphone size={22} /> Offline Story Manager</h2>
         <div className="header-info">
           <div className={`connection-status ${isOnline ? 'online' : 'offline'}`}>
-            {isOnline ? '🟢 Online' : '🔴 Offline'}
+            {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />} {isOnline ? 'Online' : 'Offline'}
           </div>
           {storageInfo && (
             <div className="storage-info" title={storageInfo.persisted ? 'Storage protected from automatic deletion' : 'Storage may be cleared by browser'}>
-              💾 {storageInfo.usage}MB / {storageInfo.quota}MB
-              {storageInfo.persisted && ' 🔒'}
+              <HardDrive size={16} /> {storageInfo.usage}MB / {storageInfo.quota}MB
+              {storageInfo.persisted && <Lock size={14} />}
             </div>
           )}
         </div>
@@ -357,15 +340,15 @@ function OfflineManager({ onLoadOffline, onBack }) {
         <div className="offline-library">
           <div className="library-header">
             <div>
-              <h3>🎒 Offline Stories</h3>
+              <h3><Backpack size={18} /> Offline Stories</h3>
               <p>Play adventures you've saved for offline fun.</p>
             </div>
-            <button className="refresh-btn" onClick={loadLocalStories}>↻ Refresh</button>
+            <button className="refresh-btn" onClick={loadLocalStories}><RefreshCw size={14} /> Refresh</button>
           </div>
 
         {localStories.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-emoji">🌟</div>
+            <Sparkles size={28} className="empty-emoji" />
             <div>
               <h4>No offline stories yet</h4>
               <p>Export a story or save one locally to see it here.</p>
@@ -375,9 +358,10 @@ function OfflineManager({ onLoadOffline, onBack }) {
           <>
             {/* Search Bar */}
             <div className="search-container">
+              <Search size={18} className="search-icon" />
               <input
                 type="text"
-                placeholder="🔍 Search offline stories..."
+                placeholder="Search offline stories..."
                 value={importSearchQuery}
                 onChange={(e) => {
                   setImportSearchQuery(e.target.value)
@@ -386,12 +370,12 @@ function OfflineManager({ onLoadOffline, onBack }) {
                 className="search-input"
               />
               {importSearchQuery && (
-                <button 
+                <button
                   className="clear-search"
                   onClick={() => setImportSearchQuery('')}
                   title="Clear search"
                 >
-                  ✕
+                  <X size={16} />
                 </button>
               )}
             </div>
@@ -407,7 +391,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
 
               return filtered.length === 0 ? (
                 <div className="empty-state">
-                  <div className="empty-emoji">🔍</div>
+                  <Search size={28} className="empty-emoji" />
                   <div>
                     <h4>No stories found</h4>
                     <p>No offline stories match "{importSearchQuery}"</p>
@@ -424,9 +408,9 @@ function OfflineManager({ onLoadOffline, onBack }) {
                     {importSearchQuery && ` matching "${importSearchQuery}"`}
                   </div>
 
-                  <div className="story-grid">
+                  <motion.div className="story-grid" variants={gridVariants} initial="hidden" animate="show">
                     {paginated.map((story, index) => (
-                      <div key={story.id} className={`story-card variant-${(index % 4) + 1}`}>
+                      <motion.div key={story.id} className={`story-card variant-${(index % 4) + 1}`} variants={cardVariants}>
                         <div className="story-card-top">
                           <span className="story-chip">Offline ready</span>
                           <span className="story-date">Saved {formatDate(story.savedAt)}</span>
@@ -434,12 +418,12 @@ function OfflineManager({ onLoadOffline, onBack }) {
                         <h4>{story.name || 'Untitled Story'}</h4>
                         <p className="story-subtext">{story.storyData?.title || 'Ready to play anywhere.'}</p>
                         <div className="story-card-actions">
-                          <button className="story-btn primary" onClick={() => loadFromLocal(story.id)}>▶ Play</button>
-                          <button className="story-btn ghost" onClick={() => deleteLocal(story.id)}>🗑 Delete</button>
+                          <button className="story-btn primary" onClick={() => loadFromLocal(story.id)}><Play size={14} /> Play</button>
+                          <button className="story-btn ghost" onClick={() => deleteLocal(story.id)}><Trash2 size={14} /> Delete</button>
                         </div>
-                      </div>
+                      </motion.div>
                     ))}
-                  </div>
+                  </motion.div>
 
                   {totalPages > 1 && (
                     <div className="pagination">
@@ -448,7 +432,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
                         disabled={importPage === 1}
                         className="pagination-btn"
                       >
-                        ← Previous
+                        <ChevronLeft size={16} /> Previous
                       </button>
                       <span className="pagination-info">
                         Page {importPage} of {totalPages}
@@ -458,7 +442,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
                         disabled={importPage >= totalPages}
                         className="pagination-btn"
                       >
-                        Next →
+                        Next <ChevronRight size={16} />
                       </button>
                     </div>
                   )}
@@ -470,7 +454,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
         </div>
 
         <div className="quick-import-section">
-          <h3>📁 Import Saved Story</h3>
+          <h3><FolderInput size={18} /> Import Saved Story</h3>
           <p>Upload exported story packages</p>
           <input
             type="file"
@@ -480,33 +464,34 @@ function OfflineManager({ onLoadOffline, onBack }) {
             id="quick-import-file"
           />
           <label htmlFor="quick-import-file" className="quick-import-btn">
-            📁 Choose File
+            <FolderInput size={16} /> Choose File
           </label>
         </div>
       </div>
 
       <div className="offline-actions">
       <div className="action-section">
-          <h3>📤 Export Online Stories</h3>
+          <h3><Send size={18} /> Export Online Stories</h3>
           <p>Download stories for offline use ({onlineStories.length} total)</p>
-          
+
           {!isOnline && (
             <div className="offline-warning">
-              <span className="offline-icon">📡</span>
+              <WifiOff size={28} className="offline-icon" />
               <div>
                 <strong>You are offline!</strong>
                 <p>Cannot download online stories while offline. Please reconnect to download stories for offline use.</p>
               </div>
             </div>
           )}
-          
+
           {onlineStories.length > 0 ? (
             <>
               {/* Search Bar */}
               <div className="search-container">
+                <Search size={18} className="search-icon" />
                 <input
                   type="text"
-                  placeholder="🔍 Search stories..."
+                  placeholder="Search stories..."
                   value={exportSearchQuery}
                   onChange={(e) => {
                     setExportSearchQuery(e.target.value)
@@ -515,12 +500,12 @@ function OfflineManager({ onLoadOffline, onBack }) {
                   className="search-input"
                 />
                 {exportSearchQuery && (
-                  <button 
+                  <button
                     className="clear-search"
                     onClick={() => setExportSearchQuery('')}
                     title="Clear search"
                   >
-                    ✕
+                    <X size={16} />
                   </button>
                 )}
               </div>
@@ -548,13 +533,15 @@ function OfflineManager({ onLoadOffline, onBack }) {
                       {paginated.map((story) => (
                         <div key={story.story_id} className="export-item">
                           <span>{story.name}</span>
-                          <button 
+                          <button
                             className="export-btn"
                             onClick={() => exportStory(story.story_id, story.name)}
                             disabled={downloading !== null || !isOnline}
                             title={!isOnline ? "Cannot download while offline" : "Download for offline use"}
                           >
-                            {downloading === story.story_id ? '⏳ Downloading...' : '📥 Export'}
+                            {downloading === story.story_id
+                              ? <><RefreshCw size={14} className="spin-icon" /> Downloading...</>
+                              : <><Send size={14} /> Export</>}
                           </button>
                         </div>
                       ))}
@@ -566,7 +553,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
                           disabled={exportPage === 1}
                           className="pagination-btn"
                         >
-                          ← Previous
+                          <ChevronLeft size={16} /> Previous
                         </button>
                         <span className="pagination-info">
                           Page {exportPage} of {totalPages}
@@ -576,7 +563,7 @@ function OfflineManager({ onLoadOffline, onBack }) {
                           disabled={exportPage >= totalPages}
                           className="pagination-btn"
                         >
-                          Next →
+                          Next <ChevronRight size={16} />
                         </button>
                       </div>
                     )}
@@ -592,53 +579,53 @@ function OfflineManager({ onLoadOffline, onBack }) {
 
       <div className="offline-footer">
         <button className="back-btn" onClick={onBack}>
-          ← Back to Home
+          <ChevronLeft size={16} /> Back to Home
         </button>
       </div>
 
       <AnimatePresence>
         {downloadMessage && (
           <div className="download-popup">
-            <motion.div 
+            <motion.div
               className="download-popup-content"
               initial={{ opacity: 0, scale: 0.8 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
             >
               <div>
-                <div className="spinner"></div>
+                {downloadMessage === 'Complete!' ? <CheckCircle2 size={22} /> : <div className="spinner"></div>}
               </div>
               <p>{downloadMessage}</p>
-              
+
               {/* Progress Bar */}
               <div className="progress-bar-container">
-                <div 
+                <div
                   className="progress-bar"
                   style={{
-                    width: downloadMessage.includes('Uploading') || downloadMessage.includes('Zipping') || downloadMessage.includes('Extracting') ? '25%' : 
-                           downloadMessage.includes('Downloading') || downloadMessage.includes('Reading') ? '60%' : 
+                    width: downloadMessage.includes('Uploading') || downloadMessage.includes('Zipping') || downloadMessage.includes('Extracting') ? '25%' :
+                           downloadMessage.includes('Downloading') || downloadMessage.includes('Reading') ? '60%' :
                            downloadMessage.includes('Saving') || downloadMessage.includes('Converting') ? '85%' : '100%',
                     transition: 'width 0.4s ease'
                   }}
                 ></div>
               </div>
-              
+
               {/* Step Indicators */}
               <div className="progress-steps">
-                <div className={`progress-step ${(downloadMessage.includes('Uploading') || downloadMessage.includes('Zipping') || downloadMessage.includes('Extracting')) ? 'active' : (downloadMessage.includes('Downloading') || downloadMessage.includes('Reading') || downloadMessage.includes('Saving') || downloadMessage.includes('Converting') || downloadMessage === 'Complete! ✓') ? 'completed' : ''}`}>
+                <div className={`progress-step ${(downloadMessage.includes('Uploading') || downloadMessage.includes('Zipping') || downloadMessage.includes('Extracting')) ? 'active' : (downloadMessage.includes('Downloading') || downloadMessage.includes('Reading') || downloadMessage.includes('Saving') || downloadMessage.includes('Converting') || downloadMessage === 'Complete!') ? 'completed' : ''}`}>
                   <div className="step-dot">1</div>
                   <span>{downloadMessage.includes('Uploading') ? 'Upload' : downloadMessage.includes('Extracting') ? 'Extract' : 'Zip'}</span>
                 </div>
-                <div className={`progress-step ${(downloadMessage.includes('Downloading') || downloadMessage.includes('Reading')) ? 'active' : (downloadMessage.includes('Saving') || downloadMessage.includes('Converting') || downloadMessage === 'Complete! ✓') ? 'completed' : ''}`}>
+                <div className={`progress-step ${(downloadMessage.includes('Downloading') || downloadMessage.includes('Reading')) ? 'active' : (downloadMessage.includes('Saving') || downloadMessage.includes('Converting') || downloadMessage === 'Complete!') ? 'completed' : ''}`}>
                   <div className="step-dot">2</div>
                   <span>{downloadMessage.includes('Reading') ? 'Read' : 'Download'}</span>
                 </div>
-                <div className={`progress-step ${(downloadMessage.includes('Saving') || downloadMessage.includes('Converting')) ? 'active' : downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
+                <div className={`progress-step ${(downloadMessage.includes('Saving') || downloadMessage.includes('Converting')) ? 'active' : downloadMessage === 'Complete!' ? 'completed' : ''}`}>
                   <div className="step-dot">3</div>
                   <span>{downloadMessage.includes('Converting') ? 'Convert' : 'Save'}</span>
                 </div>
-                <div className={`progress-step ${downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                  <div className="step-dot">✓</div>
+                <div className={`progress-step ${downloadMessage === 'Complete!' ? 'completed' : ''}`}>
+                  <div className="step-dot"><CheckCircle2 size={14} /></div>
                   <span>Done</span>
                 </div>
               </div>

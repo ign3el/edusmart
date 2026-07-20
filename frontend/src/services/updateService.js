@@ -20,17 +20,29 @@ class UpdateService {
       if (!response.ok) return false;
       
       const serverVersion = await response.json();
-      
+
       // Check if version or build time has changed
       const localVersion = localStorage.getItem('appVersion') || CURRENT_VERSION;
       const localBuildTime = localStorage.getItem('appBuildTime');
-      
-      if (serverVersion.version !== localVersion || 
+
+      // First time this browser has ever checked - adopt the current server
+      // build as the baseline instead of flagging it as an "update". There's
+      // nothing to update from on a first visit; leaving appBuildTime unset
+      // made every fresh session nag "update available" permanently (it
+      // could never match a real buildTime), which is exactly the kind of
+      // false alarm that trains someone to dismiss real ones too.
+      if (!localBuildTime) {
+        localStorage.setItem('appVersion', serverVersion.version);
+        localStorage.setItem('appBuildTime', serverVersion.buildTime);
+        return false;
+      }
+
+      if (serverVersion.version !== localVersion ||
           serverVersion.buildTime !== localBuildTime) {
         this.isUpdateAvailable = true;
         return true;
       }
-      
+
       return false;
     } catch (error) {
       console.error('Update check failed:', error);

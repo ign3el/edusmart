@@ -1,6 +1,15 @@
 // Service Worker registration utility
 // Handles installation, updates, and offline detection
 
+// Update UX is owned entirely by updateService.js's version.json polling and
+// App.jsx's non-native modal (see the comment on handleCheckForUpdate there).
+// This function used to also run its own competing native confirm()-dialog
+// update flow, plus an unconditional controllerchange listener that force-
+// reloaded the page the instant any new service worker activated - with no
+// warning, that could yank a story or quiz out from under someone mid-
+// session. Registration here now just keeps the worker itself current;
+// sw.js's own install/activate handlers (skipWaiting + clients.claim)
+// already swap it in cleanly in the background.
 export function registerServiceWorker() {
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -8,47 +17,15 @@ export function registerServiceWorker() {
         .register('/sw.js')
         .then((registration) => {
           console.log('✅ Service Worker registered:', registration.scope);
-          
+
           // Check for updates periodically
           setInterval(() => {
             registration.update();
           }, 60000); // Check every minute
-          
-          // Handle updates
-          registration.addEventListener('updatefound', () => {
-            const newWorker = registration.installing;
-            console.log('🔄 Service Worker update found');
-            
-            if (newWorker) {
-              newWorker.addEventListener('statechange', () => {
-                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                  // New service worker available, prompt user to refresh
-                  if (confirm('New version available! Reload to update?')) {
-                    // Wait for controller before reloading
-                    navigator.serviceWorker.addEventListener('controllerchange', () => {
-                      window.location.reload();
-                    });
-                    newWorker.postMessage({ type: 'SKIP_WAITING' });
-                  }
-                }
-              });
-              
-              // Add error handler to prevent unhandled promise rejections
-              newWorker.addEventListener('error', (error) => {
-                console.error('❌ Service Worker error:', error);
-              });
-            }
-          });
         })
         .catch((error) => {
           console.error('❌ Service Worker registration failed:', error);
         });
-      
-      // Handle controller change (new SW activated)
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        console.log('🔄 Service Worker controller changed, reloading...');
-        window.location.reload();
-      });
     });
   } else {
     console.warn('⚠️ Service Workers not supported in this browser');

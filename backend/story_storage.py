@@ -57,6 +57,9 @@ class StoryStorageManager:
     
     def get_story_path(self, story_id: str, in_saved: bool = False) -> str:
         """Get the full path to a story folder"""
+        # Prevent path traversal attacks
+        if ".." in story_id or "/" in story_id or "\\" in story_id:
+            raise ValueError(f"Invalid story_id: contains path traversal characters")
         base_dir = SAVED_STORIES_DIR if in_saved else GENERATED_STORIES_DIR
         return os.path.join(base_dir, story_id)
     
@@ -193,22 +196,34 @@ class StoryStorageManager:
         return dest_path
     
     def delete_story(self, story_id: str, in_saved: bool = False):
-        """Delete a story folder and all its contents"""
+        """Delete a story folder and all its contents.
+
+        For generated (unsaved) stories, also purges the matching job_state.db
+        rows - this used to only delete the folder, leaving a permanent
+        orphaned record behind in job_state.db every time a story expired.
+        """
         story_path = self.get_story_path(story_id, in_saved)
-        
+
         if not os.path.exists(story_path):
             logger.warning(f"Story folder already deleted: {story_path}")
-            return
-        
-        try:
-            shutil.rmtree(story_path)
-            logger.info(f"🗑️ Deleted story folder: {story_path}")
-        except Exception as e:
-            logger.error(f"Failed to delete story {story_id}: {e}")
-    
+        else:
+            try:
+                shutil.rmtree(story_path)
+                logger.info(f"🗑️ Deleted story folder: {story_path}")
+            except Exception as e:
+                logger.error(f"Failed to delete story {story_id}: {e}")
+
+        if not in_saved:
+            try:
+                from job_state import job_manager
+                job_manager.delete_story(story_id)
+            except Exception as e:
+                logger.error(f"Failed to delete job_state.db rows for {story_id}: {e}")
+
     def cleanup_expired_stories(self) -> int:
         """
-        Clean up stories older than TTL from generated_stories
+        Clean up stories older than TTL from generated_stories only.
+        Saved stories are never auto-deleted by this scheduler.
         
         Returns:
             Number of stories deleted
@@ -217,7 +232,7 @@ class StoryStorageManager:
         cutoff_time = now - (STORY_TTL_HOURS * 3600)
         deleted_count = 0
         
-        logger.info(f"🧹 Running cleanup for stories older than {STORY_TTL_HOURS}h...")
+        logger.info(f"🧹 Running cleanup for generated stories older than {STORY_TTL_HOURS}h...")
         
         if not os.path.exists(GENERATED_STORIES_DIR):
             return 0
@@ -239,14 +254,14 @@ class StoryStorageManager:
             
             if created_at < cutoff_time:
                 age_hours = (now - created_at) / 3600
-                logger.info(f"🗑️ Deleting expired story {story_id} (age: {age_hours:.1f}h)")
+                logger.info(f"🗑️ Deleting expired generated story {story_id} (age: {age_hours:.1f}h)")
                 self.delete_story(story_id, in_saved=False)
                 deleted_count += 1
         
         if deleted_count > 0:
-            logger.info(f"✅ Cleanup complete: {deleted_count} stories deleted")
+            logger.info(f"✅ Cleanup complete: {deleted_count} generated stories deleted")
         else:
-            logger.info("✅ Cleanup complete: No expired stories found")
+            logger.info("✅ Cleanup complete: No expired generated stories found")
         
         return deleted_count
     
@@ -441,30 +456,41 @@ storage_manager = StoryStorageManager()
 
 
 async def cleanup_scheduler_task():
-    """Background task that runs cleanup every hour"""
+    """Background task that runs cleanup every hour.
+
+    Runs once shortly after startup, then every hour after that - a
+    sleep-then-run loop means a container that gets redeployed more often
+    than the interval (common during active development) could go its
+    entire life without ever completing a single cleanup pass.
+    """
     logger.info("🚀 Starting story cleanup scheduler")
-    
+    await asyncio.sleep(60)  # let startup finish before the first pass
+
     while True:
         try:
-            await asyncio.sleep(3600)  # Run every hour
             storage_manager.cleanup_expired_stories()
         except Exception as e:
             logger.error(f"❌ Error in cleanup scheduler: {e}", exc_info=True)
             # Continue running even if cleanup fails
+        await asyncio.sleep(3600)  # Run every hour
 
 
 async def database_cleanup_scheduler_task():
     """
     Background task that runs database cleanup every 2 days (48 hours).
     Removes orphaned stories and old temporary data from both MySQL and SQLite.
+
+    Runs once shortly after startup, then every 48h after that - a
+    sleep-then-run loop means a container redeployed more often than the
+    interval could go its entire life without ever completing a pass. That
+    was exactly why job_state.db still had 50 orphaned rows despite this
+    scheduler supposedly cleaning them up every 2 days.
     """
     logger.info("🚀 Starting database cleanup scheduler (runs every 2 days)")
-    
+    await asyncio.sleep(120)  # let startup finish before the first pass
+
     while True:
         try:
-            # Sleep for 48 hours (2 days)
-            await asyncio.sleep(48 * 3600)
-            
             logger.info("🧹 Running database cleanup...")
             
             # Import here to avoid circular imports
@@ -526,8 +552,10 @@ async def database_cleanup_scheduler_task():
             import sqlite3
             
             try:
-                # Connect to job state database
-                conn = sqlite3.connect("job_state.db")
+                # Connect to job state database (must match job_state.py's
+                # actual path - this used to point at a stale file in the
+                # source tree instead of the live database)
+                conn = sqlite3.connect("db_data/job_state.db")
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -571,7 +599,8 @@ async def database_cleanup_scheduler_task():
                 logger.error(f"❌ SQLite cleanup error: {sqlite_error}", exc_info=True)
             
             logger.info("✅ Complete database cleanup finished")
-            
+
         except Exception as e:
             logger.error(f"❌ Error in database cleanup scheduler: {e}", exc_info=True)
             # Continue running even if cleanup fails
+        await asyncio.sleep(48 * 3600)  # Run every 2 days

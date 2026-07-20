@@ -1,10 +1,12 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { FiUploadCloud, FiFile } from 'react-icons/fi'
+import { motion } from 'framer-motion'
+import { animate } from 'animejs'
+import { UploadCloud, File as FileIcon, FileText } from 'lucide-react'
 import './FileUpload.css'
 
 function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading }) {
-  const fileInputRef = useRef(null)
+  const iconRef = useRef(null)
 
   const onDrop = useCallback((acceptedFiles) => {
     if (acceptedFiles.length > 0) {
@@ -17,21 +19,33 @@ function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading })
     accept: {
       'application/pdf': ['.pdf'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-      'application/msword': ['.doc']
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
     },
     maxFiles: 1
   })
 
+  useEffect(() => {
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (prefersReducedMotion || !iconRef.current) return
+    const animation = animate(iconRef.current, {
+      translateY: [-4, 4, -4],
+      duration: 2600,
+      easing: 'easeInOutSine',
+      loop: true,
+    })
+    return () => animation.pause()
+  }, [])
+
   return (
     <div className="file-upload">
-      <h2>📄 Upload Learning Material</h2>
-      <p className="subtitle">Upload a PDF or Word document to get started</p>
+      <h2><FileText size={22} aria-hidden="true" /> Upload Learning Material</h2>
+      <p className="subtitle">Upload a PDF, Word, or PowerPoint document to get started</p>
 
       <div className="grade-selector">
         <label htmlFor="grade">Select Grade Level:</label>
-        <select 
-          id="grade" 
-          value={gradeLevel} 
+        <select
+          id="grade"
+          value={gradeLevel}
           onChange={(e) => onGradeLevelChange(parseInt(e.target.value))}
         >
           <option value={1}>KG-1 / Grade 1</option>
@@ -44,30 +58,37 @@ function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading })
         </select>
       </div>
 
-      <div 
-        {...getRootProps()} 
+      <div
+        {...getRootProps()}
         className={`dropzone ${isDragActive ? 'active' : ''}`}
       >
         <input {...getInputProps()} />
-        <FiUploadCloud className="upload-icon" />
+        <div ref={iconRef} className="upload-icon">
+          <UploadCloud size={40} aria-hidden="true" />
+        </div>
         {isDragActive ? (
           <p>Drop your file here...</p>
         ) : (
           <>
             <p>Drag & drop a file here, or click to browse</p>
-            <span className="file-types">PDF, DOCX, DOC</span>
+            <span className="file-types">PDF, DOCX, PPTX</span>
           </>
         )}
       </div>
 
       {acceptedFiles.length > 0 && (
-        <div className="file-preview">
-          <FiFile />
+        <motion.div
+          className="file-preview"
+          initial={{ opacity: 0, scale: 0.9, y: 8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ type: 'spring', damping: 22, stiffness: 300 }}
+        >
+          <FileIcon size={20} aria-hidden="true" />
           <span>{acceptedFiles[0].name}</span>
           <span className="file-size">
             ({(acceptedFiles[0].size / 1024 / 1024).toFixed(2)} MB)
           </span>
-        </div>
+        </motion.div>
       )}
     </div>
   )

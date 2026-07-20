@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import updateService from '../services/updateService'
+import {
+  Home, BookOpen, FolderOpen, Settings, Save, Download, FileText,
+  Sparkles, RefreshCw, User, LogOut, Menu, X, Smartphone, Check
+} from 'lucide-react'
 import './NavigationMenu.css'
 
-function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOfflineManager, onAdminClick, onProfile, onLogout, onSaveStory, onDownloadStory, isPlayingStory, currentStory, onShowFileViewer }) {
+function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOfflineManager, onAdminClick, onProfile, onLogout, onSaveStory, onDownloadStory, isPlayingStory, currentStory, onShowFileViewer, onCheckUpdate }) {
   const [isMobileOpen, setIsMobileOpen] = useState(false)
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
   const [showInstallPrompt, setShowInstallPrompt] = useState(false)
@@ -46,17 +49,7 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true)
     try {
-      const hasUpdate = await updateService.checkForUpdates()
-      if (hasUpdate) {
-        if (confirm('🔄 A new version is available! Update now?')) {
-          await updateService.applyUpdate()
-        }
-      } else {
-        alert('✅ You are using the latest version!')
-      }
-    } catch (error) {
-      console.error('Update check failed:', error)
-      alert('❌ Failed to check for updates')
+      await onCheckUpdate?.()
     } finally {
       setIsCheckingUpdate(false)
     }
@@ -78,8 +71,9 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
         <motion.div
           animate={{ rotate: isMobileOpen ? 90 : 0 }}
           transition={{ duration: 0.3 }}
+          style={{ display: 'flex' }}
         >
-          {isMobileOpen ? '✕' : '☰'}
+          {isMobileOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
         </motion.div>
       </button>
 
@@ -87,42 +81,42 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
       <nav className="desktop-menu">
         {onHome && (
           <button onClick={() => handleAction(onHome)} className="menu-btn">
-            🏠 Home
+            <Home size={16} aria-hidden="true" /> Home
           </button>
         )}
         {onLoadStories && (
           <button onClick={() => handleAction(onLoadStories)} className="menu-btn">
-            📚 Load Story
+            <BookOpen size={16} aria-hidden="true" /> Load Story
           </button>
         )}
         {onOfflineManager && (
           <button onClick={() => handleAction(onOfflineManager)} className="menu-btn">
-            📂 Offline
+            <FolderOpen size={16} aria-hidden="true" /> Offline
           </button>
         )}
         {isAdmin && onAdminClick && (
           <button onClick={() => handleAction(onAdminClick)} className="menu-btn admin">
-            ⚙️ Admin
+            <Settings size={16} aria-hidden="true" /> Admin
           </button>
         )}
         {isPlayingStory && onSaveStory && (
           <button onClick={() => handleAction(onSaveStory)} className="menu-btn primary">
-            💾 Save
+            <Save size={16} aria-hidden="true" /> Save
           </button>
         )}
         {isPlayingStory && onDownloadStory && (
           <button onClick={() => handleAction(onDownloadStory)} className="menu-btn primary">
-            📥 Download
+            <Download size={16} aria-hidden="true" /> Download
           </button>
         )}
         {currentStory?.persistent_path && (
           <button onClick={() => handleAction(onShowFileViewer)} className="menu-btn">
-            📄 View File
+            <FileText size={16} aria-hidden="true" /> View File
           </button>
         )}
         {onNewStory && (
           <button onClick={() => handleAction(onNewStory)} className="menu-btn primary">
-            ✨ New Story
+            <Sparkles size={16} aria-hidden="true" /> New Story
           </button>
         )}
         <button
@@ -131,16 +125,16 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
           disabled={isCheckingUpdate}
           title="Check for updates"
         >
-          {isCheckingUpdate ? '⏳' : '🔄'} Update
+          <RefreshCw size={16} aria-hidden="true" className={isCheckingUpdate ? 'spin-icon' : ''} /> Update
         </button>
         {onProfile && (
           <button onClick={() => handleAction(onProfile)} className="menu-btn profile" title="Account">
-            {user?.email?.split('@')[0] || '👤'}
+            <User size={16} aria-hidden="true" /> {user?.email?.split('@')[0] || 'Account'}
           </button>
         )}
         {onLogout && (
           <button onClick={() => handleAction(onLogout)} className="menu-btn logout">
-            🚪 Logout
+            <LogOut size={16} aria-hidden="true" /> Logout
           </button>
         )}
       </nav>
@@ -166,7 +160,9 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
               >
                 <div className="drawer-header">
                   <h3>Menu</h3>
-                  <button onClick={() => setIsMobileOpen(false)} className="drawer-close-btn">✕</button>
+                  <button onClick={() => setIsMobileOpen(false)} className="drawer-close-btn" aria-label="Close menu">
+                    <X size={22} aria-hidden="true" />
+                  </button>
                 </div>
                 <div className="drawer-content">
                   {user && (
@@ -183,20 +179,20 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
                   <div className="section-container">
                     <div>
                       <h4 className="section-header">Navigation</h4>
-                      {onHome && <button onClick={() => handleAction(onHome)} className="drawer-btn"><span className="icon">🏠</span><span>Home</span></button>}
-                      {onLoadStories && <button onClick={() => handleAction(onLoadStories)} className="drawer-btn"><span className="icon">📚</span><span>Load Saved Story</span></button>}
-                      {onOfflineManager && <button onClick={() => handleAction(onOfflineManager)} className="drawer-btn"><span className="icon">📂</span><span>Offline Manager</span></button>}
-                      {onNewStory && <button onClick={() => handleAction(onNewStory)} className="drawer-btn"><span className="icon">✨</span><span>New Story</span></button>}
-                      {isPlayingStory && onSaveStory && <button onClick={() => handleAction(onSaveStory)} className="drawer-btn primary"><span className="icon">💾</span><span>Save Story</span></button>}
-                      {isPlayingStory && onDownloadStory && <button onClick={() => handleAction(onDownloadStory)} className="drawer-btn primary"><span className="icon">📥</span><span>Download Story</span></button>}
-                      {currentStory?.persistent_path && <button onClick={() => handleAction(onShowFileViewer)} className="drawer-btn"><span className="icon">📄</span><span>View Current File</span></button>}
+                      {onHome && <button onClick={() => handleAction(onHome)} className="drawer-btn"><span className="icon"><Home size={18} aria-hidden="true" /></span><span>Home</span></button>}
+                      {onLoadStories && <button onClick={() => handleAction(onLoadStories)} className="drawer-btn"><span className="icon"><BookOpen size={18} aria-hidden="true" /></span><span>Load Saved Story</span></button>}
+                      {onOfflineManager && <button onClick={() => handleAction(onOfflineManager)} className="drawer-btn"><span className="icon"><FolderOpen size={18} aria-hidden="true" /></span><span>Offline Manager</span></button>}
+                      {onNewStory && <button onClick={() => handleAction(onNewStory)} className="drawer-btn"><span className="icon"><Sparkles size={18} aria-hidden="true" /></span><span>New Story</span></button>}
+                      {isPlayingStory && onSaveStory && <button onClick={() => handleAction(onSaveStory)} className="drawer-btn primary"><span className="icon"><Save size={18} aria-hidden="true" /></span><span>Save Story</span></button>}
+                      {isPlayingStory && onDownloadStory && <button onClick={() => handleAction(onDownloadStory)} className="drawer-btn primary"><span className="icon"><Download size={18} aria-hidden="true" /></span><span>Download Story</span></button>}
+                      {currentStory?.persistent_path && <button onClick={() => handleAction(onShowFileViewer)} className="drawer-btn"><span className="icon"><FileText size={18} aria-hidden="true" /></span><span>View Current File</span></button>}
                     </div>
                     {isAdmin && onAdminClick && (
                       <>
                         <div className="section-divider"></div>
                         <div>
                           <h4 className="section-header">Admin</h4>
-                          <button onClick={() => handleAction(onAdminClick)} className="drawer-btn"><span className="icon">⚙️</span><span>Admin Panel</span></button>
+                          <button onClick={() => handleAction(onAdminClick)} className="drawer-btn"><span className="icon"><Settings size={18} aria-hidden="true" /></span><span>Admin Panel</span></button>
                         </div>
                       </>
                     )}
@@ -204,16 +200,16 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
                     <div>
                       <h4 className="section-header">Account</h4>
                       <button onClick={() => { handleCheckUpdate(); setIsMobileOpen(false) }} className="drawer-btn" disabled={isCheckingUpdate}>
-                        <span className="icon">{isCheckingUpdate ? '⏳' : '🔄'}</span><span>Check for Updates</span>
+                        <span className="icon"><RefreshCw size={18} aria-hidden="true" className={isCheckingUpdate ? 'spin-icon' : ''} /></span><span>Check for Updates</span>
                       </button>
                       {!isPWA ? (
                         <button onClick={() => { handleInstallPWA(); setIsMobileOpen(false) }} className="drawer-btn primary">
-                          <span className="icon">📲</span><span>Install App</span>
+                          <span className="icon"><Smartphone size={18} aria-hidden="true" /></span><span>Install App</span>
                         </button>
                       ) : (
-                        <div className="status-indicator"><span className="icon">✓</span><span>App Installed</span></div>
+                        <div className="status-indicator"><span className="icon"><Check size={18} aria-hidden="true" /></span><span>App Installed</span></div>
                       )}
-                      {onLogout && <button onClick={() => handleAction(onLogout)} className="drawer-btn"><span className="icon">🚪</span><span>Logout</span></button>}
+                      {onLogout && <button onClick={() => handleAction(onLogout)} className="drawer-btn"><span className="icon"><LogOut size={18} aria-hidden="true" /></span><span>Logout</span></button>}
                     </div>
                   </div>
                 </div>

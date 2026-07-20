@@ -31,6 +31,8 @@ class Config:
     # TTS Configuration
     TTS_API_KEY = os.getenv("TTS_API_KEY", "")
     TTS_API_URL = os.getenv("TTS_API_URL", "https://tts.ign3el.com/v1/audio/speech")
+    KOKORO_URL = os.getenv("KOKORO_URL", "http://kokoro-tts:8880")
+    PIPER_URL = os.getenv("PIPER_URL", "http://piper-tts:5000")
 
 
     @classmethod

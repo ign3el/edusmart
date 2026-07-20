@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { AlertTriangle } from 'lucide-react'
 import './ReuploadConfirmModal.css'
 
 function ReuploadConfirmModal({ onConfirm, onCancel }) {
@@ -17,7 +18,7 @@ function ReuploadConfirmModal({ onConfirm, onCancel }) {
         exit={{ scale: 0.8, y: 50 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="modal-icon">⚠️</div>
+        <div className="modal-icon"><AlertTriangle size={32} aria-hidden="true" /></div>
         <h2>Re-upload File?</h2>
         <p>Changing the file will reset your current selections. Are you sure you want to proceed?</p>
         

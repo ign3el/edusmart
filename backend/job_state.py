@@ -196,6 +196,13 @@ class JobStateManager:
                     WHERE story_id = ?
                 """, (story_id,))
     
+    def delete_story(self, story_id: str) -> None:
+        """Delete a story's scenes and story row. Safe to call even if the
+        story doesn't exist (e.g. its folder was already cleaned up)."""
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM scenes WHERE story_id = ?", (story_id,))
+            conn.execute("DELETE FROM stories WHERE story_id = ?", (story_id,))
+
     def get_story_status(self, story_id: str) -> Optional[Dict]:
         """Get overall story status."""
         with self._get_conn() as conn:

@@ -31,4 +31,8 @@ RUN mkdir -p uploads outputs saved_stories
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers makes uvicorn trust X-Forwarded-For from its immediate peer
+# and rewrite request.client.host accordingly (used by the login rate limiter).
+# Safe to trust unconditionally here because the port is now bound to
+# 127.0.0.1 only (see docker-compose.yml) - nginx is the only possible peer.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

@@ -11,7 +11,7 @@ import logging
 import hashlib
 import shutil
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
 from fastapi import BackgroundTasks as BackgroundTasksExplicit
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
@@ -24,7 +24,8 @@ from routers.auth import router as auth_router, get_current_user
 from routers.admin import router as admin_router
 from routers.upload import router as upload_router
 from core.setup import create_admin_user
-from database_models import User, StoryOperations
+from database_models import User, StoryOperations, UserOperations
+from auth import verify_token
 from services.story_service import StoryService
 from services.tts_service import kokoro_tts
 from services.hash_service import hash_service
@@ -136,34 +137,126 @@ mimetypes.add_type('audio/mpeg', '.mp3')
 mimetypes.add_type('image/png', '.png')
 
 # --- Static File Serving ---
-# Old outputs directory kept temporarily for backward compatibility
-if os.path.exists("outputs"):
-    app.mount("/api/outputs", StaticFiles(directory="outputs"), name="outputs")
-
-# Mount generated_stories for temporary/in-progress stories
-app.mount("/api/generated-stories", StaticFiles(directory="generated_stories"), name="generated_stories")
-
-# Custom endpoint handles saved-stories with UUID prefix matching (see below)
+# NOTE: outputs/, generated_stories/ and saved_stories/ are intentionally NOT
+# mounted as raw StaticFiles - a bare mount here would shadow the custom
+# routes below (which enforce auth + per-story ownership) and serve every
+# file in those directories to anyone, unauthenticated. The custom
+# @app.api_route handlers below are the only way into these directories.
+# app.mount("/api/outputs", StaticFiles(directory="outputs"), name="outputs")
 # app.mount("/api/saved-stories", StaticFiles(directory="saved_stories"), name="saved_stories")
+# app.mount("/api/generated-stories", StaticFiles(directory="generated_stories"), name="generated_stories")
+#
+# uploads/ was mounted at /api/uploads with no auth at all, but nothing in
+# this codebase ever writes a file into it (the real upload flow writes into
+# generated_stories/{story_id}/ instead) - it's dead weight, not backward
+# compatibility, so it's simply not mounted at all rather than re-secured.
+
+
+async def get_media_user(request: Request, token: Optional[str] = None) -> dict:
+    """
+    Auth dependency for story media (images/audio). Browsers can't attach a
+    custom Authorization header to <img>/<audio> tags, so this accepts the
+    JWT either as a Bearer header (fetch/XHR callers) or as a `token` query
+    param (tag src= callers) - the same pattern presigned media URLs use
+    elsewhere. Either way it's the same JWT verification as get_current_user.
+    """
+    auth_header = request.headers.get("Authorization")
+    jwt_token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        jwt_token = auth_header.split(" ", 1)[1]
+    elif token:
+        jwt_token = token
+
+    if not jwt_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    email = verify_token(jwt_token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = UserOperations.get_by_email(email)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+def _verify_story_access(story_id: str, user: dict) -> bool:
+    """True if user owns story_id (saved or in-progress) or is an admin."""
+    if user.get("is_admin"):
+        return True
+    # Saved stories: StoryOperations.get_story already scopes to the owner.
+    if StoryOperations.get_story(story_id, user):
+        return True
+    # In-progress/generated stories live in job_state.db, not MySQL.
+    status = job_manager.get_story_status(story_id)
+    if status and status.get("user_id") == user.get("id"):
+        return True
+    return False
+
+
+@app.api_route("/api/outputs/{subpath:path}", methods=["GET", "HEAD"])
+async def serve_output_file(subpath: str, media_user: dict = Depends(get_media_user)):
+    """
+    Serve legacy TTS audio cache and job status files from outputs/.
+    Kept for backward compatibility with older stories and as the live cache
+    used during progressive generation - every file here is named after the
+    story_id it belongs to, so ownership is enforced the same way as the
+    other media routes.
+    """
+    if ".." in subpath or subpath.startswith("/") or "\\" in subpath:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    story_id = None
+    m = re.match(r"^audio_cache/audio_([a-f0-9\-]{36})_\d+\.mp3$", subpath)
+    if m:
+        story_id = m.group(1)
+    else:
+        m = re.match(r"^status/([a-f0-9\-]{36})\.json$", subpath)
+        if m:
+            story_id = m.group(1)
+
+    if not story_id:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not _verify_story_access(story_id, media_user):
+        raise HTTPException(status_code=403, detail="You do not have permission to access this resource.")
+
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    file_path = Path("outputs") / subpath
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(file_path)
+
 
 @app.api_route("/api/saved-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
-async def serve_story_file(story_id: str, filename: str):
+async def serve_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
     """
     Serve story files with smart filename matching and proper CORS headers.
     Handles both GET and HEAD requests.
     Supports both old format (scene_0.png) and new format (uuid_scene_0.png).
+    Requires the requester to own the story (or be an admin).
     """
     import glob
     import os
     from pathlib import Path
     from fastapi.responses import FileResponse
-    
+
     # Validate story_id format (UUID v4)
     if not re.match(r"^[a-f0-9\-]{36}$", story_id):
         raise HTTPException(status_code=400, detail="Invalid story ID format")
-    
+
+    if not _verify_story_access(story_id, media_user):
+        raise HTTPException(status_code=403, detail="You do not have permission to access this story.")
+
+    # Reject path traversal / absolute paths. Legitimate filenames are always
+    # flat basenames (e.g. "scene_0.png", "<uuid>_scene_0.png") - never nested.
+    if ".." in filename or filename.startswith("/") or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     logger.info(f"📁 File request: story_id={story_id}, filename={filename}")
-    
+
     # Use storage manager to find the correct directory (handles safe names/UUIDs)
     try:
         story_dir = Path(storage_manager.get_story_path(story_id, in_saved=True))
@@ -270,23 +363,32 @@ async def serve_story_file(story_id: str, filename: str):
     raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
 @app.api_route("/api/generated-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
-async def serve_generated_story_file(story_id: str, filename: str):
+async def serve_generated_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
     """
     Serve files from generated_stories folder with proper CORS headers.
     Similar to saved-stories endpoint but for in-progress/temporary stories.
     Supports both old format (scene_0.png) and new format (uuid_scene_0.png).
+    Requires the requester to own the story (or be an admin).
     """
     import glob
     import os
     from pathlib import Path
     from fastapi.responses import FileResponse
-    
+
     # Validate story_id format (UUID v4)
     if not re.match(r"^[a-f0-9\-]{36}$", story_id):
         raise HTTPException(status_code=400, detail="Invalid story ID format")
-    
+
+    if not _verify_story_access(story_id, media_user):
+        raise HTTPException(status_code=403, detail="You do not have permission to access this story.")
+
+    # Reject path traversal / absolute paths. Legitimate filenames are always
+    # flat basenames (e.g. "scene_0.png", "<uuid>_scene_0.png") - never nested.
+    if ".." in filename or filename.startswith("/") or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     logger.info(f"📁 Generated story file request: story_id={story_id}, filename={filename}")
-    
+
     # Use storage manager to find the correct directory
     try:
         story_dir = Path(storage_manager.get_story_path(story_id, in_saved=False))
@@ -388,7 +490,31 @@ async def serve_generated_story_file(story_id: str, filename: str):
     logger.error(f"❌ File not found. Available files: {[f.name for f in all_files]}")
     raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-app.mount("/api/uploads", StaticFiles(directory="uploads"), name="uploads")
+# .doc/.ppt (legacy pre-2007 binary Office formats) are deliberately excluded -
+# python-docx/python-pptx can only read the modern zip/XML .docx/.pptx formats,
+# so accepting the legacy ones used to silently generate a story from empty
+# extracted text. Reject them here, at the door, with a clear message, instead
+# of failing invisibly deep in the pipeline.
+_ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv", ".json", ".xml", ".html"}
+_MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024  # 20MB
+
+
+def _validate_upload(filename: Optional[str], file_content: bytes):
+    """Reject oversized or wrong-type uploads before they reach the story
+    pipeline. Previously nothing checked either - any size/type was read
+    fully into memory and handed to the PDF/text extractor unvalidated."""
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext or 'unknown'}'. Allowed: {', '.join(sorted(_ALLOWED_UPLOAD_EXTENSIONS))}",
+        )
+    if len(file_content) > _MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(file_content) / 1024 / 1024:.1f}MB). Max size is {_MAX_UPLOAD_SIZE_BYTES // 1024 // 1024}MB.",
+        )
+
 
 def _safe_story_dirname(story_name: str, story_id: str) -> str:
     """Create a filesystem-friendly folder name; fallback to ID fragment on collision/empty."""
@@ -397,14 +523,6 @@ def _safe_story_dirname(story_name: str, story_id: str) -> str:
     if os.path.exists(os.path.join("saved_stories", slug)):
         slug = f"{slug}-{story_id[:8]}"
     return slug
-
-@app.get("/api/avatars")
-async def get_avatars() -> List[Dict[str, str]]:
-    return [
-        {"id": "wizard", "name": "Professor Paws", "description": "Wise teacher."},
-        {"id": "robot", "name": "Robo-Buddy", "description": "Tech explorer."},
-        {"id": "dinosaur", "name": "Dino-Explorer", "description": "Nature guide."}
-    ]
 
 async def generate_scene_media_progressive(story_id: str, scene_id: str, scene_index: int, scene: dict, voice: str, speed: float, story_seed: int, is_mobile: bool = False):
     """
@@ -454,16 +572,21 @@ async def generate_scene_media_progressive(story_id: str, scene_id: str, scene_i
                 return
             
             job_manager.update_scene_audio(scene_id, "processing")
-            
-            # Use mobile-optimized audio for mobile devices
-            from services.chatterbox_client import chatterbox
-            if is_mobile:
-                audio_bytes = await chatterbox.generate_audio_optimized(text, voice, True)
+
+            if voice == "ar_teacher":
+                # Arabic voice: route to the self-hosted Piper service, not Kokoro
+                from services.piper_client import piper_tts
+                audio_bytes = await piper_tts.generate_audio(text, speed=speed, silence=0.3)
             else:
-                audio_bytes = await kokoro_tts.generate_audio(text, voice, speed)
+                # Use mobile-optimized audio for mobile devices
+                from services.chatterbox_client import chatterbox
+                if is_mobile:
+                    audio_bytes = await chatterbox.generate_audio_optimized(text, voice, True)
+                else:
+                    audio_bytes = await kokoro_tts.generate_audio(text, voice, speed)
             
             if audio_bytes:
-                aud_name = f"scene_{scene_index}.wav"  # Kokoro provides WAV audio
+                aud_name = f"scene_{scene_index}.mp3"  # Chatterbox provides MP3 audio
                 # Use new storage manager
                 try:
                     aud_url = storage_manager.save_file(story_id, aud_name, audio_bytes, in_saved=False)
@@ -491,6 +614,7 @@ async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, v
         await gemini.generate_progressive_tts(
             story_id=story_id,
             scenes=scenes,
+            voice=voice,
             batch_size=2,
             max_threads_per_tts=1
         )
@@ -505,7 +629,7 @@ async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, v
                 with open(cache_file, 'rb') as f:
                     audio_bytes = f.read()
                 
-                aud_name = f"scene_{scene_num}.wav"
+                aud_name = f"scene_{scene_num}.mp3"
                 try:
                     aud_url = storage_manager.save_file(story_id, aud_name, audio_bytes, in_saved=False)
                     job_manager.update_scene_audio(scene_id, "completed", aud_url)
@@ -530,6 +654,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
     3. Create scene records immediately
     4. Process scenes in parallel (images + audio per scene)
     """
+    workflow_start_time = time.time()
     try:
         # Create story folder with metadata
         storage_manager.create_story_folder(story_id, {
@@ -564,7 +689,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
             )
             scene_ids.append(scene_id)
         
-        logger.info(f"✓ Story structure ready: {len(scenes)} scenes")
+        logger.info(f"✓ Story structure ready in {time.time() - workflow_start_time:.2f}s: {len(scenes)} scenes")
         
         # --- Optimized Generation Strategy ---
         story_seed = int(uuid.uuid4().hex[:8], 16)
@@ -626,16 +751,18 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         
         # 2. Generate Scene 0 TTS
         from services.chatterbox_client import chatterbox
-        scene_0_tts_task = chatterbox.generate_audio(
-            text=scenes[0]['narrative_text'],
-            voice=voice
-        )
-        
+        tts_0_start_time = time.time()
+        async def generate_scene_0_tts_timed():
+            audio = await chatterbox.generate_audio(text=scenes[0]['narrative_text'], voice=voice)
+            logger.info(f"✓ Scene 0 TTS generated in {time.time() - tts_0_start_time:.2f}s")
+            return audio
+        scene_0_tts_task = generate_scene_0_tts_timed()
+
         # Run Scene 0 tasks concurrently
         # Even if TTS takes longer, background images have already started!
         scene_0_data = await asyncio.gather(scene_0_image_task, scene_0_tts_task)
         img_0_bytes, scene_0_audio = scene_0_data
-        
+
         logger.info(f"✓ Scene 0 assets generated. Saving...")
 
         # Save Scene 0 Image
@@ -653,7 +780,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
             
         # Save Scene 0 Audio
         if scene_0_audio:
-            aud_name = "scene_0.wav"
+            aud_name = "scene_0.mp3"
             try:
                 aud_url = storage_manager.save_file(story_id, aud_name, scene_0_audio, in_saved=False)
                 job_manager.update_scene_audio(scene_ids[0], "completed", aud_url)
@@ -675,10 +802,10 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         # ✅ CRITICAL FIX: Mark story as completed so frontend can display Scene 0 immediately
         # Note: JobStateManager tracks completion via scene statuses, not a separate status field
         # The story is considered complete when all scenes have images
-        logger.info(f"✅ Story {story_id} marked as ready for display")
-        
+        logger.info(f"✅ Story {story_id} ready for display — time to first playable scene: {time.time() - workflow_start_time:.2f}s")
+
     except Exception as e:
-        logger.error(f"AI Workflow Error: {e}")
+        logger.error(f"AI Workflow Error after {time.time() - workflow_start_time:.2f}s: {e}")
         job_manager.mark_story_failed(story_id, str(e))
 
 @app.post("/api/check-duplicate")
@@ -689,7 +816,8 @@ async def check_duplicate(
     """Check if a file has been uploaded across both saved and generated stories."""
     # Read file content
     file_content = await file.read()
-    
+    _validate_upload(file.filename, file_content)
+
     # Use hash service to find duplicates
     duplicate_info = hash_service.find_duplicate(file_content, file.filename)
     
@@ -756,7 +884,7 @@ async def check_duplicate(
             logger.info(f"Duplicate found in generated stories: {story_id}")
             
             try:
-                status = job_manager.get_job_status(story_id)
+                status = job_manager.get_story_status(story_id)
                 logger.info(f"Job status for {story_id}: {status}")
                 
                 # Extract title from status
@@ -817,7 +945,8 @@ async def upload_story(
     """
     # Read file content
     file_content = await file.read()
-    
+    _validate_upload(file.filename, file_content)
+
     # Calculate hash if not provided
     if not file_hash:
         file_hash = hash_service.generate_bytes_hash(file_content)
@@ -943,7 +1072,8 @@ async def handle_duplicate_choice(
         
         # Read file content
         file_content = await file.read()
-        
+        _validate_upload(file.filename, file_content)
+
         # Create new temp story folder
         temp_dir = storage_manager.create_story_folder(new_story_id, {
             "grade_level": grade_level,
@@ -1005,7 +1135,10 @@ async def handle_duplicate_choice(
 async def get_story_status(story_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get overall story status with scene completion info."""
     logger.info(f"🔍 Getting story status for: {story_id}")
-    
+
+    if not _verify_story_access(story_id, current_user):
+        raise HTTPException(status_code=404, detail="Story not found")
+
     # First check if story is in the active job system
     status = job_manager.get_story_status(story_id)
     if status:
@@ -1268,6 +1401,9 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
 @app.get("/api/story/{story_id}/scene/{scene_index}")
 async def get_scene_status(story_id: str, scene_index: int, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get specific scene data."""
+    if not _verify_story_access(story_id, current_user):
+        raise HTTPException(status_code=404, detail="Story not found")
+
     scene_id = f"{story_id}_scene_{scene_index}"
     scene = job_manager.get_scene(scene_id)
     if not scene:
@@ -1285,6 +1421,9 @@ async def get_scene_status(story_id: str, scene_index: int, current_user: dict =
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    if not _verify_story_access(job_id, current_user):
+        raise HTTPException(status_code=404, detail="Story not found")
+
     # Check if it's a progressive story
     status = job_manager.get_story_status(job_id)
     if status:
@@ -1334,12 +1473,18 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
     Saves a generated story to the database, associating it with the current user.
     This also moves the story's assets from temporary storage to permanent storage.
     """
+    if not _verify_story_access(job_id, user):
+        raise HTTPException(status_code=404, detail="Story not found")
+
     # Check if it's a progressive story
     status = job_manager.get_story_status(job_id)
-    if status and status["status"] == "completed":
+    if status and status["status"] in ("completed", "processing"):
         # Progressive story system - move folder from generated_stories to saved_stories
         saved_story_id = str(uuid.uuid4())
         scenes = job_manager.get_all_scenes(job_id)
+        
+        if not scenes:
+            raise HTTPException(status_code=404, detail="No scenes available to save.")
         
         # Move the entire folder from generated_stories to saved_stories
         try:
@@ -1353,9 +1498,9 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
         updated_scenes = []
         for idx, s in enumerate(scenes):
             scene_data = {
-                "text": s["text"],
-                "image_url": s.get("image_url", ""),
-                "audio_url": s.get("audio_url", "")
+                "text": s.get("text", ""),
+                "image_url": s.get("image_url") or "",
+                "audio_url": s.get("audio_url") or ""
             }
             
             # Update image URL
@@ -1374,10 +1519,18 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
             
             updated_scenes.append(scene_data)
         
+        # Ensure quiz is a proper list, not a JSON string
+        quiz_data = status.get("quiz", [])
+        if isinstance(quiz_data, str):
+            try:
+                quiz_data = json.loads(quiz_data)
+            except:
+                quiz_data = []
+        
         story_data = {
             "title": status["title"],
             "scenes": updated_scenes,
-            "quiz": status.get("quiz", [])
+            "quiz": quiz_data
         }
         
         success = StoryOperations.save_story(
@@ -1506,7 +1659,10 @@ async def load_story(story_id: str, user: User = Depends(get_current_user)):
             # Fix 1: Legacy outputs path
             if "/api/outputs/" in aud_url:
                 scene["audio_url"] = aud_url.replace("/api/outputs/", f"/api/saved-stories/{story_id}/")
-            # Fix 2: Relative path (e.g. "scene_0.wav") -> prepend full API path
+            # Fix 2: Generated stories path -> saved stories path
+            elif "/api/generated-stories/" in aud_url:
+                scene["audio_url"] = aud_url.replace("/api/generated-stories/", f"/api/saved-stories/")
+            # Fix 3: Relative path (e.g. "scene_0.wav") -> prepend full API path
             elif not aud_url.startswith("http") and not aud_url.startswith("/api/") and not aud_url.startswith("data:"):
                 scene["audio_url"] = f"/api/saved-stories/{story_id}/{aud_url}"
         else:
@@ -1540,6 +1696,9 @@ async def export_job(job_id: str, current_user: dict = Depends(get_current_user)
     Export a job (story generation) as a ZIP file for offline use.
     Includes all scenes with images and audio files.
     """
+    if not _verify_story_access(job_id, current_user):
+        raise HTTPException(status_code=404, detail="Job not found")
+
     # Check if it's a progressive story
     status = job_manager.get_story_status(job_id)
     if not status:
@@ -1620,7 +1779,7 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
             scene_data = {
                 "text": scene.get("text", ""),
                 "image_url": f"scene_{idx}.png",
-                "audio_url": f"scene_{idx}.wav"
+                "audio_url": f"scene_{idx}.mp3"
             }
             export_data["scenes"].append(scene_data)
             
@@ -1632,9 +1791,9 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
             
             # Add audio file from saved_stories directory
             if scene.get("audio_url"):
-                audio_path = os.path.join("saved_stories", story_id, f"scene_{idx}.wav")
+                audio_path = os.path.join("saved_stories", story_id, f"scene_{idx}.mp3")
                 if os.path.exists(audio_path):
-                    zip_file.write(audio_path, f"scene_{idx}.wav")
+                    zip_file.write(audio_path, f"scene_{idx}.mp3")
         
         # Add story.json
         zip_file.writestr("story.json", json.dumps(export_data, indent=2))
@@ -1655,12 +1814,16 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
 @app.get("/api/story/{story_id}/tts-status")
 async def get_tts_status(story_id: str, current_user: dict = Depends(get_current_user)):
     """Get specialized progressive TTS generation status"""
+    if not _verify_story_access(story_id, current_user):
+        raise HTTPException(status_code=404, detail="Story not found")
     # Use gemini service's status tracking
     return await gemini.get_tts_status(story_id)
 
 @app.get("/api/story/{story_id}/scene/{scene_num}/audio")
 async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = Depends(get_current_user)):
     """Get scene audio (from cache or generated/saved folder) with waterfall fallbacks"""
+    if not _verify_story_access(story_id, current_user):
+        raise HTTPException(status_code=404, detail="Story not found")
     import os
     import aiofiles
     from fastapi.responses import FileResponse, Response

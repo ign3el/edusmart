@@ -11,7 +11,12 @@ services:
       dockerfile: Dockerfile
     container_name: edusmart-backend
     ports:
-      - "8000:8000"
+      # Bound to localhost only - nginx (aaPanel, runs on the host) reverse-proxies
+      # to this port and reaches it fine over 127.0.0.1. Previously bound to
+      # 0.0.0.0, which made the raw backend directly reachable from the public
+      # internet, bypassing Cloudflare and nginx entirely (confirmed exploitable
+      # 2026-07-20 - already being probed by internet scanners in the access logs).
+      - "127.0.0.1:8000:8000"
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
@@ -55,7 +60,10 @@ services:
       - ./backend/saved_stories:/app/saved_stories
       - ./backend/generated_stories:/app/generated_stories
       - backend_db:/app/db_data
-    user: "0:0"
+    # Runs as the host ubuntu user's UID (matches ownership of all bind
+    # mounts above) instead of root - was root only because nothing had
+    # ever fixed the ownership of the backend_db named volume.
+    user: "1001:1001"
     restart: unless-stopped
     networks:
       - web_network

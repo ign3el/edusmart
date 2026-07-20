@@ -1,7 +1,20 @@
 import { useState, useEffect } from 'react'
-import { FiFile, FiEdit2 } from 'react-icons/fi'
+import { motion } from 'framer-motion'
+import {
+  File as FileIcon, Edit3, BookOpen, Search, Zap,
+  ArrowLeft, ArrowRight, CheckCircle2, Globe
+} from 'lucide-react'
 import TeacherCard from './TeacherCard'
 import './FileConfirmation.css'
+
+const cardVariants = {
+  hidden: { opacity: 0, y: 16 },
+  visible: (i) => ({
+    opacity: 1,
+    y: 0,
+    transition: { delay: i * 0.08, duration: 0.35, ease: 'easeOut' }
+  })
+}
 
 function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onEditGrade }) {
   // New state for Kokoro TTS settings
@@ -35,7 +48,7 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
         const data = await response.json();
         const lang = data.language_code || 'en';
         setDetectedLanguage(lang);
-        
+
         // Auto-select appropriate voice based on language
         if (lang === 'ar') {
           setVoice('ar_teacher');
@@ -61,6 +74,12 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
     7: 'Grade 7'
   }
 
+  const languageLabels = {
+    en: 'English',
+    ar: 'Arabic',
+    hi: 'Hindi'
+  }
+
   const handleConfirm = () => {
     // Pass up an object with all the settings
     onConfirm({ voice, speed })
@@ -73,38 +92,42 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
 
   return (
     <div className="file-confirmation">
-      <h2>✅ Confirm Your Story Settings</h2>
+      <h2><CheckCircle2 size={22} aria-hidden="true" /> Confirm Your Story Settings</h2>
       <p className="subtitle">Review your selections before generating the story</p>
 
-      <div className="confirmation-card">
-        <div className="file-info">
-          <FiFile className="file-icon" />
+      <motion.div
+        className="confirmation-card"
+        initial="hidden"
+        animate="visible"
+      >
+        <motion.div className="file-info" custom={0} variants={cardVariants}>
+          <FileIcon className="file-icon" size={26} aria-hidden="true" />
           <div>
             <h3>Uploaded File</h3>
             <p className="filename">{file.name}</p>
             <p className="filesize">({(file.size / 1024 / 1024).toFixed(2)} MB)</p>
           </div>
-          <button 
+          <button
             className="edit-icon-btn"
             onClick={onReupload}
             title="Re-upload file"
           >
-            <FiEdit2 />
+            <Edit3 size={16} aria-hidden="true" />
           </button>
-        </div>
+        </motion.div>
 
-        <div className="grade-info">
-          <div className="info-icon">📚</div>
+        <motion.div className="grade-info" custom={1} variants={cardVariants}>
+          <BookOpen className="info-icon" size={26} aria-hidden="true" />
           <div>
             <h3>Grade Level</h3>
             <p>{gradeLabels[gradeLevel]}</p>
           </div>
-          <button 
+          <button
             className="edit-icon-btn"
             onClick={() => setShowGradeSelector(!showGradeSelector)}
             title="Change grade level"
           >
-            <FiEdit2 />
+            <Edit3 size={16} aria-hidden="true" />
           </button>
 
           {showGradeSelector && (
@@ -120,25 +143,37 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
               ))}
             </div>
           )}
-        </div>
-      </div>
+        </motion.div>
+
+        {!isDetectingLanguage && (
+          <motion.div
+            className="language-badge"
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ type: 'spring', damping: 20, stiffness: 300, delay: 0.15 }}
+          >
+            <Globe size={14} aria-hidden="true" />
+            <span>Detected language: {languageLabels[detectedLanguage] || 'English'}</span>
+          </motion.div>
+        )}
+      </motion.div>
 
       <div className="voice-selection">
         {isDetectingLanguage ? (
           <div className="detecting-language">
-            <p>🔍 Detecting document language...</p>
+            <p><Search size={18} aria-hidden="true" /> Detecting document language...</p>
           </div>
         ) : (
-          <TeacherCard 
+          <TeacherCard
             activeVoice={voice}
             onVoiceSelect={setVoice}
             detectedLanguage={detectedLanguage}
           />
         )}
-        
+
         <div className="speed-control">
           <label htmlFor="speed-slider">
-            <span>⚡ Narration Speed</span>
+            <span><Zap size={16} aria-hidden="true" /> Narration Speed</span>
             <span className="speed-value">{speed}x</span>
           </label>
           <input
@@ -161,10 +196,10 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
 
       <div className="confirmation-actions">
         <button className="back-btn" onClick={onBack}>
-          ← Back
+          <ArrowLeft size={16} aria-hidden="true" /> Back
         </button>
         <button className="confirm-btn" onClick={handleConfirm}>
-          Confirm & Generate Story →
+          Confirm & Generate Story <ArrowRight size={16} aria-hidden="true" />
         </button>
       </div>
     </div>

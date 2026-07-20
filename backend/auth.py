@@ -20,15 +20,15 @@ from jose import JWTError, jwt
 import bcrypt
 
 # --- Configuration ---
-# It is CRITICAL that JWT_SECRET is set in a production environment.
-DEFAULT_INSECURE_SECRET_KEY = "a-very-insecure-secret-key-please-change-me"
-JWT_SECRET = os.getenv("JWT_SECRET", DEFAULT_INSECURE_SECRET_KEY)
-
-if JWT_SECRET == DEFAULT_INSECURE_SECRET_KEY:
-    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    print("!!! WARNING: JWT_SECRET is not set in your environment or .env file.         !!!")
-    print("!!! Using a default, insecure key. This is NOT SAFE for production.         !!!")
-    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+# JWT_SECRET must be set in every environment. Failing loudly here beats
+# silently signing tokens with a public, hardcoded key if the env var is
+# ever missing (e.g. a redeploy that drops the .env mount).
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET environment variable is not set. Refusing to start: "
+        "signing tokens with a default key is not safe."
+    )
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days

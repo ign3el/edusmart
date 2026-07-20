@@ -1,8 +1,19 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama } from 'lucide-react'
 import apiClient from '../services/api'
 import { getItemsPerPage } from '../utils/responsiveUtils'
 import './LoadStory.css'
+
+const gridVariants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.05 } }
+}
+
+const cardVariants = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: 'easeOut' } }
+}
 
 function LoadStory({ onLoad, onBack }) {
   const [stories, setStories] = useState([])
@@ -16,18 +27,18 @@ function LoadStory({ onLoad, onBack }) {
 
   useEffect(() => {
     fetchStories()
-    
+
     const handleResize = () => {
       setItemsPerPage(getItemsPerPage(window.innerWidth))
     }
-    
+
     const handleOnline = () => setIsOnline(true)
     const handleOffline = () => setIsOnline(false)
-    
+
     window.addEventListener('resize', handleResize)
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
-    
+
     return () => {
       window.removeEventListener('resize', handleResize)
       window.removeEventListener('online', handleOnline)
@@ -38,7 +49,7 @@ function LoadStory({ onLoad, onBack }) {
   const fetchStories = async () => {
     try {
       const response = await apiClient.get('/api/list-stories')
-      
+
       // Remove duplicates based on story_id
       const uniqueStories = response.data.reduce((acc, current) => {
         const exists = acc.find(item => item.story_id === current.story_id)
@@ -53,7 +64,7 @@ function LoadStory({ onLoad, onBack }) {
         }
         return acc
       }, [])
-      
+
       setStories(uniqueStories)
     } catch (error) {
       console.error('Error fetching stories:', error)
@@ -92,7 +103,7 @@ function LoadStory({ onLoad, onBack }) {
 
   const handleDelete = async (story) => {
     if (!confirm(`Delete "${story.name}"? This cannot be undone.`)) return
-    
+
     try {
       await apiClient.delete(`/api/delete-story/${story.story_id}`)
       setStories(stories.filter(s => s.story_id !== story.story_id))
@@ -104,28 +115,28 @@ function LoadStory({ onLoad, onBack }) {
   const handleDownload = async (story) => {
     setDownloading(story.story_id)
     setDownloadMessage('Zipping file...')
-    
+
     try {
       // Step 1: Request ZIP creation and download
       const response = await apiClient.get(`/api/export-story/${story.story_id}`, {
         responseType: 'blob'
       })
-      
+
       // Step 2: Save
       setDownloadMessage('Saving file...')
       const url = window.URL.createObjectURL(response.data)
       const link = document.createElement('a')
       link.href = url
       link.download = `${story.name.replace(/\s+/g, '_')}_${story.story_id.substring(0, 8)}.zip`
-      
+
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
       window.URL.revokeObjectURL(url)
-      
+
       // Step 3: Complete
-      setDownloadMessage('Complete! ✓')
-      
+      setDownloadMessage('Complete!')
+
       // Clear message after delay
       setTimeout(() => {
         setDownloadMessage('')
@@ -147,49 +158,50 @@ function LoadStory({ onLoad, onBack }) {
 
   return (
     <div className="load-story-modal-overlay">
-      <motion.div 
+      <motion.div
         className="load-story-container"
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.2 }}
       >
-        <h2>📚 Your Saved Stories</h2>
-      
+        <h2><BookOpen size={24} /> Your Saved Stories</h2>
+
       {!isOnline && (
         <div className="offline-warning">
-          <span className="offline-icon">📡</span>
+          <WifiOff size={28} className="offline-icon" />
           <div>
             <strong>You are offline!</strong>
             <p>Cannot load or manage online stories. Please check your internet connection.</p>
           </div>
         </div>
       )}
-      
+
       {loading ? (
-        <div className="loading-stories">Loading stories...</div>
+        <div className="loading-stories"><Loader2 size={18} className="spin-icon" /> Loading stories...</div>
       ) : stories.length === 0 ? (
         <div className="no-stories">
-          <p>🎭 No saved stories yet!</p>
+          <p><Drama size={20} /> No saved stories yet!</p>
           <p>Create and save your first story to see it here.</p>
         </div>
       ) : (
         <>
           {/* Search Bar */}
           <div className="search-container">
+            <Search size={18} className="search-icon" />
             <input
               type="text"
-              placeholder="🔍 Search stories..."
+              placeholder="Search stories..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="search-input"
             />
             {searchQuery && (
-              <button 
+              <button
                 className="clear-search"
                 onClick={() => setSearchQuery('')}
                 title="Clear search"
               >
-                ✕
+                <X size={16} />
               </button>
             )}
           </div>
@@ -204,33 +216,39 @@ function LoadStory({ onLoad, onBack }) {
 
           {filteredStories.length === 0 ? (
             <div className="no-stories">
-              <p>🔍 No stories found matching "{searchQuery}"</p>
+              <p><Search size={18} /> No stories found matching "{searchQuery}"</p>
               <button onClick={() => setSearchQuery('')} className="clear-search-btn">
                 Clear Search
               </button>
             </div>
           ) : (
             <>
-              <div className="stories-grid">
+              <motion.div
+                className="stories-grid"
+                variants={gridVariants}
+                initial="hidden"
+                animate="show"
+              >
                 {paginatedStories.map((story) => (
                   <motion.div
                     key={story.story_id}
                     className="story-card"
+                    variants={cardVariants}
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                   >
                     <h3>{story.name}</h3>
                     <div className="story-date">
-                      📅 {formatDate(story.saved_at)}
+                      <Calendar size={14} /> {formatDate(story.saved_at)}
                     </div>
                     <div className="story-card-actions">
-                      <button 
+                      <button
                         className="load-btn"
                         onClick={() => handleLoad(story)}
                       >
                         Load Story
                       </button>
-                      <button 
+                      <button
                         className="download-btn"
                         onClick={(e) => {
                           e.stopPropagation()
@@ -239,21 +257,23 @@ function LoadStory({ onLoad, onBack }) {
                         disabled={downloading !== null}
                         title="Download as ZIP file"
                       >
-                        {downloading === story.story_id ? '⏳ Downloading...' : '⬇️ Download'}
+                        {downloading === story.story_id
+                          ? <><Loader2 size={14} className="spin-icon" /> Downloading...</>
+                          : <><Download size={14} /> Download</>}
                       </button>
-                      <button 
+                      <button
                         className="delete-btn"
                         onClick={(e) => {
                           e.stopPropagation()
                           handleDelete(story)
                         }}
                       >
-                        Delete
+                        <Trash2 size={14} /> Delete
                       </button>
                     </div>
                   </motion.div>
                 ))}
-              </div>
+              </motion.div>
 
               {/* Pagination Controls */}
               {totalPages > 1 && (
@@ -263,7 +283,7 @@ function LoadStory({ onLoad, onBack }) {
                     disabled={currentPage === 1}
                     className="pagination-btn"
                   >
-                    ← Previous
+                    <ChevronLeft size={16} /> Previous
                   </button>
                   <span className="page-info">
                     Page {currentPage} of {totalPages}
@@ -273,7 +293,7 @@ function LoadStory({ onLoad, onBack }) {
                     disabled={currentPage === totalPages}
                     className="pagination-btn"
                   >
-                    Next →
+                    Next <ChevronRight size={16} />
                   </button>
                 </div>
               )}
@@ -281,54 +301,54 @@ function LoadStory({ onLoad, onBack }) {
           )}
         </>
       )}
-      
+
       <button className="back-button" onClick={onBack}>
-        ← Back to Home
+        <ChevronLeft size={16} /> Back to Home
       </button>
 
       {/* Download Status Popup */}
       {downloadMessage && (
         <div className="download-popup">
-          <motion.div 
+          <motion.div
             className="download-popup-content"
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.8 }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {downloadMessage !== 'Complete! ✓' ? <div className="spinner"></div> : <span style={{ fontSize: '1.2rem' }}>✓</span>}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+              {downloadMessage !== 'Complete!' ? <div className="spinner"></div> : <CheckCircle2 size={20} />}
               <p style={{ margin: 0 }}>{downloadMessage}</p>
             </div>
-            
+
             {/* Progress Bar */}
             <div className="progress-bar-container">
-              <div 
+              <div
                 className="progress-bar"
                 style={{
-                  width: downloadMessage === 'Zipping file...' ? '25%' : 
-                         downloadMessage === 'Downloading...' ? '60%' : 
+                  width: downloadMessage === 'Zipping file...' ? '25%' :
+                         downloadMessage === 'Downloading...' ? '60%' :
                          downloadMessage === 'Saving file...' ? '85%' : '100%',
                   transition: 'width 0.4s ease'
                 }}
               ></div>
             </div>
-            
+
             {/* Step Indicators */}
             <div className="progress-steps">
-              <div className={`progress-step ${downloadMessage === 'Zipping file...' ? 'active' : downloadMessage === 'Downloading...' || downloadMessage === 'Saving file...' || downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
+              <div className={`progress-step ${downloadMessage === 'Zipping file...' ? 'active' : downloadMessage === 'Downloading...' || downloadMessage === 'Saving file...' || downloadMessage === 'Complete!' ? 'completed' : ''}`}>
                 <div className="step-dot">1</div>
                 <span>Zip</span>
               </div>
-              <div className={`progress-step ${downloadMessage === 'Downloading...' ? 'active' : downloadMessage === 'Saving file...' || downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
+              <div className={`progress-step ${downloadMessage === 'Downloading...' ? 'active' : downloadMessage === 'Saving file...' || downloadMessage === 'Complete!' ? 'completed' : ''}`}>
                 <div className="step-dot">2</div>
                 <span>Download</span>
               </div>
-              <div className={`progress-step ${downloadMessage === 'Saving file...' ? 'active' : downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
+              <div className={`progress-step ${downloadMessage === 'Saving file...' ? 'active' : downloadMessage === 'Complete!' ? 'completed' : ''}`}>
                 <div className="step-dot">3</div>
                 <span>Save</span>
               </div>
-              <div className={`progress-step ${downloadMessage === 'Complete! ✓' ? 'completed' : ''}`}>
-                <div className="step-dot">✓</div>
+              <div className={`progress-step ${downloadMessage === 'Complete!' ? 'completed' : ''}`}>
+                <div className="step-dot"><CheckCircle2 size={14} /></div>
                 <span>Done</span>
               </div>
             </div>

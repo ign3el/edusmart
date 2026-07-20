@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FiPlay, FiPause, FiSkipForward, FiSkipBack, FiRotateCw, FiLoader } from 'react-icons/fi';
 import apiClient from '../services/api';
+import { buildFullUrl } from '../utils/urlHelpers';
 import './StoryPlayer.css';
 
 /**
@@ -72,7 +73,7 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
       if (isSceneReady) {
-        audioRef.current.src = `${apiClient.defaults.baseURL}${scene.audio_url}`;
+        audioRef.current.src = buildFullUrl(scene.audio_url);
         audioRef.current.load();
       }
     }
@@ -122,7 +123,7 @@ function ProgressiveStoryPlayer({ storyId, avatar, onRestart, onSave, isSaved = 
           ) : (
             <motion.img
               key={currentScene}
-              src={`${apiClient.defaults.baseURL}${scene.image_url}`}
+              src={buildFullUrl(scene.image_url)}
               alt={`Scene ${currentScene + 1}`}
               className="scene-image"
               initial={{ opacity: 0 }}
