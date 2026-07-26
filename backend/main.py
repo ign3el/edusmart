@@ -11,10 +11,10 @@ import logging
 import hashlib
 import shutil
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Body
 from fastapi import BackgroundTasks as BackgroundTasksExplicit
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
@@ -23,6 +23,7 @@ from database import initialize_database, get_db_cursor
 from routers.auth import router as auth_router, get_current_user
 from routers.admin import router as admin_router
 from routers.upload import router as upload_router
+from routers.billing import router as billing_router, check_and_reserve_credit, refund_credit
 from core.setup import create_admin_user
 from database_models import User, StoryOperations, UserOperations
 from auth import verify_token
@@ -31,6 +32,8 @@ from services.tts_service import kokoro_tts
 from services.hash_service import hash_service
 from job_state import job_manager
 from story_storage import storage_manager, cleanup_scheduler_task, database_cleanup_scheduler_task
+from services.concurrency import tts_governor, governor_snapshot, log_limits
+from services.job_queue import generation_queue, admit_generation
 from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
 # Type checking imports for Pylance
@@ -49,6 +52,11 @@ app = FastAPI(title="EduStory API")
 
 # Add CORS middleware to allow requests from frontend domain.
 # Configured for production with specific origins for better security.
+# Deliberately hardcoded, not env-driven: a CORS_ORIGINS env var existed
+# alongside this for a while but was never read here, and its value
+# (localhost-only) would have broken prod CORS if it ever had been wired
+# up. Removed from docker-compose.yml on 2026-07-26; change this list
+# directly if the origin set needs to change.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -71,6 +79,27 @@ async def startup_event():
     This function runs when the application starts.
     It initializes the database and starts background tasks.
     """
+    # asyncio.to_thread() and loop.run_in_executor() share ONE default
+    # executor, which Python sizes at min(32, cpu_count + 4) - seven threads
+    # on this box. Every TTS call, Groq call and offloaded file write competes
+    # for those slots, so throughput flat-lined at ~7 concurrent operations
+    # regardless of how many users were connected. The threads sit blocked on
+    # network I/O rather than burning CPU, so this should track the number of
+    # in-flight requests we intend to serve, not the core count. Env-driven so
+    # a bigger host only needs a variable change.
+    from concurrent.futures import ThreadPoolExecutor
+    _pool_workers = int(os.getenv("THREAD_POOL_WORKERS", "128"))
+    _default_workers = min(32, (os.cpu_count() or 1) + 4)
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(
+            max_workers=_pool_workers, thread_name_prefix="edusmart-io"
+        )
+    )
+    logger.info(
+        f"✓ Thread pool sized to {_pool_workers} workers "
+        f"(Python default here would be {_default_workers})"
+    )
+
     # Skip database operations in development mode
     if os.getenv("ENV") == "development":
         logger.info("✓ Development mode: Skipping database initialization")
@@ -91,7 +120,50 @@ async def startup_event():
     
     logger.info("Initializing story storage manager...")
     # Storage manager auto-initializes on import
-    
+
+    # Generation runs through a durable queue, not FastAPI BackgroundTasks.
+    # BackgroundTasks started every accepted upload immediately and in
+    # unbounded parallel - 50 uploads meant 50 concurrent workflows, each with
+    # its own RunPod and Kokoro fan-out - and nothing was written down, so a
+    # restart silently dropped every in-flight job and left the story stuck at
+    # "initializing" with the user's credit already spent.
+    #
+    # Queue recovery runs BEFORE the orphaned-story reconciler below and
+    # refunds the jobs it abandons, because it marks those stories 'failed'.
+    # Reverse the order and the reconciler would still see them as
+    # 'processing' and refund the same credit a second time.
+    logger.info("Starting generation queue...")
+    try:
+        generation_queue.set_handler(run_ai_workflow_progressive_mobile)
+        recovered = await generation_queue.start()
+        for job in recovered.get("abandoned_jobs", []):
+            if job.get("user_id"):
+                try:
+                    refund_credit(job["user_id"], job["story_id"])
+                except Exception as refund_err:
+                    logger.warning(
+                        f"Could not refund credit for abandoned job {job['story_id']}: {refund_err}"
+                    )
+        log_limits()
+    except Exception as e:
+        # Non-fatal on purpose, matching the database-init handling above, but
+        # loud: with no workers running, uploads are accepted and never start.
+        logger.critical(f"FATAL: generation queue failed to start: {e}")
+
+    logger.info("Reconciling orphaned jobs from a previous process...")
+    try:
+        orphaned = job_manager.reconcile_orphaned_jobs()
+        for job in orphaned:
+            if job.get("user_id"):
+                try:
+                    refund_credit(job["user_id"], job["story_id"])
+                except Exception as refund_err:
+                    logger.warning(f"Could not refund credit for orphaned job {job['story_id']}: {refund_err}")
+        if orphaned:
+            logger.info(f"Marked {len(orphaned)} orphaned job(s) as failed and refunded credits where applicable.")
+    except Exception as e:
+        logger.warning(f"Orphaned job reconciliation failed: {e}")
+
     logger.info("Starting story cleanup scheduler (24-hour TTL)...")
     asyncio.create_task(cleanup_scheduler_task())
     
@@ -108,6 +180,7 @@ async def startup_event():
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(upload_router)
+app.include_router(billing_router)
 
 
 # --- Non-Auth related application logic ---
@@ -180,18 +253,155 @@ async def get_media_user(request: Request, token: Optional[str] = None) -> dict:
     return user
 
 
-def _verify_story_access(story_id: str, user: dict) -> bool:
-    """True if user owns story_id (saved or in-progress) or is an admin."""
+def _verify_story_access(story_id: str, user: dict, allow_public: bool = False) -> bool:
+    """True if user owns story_id (saved or in-progress) or is an admin.
+
+    `allow_public=True` additionally admits a saved story whose owner ticked
+    "make discoverable". Pass it ONLY on read paths - viewing, streaming media,
+    polling status. Save, delete, export and regenerate stay owner-only, because
+    otherwise sharing a story would also hand over the right to destroy it.
+    """
     if user.get("is_admin"):
         return True
     # Saved stories: StoryOperations.get_story already scopes to the owner.
     if StoryOperations.get_story(story_id, user):
         return True
-    # In-progress/generated stories live in job_state.db, not MySQL.
+    if allow_public and StoryOperations.is_public_story(story_id):
+        return True
+    # In-progress/generated stories live in job_state.db, not MySQL. They are
+    # never public: consent is given when saving, and these are not saved yet.
     status = job_manager.get_story_status(story_id)
     if status and status.get("user_id") == user.get("id"):
         return True
     return False
+
+
+def _resolve_visible_duplicate(duplicate_info: dict, viewer: dict) -> Optional[Dict[str, Any]]:
+    """Describe a hash match to `viewer`, or return None if they may not see it.
+
+    Ownership is read from MySQL on every call - never from the hash cache and
+    never from the on-disk metadata.json, which records whoever generated the
+    file rather than who owns the saved row.
+    """
+    saved_ids = [
+        m["story_id"] for m in (duplicate_info.get("saved_stories") or [])
+        if m.get("story_id")
+    ]
+    row = StoryOperations.resolve_visible_duplicate(saved_ids, viewer)
+    if row:
+        created_at = row.get("created_at")
+        return {
+            "is_duplicate": True,
+            "duplicate_type": "saved",
+            "story_id": row["story_id"],
+            "story_title": row["name"],
+            "created_at": created_at.isoformat() if created_at else None,
+            "created_by": row["username"],
+            "is_own": bool(row["is_own"]),
+            "is_public": bool(row["is_public"]),
+            "file_hash": duplicate_info.get("hash"),
+        }
+
+    # Generated stories are still being produced and nobody has consented to
+    # share them yet, so they surface to their own owner only. Most recent first.
+    for match in reversed(duplicate_info.get("generated_stories") or []):
+        story_id = match.get("story_id")
+        if not story_id:
+            continue
+        status = job_manager.get_story_status(story_id)
+        if not status or status.get("user_id") != viewer.get("id"):
+            continue
+        return {
+            "is_duplicate": True,
+            "duplicate_type": "generated",
+            "story_id": story_id,
+            "story_title": status.get("title") or "Untitled",
+            "created_at": status.get("created_at"),
+            "created_by": status.get("username") or viewer.get("username"),
+            "is_own": True,
+            "is_public": False,
+            "file_hash": duplicate_info.get("hash"),
+        }
+    return None
+
+
+
+def _audio_media_type(path) -> str:
+    """Media type from the file's leading bytes rather than its extension.
+
+    Returns "" when the file cannot be read or the header is unrecognised, so
+    callers can fall back to whatever they were going to do anyway.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return ""
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "audio/wav"
+    # MP3 is either an ID3 tag or a raw frame sync (0xFF 0xEx/0xFx).
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "audio/mpeg"
+    if head[:4] == b"OggS":
+        return "audio/ogg"
+    return ""
+
+@app.get("/api/health")
+async def health_check():
+    """Liveness + dependency probe for Docker's healthcheck.
+
+    Deliberately checks the things that can fail while the process still looks
+    alive - MySQL pool, job-state SQLite, disk. `restart: unless-stopped` only
+    catches a dead PID; a uvicorn stuck on an exhausted connection pool stays
+    "Up" forever without this.
+    """
+    import shutil as _shutil
+    checks = {}
+    healthy = True
+
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        checks["mysql"] = "ok"
+    except Exception as e:
+        checks["mysql"] = f"error: {type(e).__name__}"
+        healthy = False
+
+    try:
+        job_manager.get_story_status("healthcheck-probe")
+        checks["job_state"] = "ok"
+    except Exception as e:
+        checks["job_state"] = f"error: {type(e).__name__}"
+        healthy = False
+
+    try:
+        usage = _shutil.disk_usage("/")
+        free_gb = round(usage.free / 1073741824, 1)
+        checks["disk_free_gb"] = free_gb
+        # Below 2GB a single story (images + audio) can fail mid-write.
+        if free_gb < 2:
+            checks["disk"] = "critical"
+            healthy = False
+        else:
+            checks["disk"] = "ok"
+    except Exception as e:
+        checks["disk"] = f"error: {type(e).__name__}"
+
+    body = {
+        "status": "healthy" if healthy else "degraded",
+        "version": os.getenv("BUILD_TAG", "dev"),
+        "checks": checks,
+        # Utilisation, not health - a saturated governor is the system working
+        # as designed. This is here because a ceiling you cannot observe is a
+        # ceiling you cannot tune: peak_wait_s and waiting are what tell you
+        # whether raising a limit would change anything.
+        "concurrency": governor_snapshot(),
+        "queue": generation_queue.stats(),
+    }
+    if not healthy:
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.api_route("/api/outputs/{subpath:path}", methods=["GET", "HEAD"])
@@ -218,7 +428,7 @@ async def serve_output_file(subpath: str, media_user: dict = Depends(get_media_u
     if not story_id:
         raise HTTPException(status_code=404, detail="File not found")
 
-    if not _verify_story_access(story_id, media_user):
+    if not _verify_story_access(story_id, media_user, allow_public=True):
         raise HTTPException(status_code=403, detail="You do not have permission to access this resource.")
 
     from pathlib import Path
@@ -227,7 +437,7 @@ async def serve_output_file(subpath: str, media_user: dict = Depends(get_media_u
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
-    return FileResponse(file_path)
+    return FileResponse(file_path, media_type=_audio_media_type(file_path) or None)
 
 
 @app.api_route("/api/saved-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
@@ -247,7 +457,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
     if not re.match(r"^[a-f0-9\-]{36}$", story_id):
         raise HTTPException(status_code=400, detail="Invalid story ID format")
 
-    if not _verify_story_access(story_id, media_user):
+    if not _verify_story_access(story_id, media_user, allow_public=True):
         raise HTTPException(status_code=403, detail="You do not have permission to access this story.")
 
     # Reject path traversal / absolute paths. Legitimate filenames are always
@@ -275,15 +485,12 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
     # Try exact match first
     if exact_path.exists() and exact_path.is_file():
         logger.info(f"✅ Found exact match: {exact_path}")
-        response = FileResponse(exact_path)
+        response = FileResponse(exact_path, media_type=_audio_media_type(exact_path) or None)
         # Add CORS headers for media files
         response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        # Force correct content type for Kokoro wav files if needed
-        if filename.endswith(".wav"):
-             response.headers["Content-Type"] = "audio/wav"
         return response
     
     # If not found, try multiple patterns to support both old and new formats
@@ -295,7 +502,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
     
     if matches1:
         logger.info(f"✅ Found UUID-prefixed file: {matches1[0]}")
-        response = FileResponse(matches1[0])
+        response = FileResponse(matches1[0], media_type=_audio_media_type(matches1[0]) or None)
         response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -311,7 +518,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
         
         if old_format_path.exists() and old_format_path.is_file():
             logger.info(f"✅ Found old format file: {old_format_path}")
-            response = FileResponse(old_format_path)
+            response = FileResponse(old_format_path, media_type=_audio_media_type(old_format_path) or None)
             response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -332,7 +539,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
             
             if matches3:
                 logger.info(f"✅ Found new format file: {matches3[0]}")
-                response = FileResponse(matches3[0])
+                response = FileResponse(matches3[0], media_type=_audio_media_type(matches3[0]) or None)
                 response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
                 response.headers["Access-Control-Allow-Credentials"] = "true"
                 response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -349,7 +556,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
         
         if matches4:
             logger.info(f"✅ Found wildcard match: {matches4[0]}")
-            response = FileResponse(matches4[0])
+            response = FileResponse(matches4[0], media_type=_audio_media_type(matches4[0]) or None)
             response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -407,7 +614,7 @@ async def serve_generated_story_file(story_id: str, filename: str, media_user: d
     # Try exact match first
     if exact_path.exists() and exact_path.is_file():
         logger.info(f"✅ Found exact match: {exact_path}")
-        response = FileResponse(exact_path)
+        response = FileResponse(exact_path, media_type=_audio_media_type(exact_path) or None)
         # Add CORS headers for media files
         response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
         response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -424,7 +631,7 @@ async def serve_generated_story_file(story_id: str, filename: str, media_user: d
     
     if matches1:
         logger.info(f"✅ Found UUID-prefixed file: {matches1[0]}")
-        response = FileResponse(matches1[0])
+        response = FileResponse(matches1[0], media_type=_audio_media_type(matches1[0]) or None)
         response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -440,7 +647,7 @@ async def serve_generated_story_file(story_id: str, filename: str, media_user: d
         
         if old_format_path.exists() and old_format_path.is_file():
             logger.info(f"✅ Found old format file: {old_format_path}")
-            response = FileResponse(old_format_path)
+            response = FileResponse(old_format_path, media_type=_audio_media_type(old_format_path) or None)
             response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -461,7 +668,7 @@ async def serve_generated_story_file(story_id: str, filename: str, media_user: d
             
             if matches3:
                 logger.info(f"✅ Found new format file: {matches3[0]}")
-                response = FileResponse(matches3[0])
+                response = FileResponse(matches3[0], media_type=_audio_media_type(matches3[0]) or None)
                 response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
                 response.headers["Access-Control-Allow-Credentials"] = "true"
                 response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -478,7 +685,7 @@ async def serve_generated_story_file(story_id: str, filename: str, media_user: d
         
         if matches4:
             logger.info(f"✅ Found wildcard match: {matches4[0]}")
-            response = FileResponse(matches4[0])
+            response = FileResponse(matches4[0], media_type=_audio_media_type(matches4[0]) or None)
             response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
@@ -524,129 +731,66 @@ def _safe_story_dirname(story_name: str, story_id: str) -> str:
         slug = f"{slug}-{story_id[:8]}"
     return slug
 
-async def generate_scene_media_progressive(story_id: str, scene_id: str, scene_index: int, scene: dict, voice: str, speed: float, story_seed: int, is_mobile: bool = False):
-    """
-    Generate image and audio for a scene IN PARALLEL with mobile optimization.
-    Updates job state as each completes.
-    """
-    character_prompt = scene.get("image_prompt", "")
-    text = scene.get("narrative_text", "")
-    
-    async def generate_image():
-        try:
-            if not character_prompt:
-                job_manager.update_scene_image(scene_id, "skipped")
-                return
-            
-            job_manager.update_scene_image(scene_id, "processing")
-            
-            # Use async generate_image method (now supports mobile optimization)
-            img_bytes = await gemini.generate_image(
-                prompt=character_prompt,
-                scene_text=text,
-                story_seed=story_seed,
-                is_mobile=is_mobile
-            )
-            
-            if img_bytes:
-                img_name = f"scene_{scene_index}.png"
-                # Use new storage manager
-                try:
-                    img_url = storage_manager.save_file(story_id, img_name, img_bytes, in_saved=False)
-                    job_manager.update_scene_image(scene_id, "completed", img_url)
-                    logger.info(f"✓ Scene {scene_index} image complete ({'mobile' if is_mobile else 'desktop'}): {img_url}")
-                except Exception as save_error:
-                    logger.error(f"Failed to save image: {save_error}")
-                    job_manager.update_scene_image(scene_id, "failed")
-            else:
-                job_manager.update_scene_image(scene_id, "failed")
-                logger.error(f"✗ Scene {scene_index} image failed")
-        except Exception as e:
-            logger.error(f"✗ Scene {scene_index} image error: {e}")
-            job_manager.update_scene_image(scene_id, "failed")
-    
-    async def generate_audio():
-        try:
-            if not text:
-                job_manager.update_scene_audio(scene_id, "skipped")
-                return
-            
-            job_manager.update_scene_audio(scene_id, "processing")
-
-            if voice == "ar_teacher":
-                # Arabic voice: route to the self-hosted Piper service, not Kokoro
-                from services.piper_client import piper_tts
-                audio_bytes = await piper_tts.generate_audio(text, speed=speed, silence=0.3)
-            else:
-                # Use mobile-optimized audio for mobile devices
-                from services.chatterbox_client import chatterbox
-                if is_mobile:
-                    audio_bytes = await chatterbox.generate_audio_optimized(text, voice, True)
-                else:
-                    audio_bytes = await kokoro_tts.generate_audio(text, voice, speed)
-            
-            if audio_bytes:
-                aud_name = f"scene_{scene_index}.mp3"  # Chatterbox provides MP3 audio
-                # Use new storage manager
-                try:
-                    aud_url = storage_manager.save_file(story_id, aud_name, audio_bytes, in_saved=False)
-                    job_manager.update_scene_audio(scene_id, "completed", aud_url)
-                    logger.info(f"✓ Scene {scene_index} audio complete ({'mobile' if is_mobile else 'desktop'}): {aud_url}")
-                except Exception as save_error:
-                    logger.error(f"Failed to save audio: {save_error}")
-                    job_manager.update_scene_audio(scene_id, "failed")
-            else:
-                job_manager.update_scene_audio(scene_id, "failed")
-                logger.error(f"✗ Scene {scene_index} audio failed")
-        except Exception as e:
-            logger.error(f"✗ Scene {scene_index} audio error: {e}")
-            job_manager.update_scene_audio(scene_id, "failed")
-    
-    # Run image and audio generation IN PARALLEL
-    await asyncio.gather(generate_image(), generate_audio())
-
 async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, voice: str, storage_manager, job_manager):
     """Generate TTS for scenes 1-9 in background using progressive batching"""
     try:
         from services.chatterbox_client import chatterbox
-        
+
+        published = set()
+
+        def _publish_scene(scene_num: int) -> bool:
+            """Move a finished scene's cached audio into the story folder and mark it
+            completed, so /api/status exposes it right away instead of only once the
+            whole story is done."""
+            if scene_num in published:
+                return True
+            idx = scene_num - 1  # scene_ids excludes Scene 0
+            if idx < 0 or idx >= len(scene_ids):
+                return False
+            cache_file = f"outputs/audio_cache/audio_{story_id}_{scene_num}.mp3"
+            if not os.path.exists(cache_file):
+                return False
+            try:
+                with open(cache_file, 'rb') as f:
+                    audio_bytes = f.read()
+                aud_url = storage_manager.save_file(story_id, f"scene_{scene_num}.mp3", audio_bytes, in_saved=False)
+                job_manager.update_scene_audio(scene_ids[idx], "completed", aud_url)
+                published.add(scene_num)
+                logger.info(f"✓ Scene {scene_num} audio published ({len(published)}/{len(scene_ids)})")
+                return True
+            except Exception as e:
+                logger.error(f"✗ Failed to publish scene {scene_num} audio: {e}")
+                return False
+
+        async def on_scene_ready(scene_num: int):
+            await asyncio.to_thread(_publish_scene, scene_num)
+
         # Use gemini's progressive TTS method
         await gemini.generate_progressive_tts(
             story_id=story_id,
             scenes=scenes,
             voice=voice,
             batch_size=2,
-            max_threads_per_tts=1
+            max_threads_per_tts=1,
+            on_scene_ready=on_scene_ready
         )
-        
-        # Update job manager for each completed scene
+
+        # Safety net - anything the callback missed still gets published (or marked
+        # failed) here, so a callback hiccup can't leave a scene stuck forever.
         for i, scene_id in enumerate(scene_ids):
             scene_num = i + 1  # +1 because Scene 0 is already done
-            cache_file = f"outputs/audio_cache/audio_{story_id}_{scene_num}.mp3"
-            
-            if os.path.exists(cache_file):
-                # Save to story folder
-                with open(cache_file, 'rb') as f:
-                    audio_bytes = f.read()
-                
-                aud_name = f"scene_{scene_num}.mp3"
-                try:
-                    aud_url = storage_manager.save_file(story_id, aud_name, audio_bytes, in_saved=False)
-                    job_manager.update_scene_audio(scene_id, "completed", aud_url)
-                    logger.info(f"✓ Scene {scene_num} audio completed")
-                except Exception as e:
-                    logger.error(f"✗ Failed to save scene {scene_num} audio: {e}")
-                    job_manager.update_scene_audio(scene_id, "failed")
-            else:
+            if scene_num in published:
+                continue
+            if not _publish_scene(scene_num):
                 job_manager.update_scene_audio(scene_id, "failed")
                 logger.error(f"✗ Scene {scene_num} audio not found in cache")
-        
+
         logger.info(f"✓ All TTS generation complete for story {story_id}")
-        
+
     except Exception as e:
         logger.error(f"✗ Background TTS generation error: {e}")
 
-async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grade_level: str, voice: str, speed: float, is_mobile: bool):
+async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grade_level: str, voice: str, speed: float, is_mobile: bool, user_id: int):
     """
     Progressive story generation workflow:
     1. Create story folder in generated_stories
@@ -655,6 +799,13 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
     4. Process scenes in parallel (images + audio per scene)
     """
     workflow_start_time = time.time()
+    # Background tasks spawned by this workflow. The queue slot has to stay
+    # held until they finish: otherwise a worker would report the story done
+    # the moment Scene 0 was ready and immediately claim the next job, while
+    # this story's remaining images and narration were still running. Ten
+    # workers would then have thirty stories genuinely in flight, which is the
+    # exact unbounded fan-out the queue exists to prevent.
+    pending_tasks: List[asyncio.Task] = []
     try:
         # Create story folder with metadata
         storage_manager.create_story_folder(story_id, {
@@ -666,7 +817,13 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         logger.info(f"📁 Created story folder: generated_stories/{story_id}")
         
         # Generate story structure
-        story_data = await asyncio.to_thread(gemini.process_file_to_story, file_path, grade_level)
+        # Groq's SDK is synchronous, so this occupies a thread-pool slot for the
+        # entire round trip, and Groq itself rate-limits by tokens per minute.
+        # The governor keeps a burst of simultaneous uploads from spending the
+        # whole TPM budget in one second and failing all of them together.
+        from services.concurrency import llm_governor
+        async with llm_governor.slot():
+            story_data = await asyncio.to_thread(gemini.process_file_to_story, file_path, grade_level)
         
         if not story_data:
             raise Exception("AI failed to generate story content.")
@@ -702,7 +859,8 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                 images_map = await gemini.generate_images_parallel(
                     r_scenes,
                     seed,
-                    max_workers=4,
+                    # max_workers now defaults to MAX_IMAGES_PER_STORY so the
+                    # per-story cap is an env knob, not a literal buried here.
                     is_mobile=mobile,
                     start_index=1
                 )
@@ -741,6 +899,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                 _bg_img_task.add_done_callback(
                     lambda t: logger.error(f"Background image generation failed: {t.exception()}") if t.exception() else None
                 )
+                pending_tasks.append(_bg_img_task)
                 
             return img_0
 
@@ -753,7 +912,13 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         from services.chatterbox_client import chatterbox
         tts_0_start_time = time.time()
         async def generate_scene_0_tts_timed():
-            audio = await chatterbox.generate_audio(text=scenes[0]['narrative_text'], voice=voice)
+            # Scene 0 narration goes through the same process-wide TTS governor
+            # as scenes 1..N. It is the request the user is actually waiting on,
+            # but it is not exempt from the ceiling - Kokoro is CPU-bound, and
+            # letting first scenes bypass the limit is how twenty simultaneous
+            # uploads make all twenty slower than any of them queued.
+            async with tts_governor.slot():
+                audio = await chatterbox.generate_audio(text=scenes[0]['narrative_text'], voice=voice)
             logger.info(f"✓ Scene 0 TTS generated in {time.time() - tts_0_start_time:.2f}s")
             return audio
         scene_0_tts_task = generate_scene_0_tts_timed()
@@ -795,18 +960,34 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
 
         # 4. Background: Generate Remaining TTS (Scenes 1..N)
         if len(scenes) > 1:
-            asyncio.create_task(
+            pending_tasks.append(asyncio.create_task(
                 generate_remaining_tts(story_id, scenes[1:], scene_ids[1:], voice, storage_manager, job_manager)
-            )
+            ))
         
         # ✅ CRITICAL FIX: Mark story as completed so frontend can display Scene 0 immediately
         # Note: JobStateManager tracks completion via scene statuses, not a separate status field
         # The story is considered complete when all scenes have images
         logger.info(f"✅ Story {story_id} ready for display — time to first playable scene: {time.time() - workflow_start_time:.2f}s")
 
+        # Hold the queue slot until the rest of the story really is done.
+        # Failures inside these tasks are already logged and recorded per scene,
+        # so they must not fail the whole story here; return_exceptions also
+        # stops one bad scene from cancelling its siblings mid-flight.
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        logger.info(
+            f"✅ Story {story_id} fully generated in "
+            f"{time.time() - workflow_start_time:.2f}s"
+        )
+
     except Exception as e:
         logger.error(f"AI Workflow Error after {time.time() - workflow_start_time:.2f}s: {e}")
         job_manager.mark_story_failed(story_id, str(e))
+        try:
+            refund_credit(user_id, story_id)
+            logger.info(f"Refunded 1 credit to user {user_id} for failed story {story_id}")
+        except Exception as refund_error:
+            logger.error(f"Failed to refund credit for story {story_id}: {refund_error}")
 
 @app.post("/api/check-duplicate")
 async def check_duplicate(
@@ -825,105 +1006,13 @@ async def check_duplicate(
     await file.seek(0)
     
     if duplicate_info:
-        # Check if duplicate is in saved_stories (persistent) or generated_stories (temp)
-        saved_matches = duplicate_info.get("saved_stories", [])
-        generated_matches = duplicate_info.get("generated_stories", [])
-        
-        # Prefer saved stories as they are permanent
-        if saved_matches:
-            # Get the most recent saved story from database
-            try:
-                with get_db_cursor() as cursor:
-                    # Get all matching story IDs and sort by created_at DESC to get most recent
-                    story_ids = [m["story_id"] for m in saved_matches]
-                    placeholders = ", ".join(["%s"] * len(story_ids))
-                    
-                    cursor.execute(f"""
-                        SELECT story_id, name, created_at, user_id
-                        FROM user_stories
-                        WHERE story_id IN ({placeholders})
-                        AND user_id = %s
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """, tuple(story_ids) + (current_user["id"],))
-                    
-                    db_story = cursor.fetchone()
-                    
-                    if db_story:
-                        return {
-                            "is_duplicate": True,
-                            "duplicate_type": "saved",
-                            "story_id": db_story["story_id"],
-                            "story_title": db_story["name"],
-                            "created_at": db_story["created_at"].isoformat() if db_story["created_at"] else None,
-                            "created_by": current_user["username"],
-                            "file_hash": duplicate_info["hash"]
-                        }
-            except Exception as e:
-                logger.error(f"Error fetching duplicate story from DB: {e}")
-                # Fallback to hash service metadata
-                pass
-            
-            # Fallback if DB query fails
-            match = saved_matches[0]
-            metadata = match.get("metadata", {})
-            return {
-                "is_duplicate": True,
-                "duplicate_type": "saved",
-                "story_id": match["story_id"],
-                "story_title": metadata.get("title", metadata.get("original_filename", "Unknown")),
-                "created_at": metadata.get("created_timestamp", None),
-                "created_by": current_user["username"],
-                "file_hash": duplicate_info["hash"]
-            }
-        elif generated_matches:
-            # For generated stories, use job manager to get most recent
-            match = generated_matches[-1]  # Get most recent (last in list)
-            story_id = match["story_id"]
-            
-            logger.info(f"Duplicate found in generated stories: {story_id}")
-            
-            try:
-                status = job_manager.get_story_status(story_id)
-                logger.info(f"Job status for {story_id}: {status}")
-                
-                # Extract title from status
-                title = status.get("title", "Unknown")
-                created_at = status.get("created_at", None)
-                
-                # If no created_at in status, try to get from metadata
-                if not created_at:
-                    metadata = match.get("metadata", {})
-                    created_at = metadata.get("created_timestamp", None)
-                
-                response = {
-                    "is_duplicate": True,
-                    "duplicate_type": "generated",
-                    "story_id": story_id,
-                    "story_title": title,
-                    "created_at": created_at,
-                    "created_by": current_user["username"],
-                    "file_hash": duplicate_info["hash"]
-                }
-                logger.info(f"Returning duplicate response: {response}")
-                return response
-                
-            except Exception as e:
-                logger.error(f"Error fetching generated story status: {e}")
-                # Fallback
-                metadata = match.get("metadata", {})
-                response = {
-                    "is_duplicate": True,
-                    "duplicate_type": "generated",
-                    "story_id": story_id,
-                    "story_title": metadata.get("title", "Unknown"),
-                    "created_at": metadata.get("created_timestamp", None),
-                    "created_by": current_user["username"],
-                    "file_hash": duplicate_info["hash"]
-                }
-                logger.info(f"Returning fallback duplicate response: {response}")
-                return response
-    
+        # A match on disk is not automatically a match this caller may hear
+        # about: the story may belong to somebody who never agreed to share it.
+        visible = _resolve_visible_duplicate(duplicate_info, current_user)
+        if visible:
+            return visible
+        logger.info("Hash matched an existing story, but none visible to this user")
+
     return {"is_duplicate": False, "file_hash": hash_service.generate_bytes_hash(file_content)}
 
 @app.post("/api/upload")
@@ -957,28 +1046,29 @@ async def upload_story(
         duplicate_info = hash_service.find_duplicate(file_content, file.filename)
     
     if duplicate_info:
-        saved_matches = duplicate_info.get("saved_stories", [])
-        generated_matches = duplicate_info.get("generated_stories", [])
-        
-        # Return duplicate info - frontend will handle user choice
-        if saved_matches or generated_matches:
-            match = (saved_matches[0] if saved_matches else generated_matches[0])
-            duplicate_type = "saved" if saved_matches else "generated"
-            
-            # Extract metadata
-            metadata = match.get("metadata", {})
+        # Same visibility rule as /api/check-duplicate. This branch used to hand
+        # back saved_matches[0] unconditionally - another user's story_id and
+        # title, attributed to whoever happened to be uploading.
+        visible = _resolve_visible_duplicate(duplicate_info, current_user)
+        if visible:
             return {
-                "is_duplicate": True,
-                "duplicate_type": duplicate_type,
-                "story_id": match["story_id"],
-                "story_title": metadata.get("title", metadata.get("original_filename", "Unknown")),
-                "created_at": metadata.get("created_timestamp", "Unknown date"),
-                "created_by": metadata.get("username", "Unknown"),
+                **visible,
                 "file_hash": file_hash,
-                "message": "File already exists. Choose to view existing or generate new."
+                "message": "File already exists. Choose to view existing or generate new.",
             }
+        # Nothing this user may see - fall through and generate their own copy.
     
-    # No duplicate or force_new=True - create new story
+    # No duplicate or force_new=True - create new story.
+    # Admission control runs first: it rejects before the credit is reserved
+    # and before any folder or job-state row exists, so a refused request
+    # leaves nothing behind to clean up. 429 + Retry-After is an honest answer;
+    # accepting work the system cannot start for an hour is not.
+    admit_generation(current_user['id'])
+
+    # Credit check second, still before any temp folder/job state exists, so a
+    # blocked (402) request never leaves orphaned state behind.
+    check_and_reserve_credit(current_user['id'])
+
     story_id = str(uuid.uuid4())
     
     # Create temporary story folder in generated_stories
@@ -1018,21 +1108,31 @@ async def upload_story(
         mobile_keywords = ['mobile', 'android', 'iphone', 'ipad', 'windows phone', 'blackberry']
         is_mobile = any(keyword in user_agent.lower() for keyword in mobile_keywords)
     
-    # Use progressive workflow with mobile optimization
-    background_tasks.add_task(
-        run_ai_workflow_progressive_mobile, 
-        story_id, 
-        temp_file_path, 
-        grade_level, 
-        voice, 
-        speed, 
-        is_mobile
+    # Hand the job to the queue instead of running it inline. submit() returns
+    # only after the row is committed, so the response can promise a story that
+    # actually survives a restart - which add_task could not.
+    position = generation_queue.submit(
+        story_id,
+        current_user['id'],
+        {
+            "story_id": story_id,
+            "file_path": temp_file_path,
+            "grade_level": grade_level,
+            "voice": voice,
+            "speed": speed,
+            "is_mobile": is_mobile,
+            "user_id": current_user["id"],
+        },
     )
-    
+
     return {
-        "job_id": story_id, 
+        "job_id": story_id,
         "is_mobile": is_mobile,
-        "message": "Story generation started"
+        "queue_position": position,
+        "message": (
+            "Story generation started" if position <= 1
+            else f"Queued - {position - 1} story(s) ahead of you"
+        ),
     }
 
 @app.post("/api/handle-duplicate-choice")
@@ -1067,6 +1167,11 @@ async def handle_duplicate_choice(
         }
     
     elif choice == "generate_new":
+        # Admission control first, then the credit check - both before any
+        # temp folder or job-state row exists. See /api/upload for why.
+        admit_generation(current_user['id'])
+        check_and_reserve_credit(current_user['id'])
+
         # Create new story with fresh UUID
         new_story_id = str(uuid.uuid4())
         
@@ -1109,21 +1214,29 @@ async def handle_duplicate_choice(
             mobile_keywords = ['mobile', 'android', 'iphone', 'ipad', 'windows phone', 'blackberry']
             is_mobile = any(keyword in user_agent.lower() for keyword in mobile_keywords)
         
-        # Start generation
-        background_tasks.add_task(
-            run_ai_workflow_progressive_mobile, 
-            new_story_id, 
-            temp_file_path, 
-            grade_level, 
-            voice, 
-            speed, 
-            is_mobile
+        # Queue generation (see /api/upload for why this is not add_task)
+        position = generation_queue.submit(
+            new_story_id,
+            current_user['id'],
+            {
+                "story_id": new_story_id,
+                "file_path": temp_file_path,
+                "grade_level": grade_level,
+                "voice": voice,
+                "speed": speed,
+                "is_mobile": is_mobile,
+                "user_id": current_user["id"],
+            },
         )
-        
+
         return {
             "action": "generate_new",
             "job_id": new_story_id,
-            "message": "New story generation started"
+            "queue_position": position,
+            "message": (
+                "New story generation started" if position <= 1
+                else f"Queued - {position - 1} story(s) ahead of you"
+            ),
         }
     
     else:
@@ -1136,7 +1249,7 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
     """Get overall story status with scene completion info."""
     logger.info(f"🔍 Getting story status for: {story_id}")
 
-    if not _verify_story_access(story_id, current_user):
+    if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
 
     # First check if story is in the active job system
@@ -1401,7 +1514,7 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
 @app.get("/api/story/{story_id}/scene/{scene_index}")
 async def get_scene_status(story_id: str, scene_index: int, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get specific scene data."""
-    if not _verify_story_access(story_id, current_user):
+    if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
 
     scene_id = f"{story_id}_scene_{scene_index}"
@@ -1421,7 +1534,7 @@ async def get_scene_status(story_id: str, scene_index: int, current_user: dict =
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
-    if not _verify_story_access(job_id, current_user):
+    if not _verify_story_access(job_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
 
     # Check if it's a progressive story
@@ -1455,6 +1568,13 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
             "progress": actual_progress,
             "total_scenes": status["total_scenes"],  # Always include total count
             "completed_scene_count": len(completed_scenes),  # Number of completed scenes
+            # Queried only while the job could still be waiting. Every client
+            # polls this endpoint every 2 seconds, and there is nothing to look
+            # up once a worker has actually picked the story up.
+            "queue_position": (
+                job_manager.queue_position(job_id)
+                if status["status"] == "initializing" else 0
+            ),
             "result": {
                 "title": status["title"],
                 "scenes": completed_scenes,
@@ -1467,8 +1587,32 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Job not found")
     return jobs[job_id]
 
+@app.patch("/api/stories/{story_id}/visibility")
+async def set_story_visibility(
+    story_id: str,
+    is_public: bool = Body(..., embed=True),
+    user: User = Depends(get_current_user),
+):
+    """Turn discoverability on or off for a saved story.
+
+    Turning it off is not retroactive - it stops the story appearing in future
+    duplicate checks, but anyone who already loaded it keeps what they have.
+    That is stated plainly in the UI, because a checkbox that implies recall it
+    cannot deliver is worse than no checkbox.
+    """
+    if not StoryOperations.set_visibility(story_id, user, is_public):
+        raise HTTPException(status_code=404, detail="Story not found or you do not have permission to change it.")
+    logger.info(f"Story {story_id} visibility set to is_public={is_public} by user {user.get('id')}")
+    return {"story_id": story_id, "is_public": is_public}
+
+
 @app.post("/api/save-story/{job_id}")
-async def save_story(job_id: str, story_name: str = Form(...), user: User = Depends(get_current_user)):
+async def save_story(
+    job_id: str,
+    story_name: str = Form(...),
+    make_public: bool = Form(False),
+    user: User = Depends(get_current_user),
+):
     """
     Saves a generated story to the database, associating it with the current user.
     This also moves the story's assets from temporary storage to permanent storage.
@@ -1479,6 +1623,28 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
     # Check if it's a progressive story
     status = job_manager.get_story_status(job_id)
     if status and status["status"] in ("completed", "processing"):
+        # Saving MOVES the story folder (shutil.move in move_to_saved). While
+        # generation is still running the TTS worker holds the old path, so any
+        # scene published after the move lands nowhere and its narration is lost
+        # with no error surfaced to the user. Refuse until the story is finished.
+        # job_state.py:192 sets "completed" only when every scene has both its
+        # image and its audio, and /api/export-job already gates on exactly this.
+        if status["status"] != "completed":
+            all_scenes = job_manager.get_all_scenes(job_id)
+            ready = sum(
+                1 for s in all_scenes
+                if s["image_status"] == "completed" and s["audio_status"] == "completed"
+            )
+            total = status.get("total_scenes") or len(all_scenes)
+            logger.warning(
+                f"Rejected save of in-progress story {job_id} ({ready}/{total} scenes ready)"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"Story is still generating ({ready} of {total} scenes ready). "
+                       "Please wait until it finishes, then save.",
+            )
+
         # Progressive story system - move folder from generated_stories to saved_stories
         saved_story_id = str(uuid.uuid4())
         scenes = job_manager.get_all_scenes(job_id)
@@ -1537,7 +1703,8 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
             user_id=user['id'],
             story_id=saved_story_id,
             name=story_name,
-            story_data=story_data
+            story_data=story_data,
+            is_public=make_public
         )
         
         if not success:
@@ -1560,7 +1727,8 @@ async def save_story(job_id: str, story_name: str = Form(...), user: User = Depe
             user_id=user['id'],
             story_id=story_id,
             name=story_name,
-            story_data=story_data
+            story_data=story_data,
+            is_public=make_public
         )
 
         if not success:
@@ -1622,7 +1790,10 @@ async def load_story(story_id: str, user: User = Depends(get_current_user)):
     stories, unless they are an admin).
     """
     logger.info(f"Loading story {story_id} for user {user.get('email')} (admin: {user.get('is_admin')})")
-    story = StoryOperations.get_story(story_id, user)
+    # Read-only: a story its owner made discoverable can be opened by anyone who
+    # has its id. Saving, renaming and deleting still go through the owner-scoped
+    # StoryOperations calls, so this does not hand over control of the story.
+    story = StoryOperations.get_story(story_id, user, allow_public=True)
     if not story:
         logger.warning(f"Story {story_id} not found or user {user.get('email')} lacks permission")
         raise HTTPException(status_code=404, detail="Story not found or you do not have permission to view it.")
@@ -1720,24 +1891,30 @@ async def export_job(job_id: str, current_user: dict = Depends(get_current_user)
         
         # Add each scene's assets
         for idx, scene in enumerate(scenes):
+            # The bundled name must follow the real file. Hardcoding .wav here
+            # shipped mp3 bytes under a .wav name, so the offline player - which
+            # picks its decoder from the name - could refuse its own bundle.
+            audio_path = ""
+            if scene["audio_url"]:
+                audio_path = scene["audio_url"].replace("/api/outputs/", "outputs/")
+            audio_ext = os.path.splitext(audio_path)[1].lower() or ".mp3"
+
             scene_data = {
                 "text": scene["text"],
                 "image_url": f"scene_{idx}.png",
-                "audio_url": f"scene_{idx}.wav"
+                "audio_url": f"scene_{idx}{audio_ext}"
             }
             story_data["scenes"].append(scene_data)
-            
+
             # Add image file
             if scene["image_url"]:
                 img_path = scene["image_url"].replace("/api/outputs/", "outputs/")
                 if os.path.exists(img_path):
                     zip_file.write(img_path, f"scene_{idx}.png")
-            
+
             # Add audio file
-            if scene["audio_url"]:
-                audio_path = scene["audio_url"].replace("/api/outputs/", "outputs/")
-                if os.path.exists(audio_path):
-                    zip_file.write(audio_path, f"scene_{idx}.wav")
+            if audio_path and os.path.exists(audio_path):
+                zip_file.write(audio_path, f"scene_{idx}{audio_ext}")
         
         # Add story.json
         zip_file.writestr("story.json", json.dumps(story_data, indent=2))
@@ -1814,7 +1991,7 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
 @app.get("/api/story/{story_id}/tts-status")
 async def get_tts_status(story_id: str, current_user: dict = Depends(get_current_user)):
     """Get specialized progressive TTS generation status"""
-    if not _verify_story_access(story_id, current_user):
+    if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
     # Use gemini service's status tracking
     return await gemini.get_tts_status(story_id)
@@ -1822,7 +1999,7 @@ async def get_tts_status(story_id: str, current_user: dict = Depends(get_current
 @app.get("/api/story/{story_id}/scene/{scene_num}/audio")
 async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = Depends(get_current_user)):
     """Get scene audio (from cache or generated/saved folder) with waterfall fallbacks"""
-    if not _verify_story_access(story_id, current_user):
+    if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
     import os
     import aiofiles
@@ -1833,46 +2010,43 @@ async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = De
     cache_file = f"outputs/audio_cache/audio_{story_id}_{scene_num}.mp3"
     
     if os.path.exists(cache_file):
-        return FileResponse(cache_file, media_type="audio/mpeg")
+        return FileResponse(cache_file, media_type=_audio_media_type(cache_file) or "audio/mpeg")
     
     # 2. Check active job (in-memory/generated_stories)
     try:
         story_dir = storage_manager.get_story_path(story_id, in_saved=False)
         
-        # Try WAV (Kokoro default) and MP3
-        for ext in [".wav", ".mp3"]:
+        # Extension order is now mp3-first: that is what we write. .wav stays
+        # in the list for stories generated before 2026-07-26.
+        for ext in [".mp3", ".wav"]:
             # Try simple name
             simple_path = os.path.join(story_dir, f"scene_{scene_num}{ext}")
             if os.path.exists(simple_path):
-                media_type = "audio/wav" if ext == ".wav" else "audio/mpeg"
-                return FileResponse(simple_path, media_type=media_type)
+                return FileResponse(simple_path, media_type=_audio_media_type(simple_path))
             
             # Try UUID prefixed
             import glob
             matches = glob.glob(os.path.join(story_dir, f"*_scene_{scene_num}{ext}"))
             if matches:
-                 media_type = "audio/wav" if ext == ".wav" else "audio/mpeg"
-                 return FileResponse(matches[0], media_type=media_type)
+                 return FileResponse(matches[0], media_type=_audio_media_type(matches[0]))
     except Exception:
         pass
         
     # 3. Check saved stories (persistent storage)
     try:
         story_dir = storage_manager.get_story_path(story_id, in_saved=True)
-         # Try WAV (Kokoro default) and MP3
-        for ext in [".wav", ".mp3"]:
+        # mp3-first, .wav retained for pre-2026-07-26 stories.
+        for ext in [".mp3", ".wav"]:
             # Try simple name
             simple_path = os.path.join(story_dir, f"scene_{scene_num}{ext}")
             if os.path.exists(simple_path):
-                media_type = "audio/wav" if ext == ".wav" else "audio/mpeg"
-                return FileResponse(simple_path, media_type=media_type)
+                return FileResponse(simple_path, media_type=_audio_media_type(simple_path))
             
             # Try UUID prefixed
             import glob
             matches = glob.glob(os.path.join(story_dir, f"*_scene_{scene_num}{ext}"))
             if matches:
-                 media_type = "audio/wav" if ext == ".wav" else "audio/mpeg"
-                 return FileResponse(matches[0], media_type=media_type)
+                 return FileResponse(matches[0], media_type=_audio_media_type(matches[0]))
     except Exception:
         pass
     

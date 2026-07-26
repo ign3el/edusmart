@@ -38,7 +38,7 @@ function Flip3DCard({ front, back, className = '', frontLabel = 'View details', 
   }
 
   return (
-    <div className={`flip3d-outer ${className}`}>
+    <div className={`flip3d-outer ${flipped ? 'flip3d-outer--expanded' : ''} ${className}`}>
       <motion.div
         ref={cardRef}
         className="flip3d-tilt"

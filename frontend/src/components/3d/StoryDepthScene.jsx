@@ -6,7 +6,7 @@ import { StorySceneImagePlane } from './StorySceneImagePlane'
 
 // Depth-layered scene for story player: background wash, mid glow ring, the real
 // scene image as a tilting/parallax 3D plane (StorySceneImagePlane), ambient particles.
-export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, pointerTiltRef }) {
+export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, turnDir = 1, pointerTiltRef }) {
   const groupRef = useRef()
 
   // Subtle floating animation — bounded oscillation, not unbounded spin, since the
@@ -35,7 +35,7 @@ export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, p
         <mesh position={[0, 0, -3]} scale={1.3}>
           <planeGeometry args={[18, 10]} />
           <meshBasicMaterial
-            color="#0b0f1a"
+            color="#1d1147"
             transparent
             opacity={0.6}
             side={2}
@@ -59,7 +59,7 @@ export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, p
         <mesh position={[0, 0, -0.9]} scale={1.02}>
           <planeGeometry args={[15.5, 8.8]} />
           <meshBasicMaterial
-            color="#22d3ee"
+            color="#f472b6"
             transparent
             opacity={isPlaying ? 0.1 : 0.04}
             side={2}
@@ -74,6 +74,7 @@ export function StoryDepthScene({ imageUrl, prevImageUrl, isMobile, isPlaying, p
       <StorySceneImagePlane
         imageUrl={imageUrl}
         prevImageUrl={prevImageUrl}
+        turnDir={turnDir}
         isMobile={isMobile}
         isPlaying={isPlaying}
         pointerTiltRef={pointerTiltRef}

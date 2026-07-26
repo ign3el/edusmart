@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, validator
 import io
 from typing import Optional
 
@@ -17,6 +17,7 @@ from database import get_db_cursor
 from auth import get_password_hash
 import mysql.connector
 from services.kokoro_client import generate_tts
+from routers.billing import refund_credit
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -51,6 +52,53 @@ class UserCreateRequest(BaseModel):
 
 class StoryUpdateRequest(BaseModel):
     title: Optional[str] = None
+
+class PlanUpdateRequest(BaseModel):
+    display_name: Optional[str] = None
+    price_display: Optional[str] = None
+    stripe_price_id: Optional[str] = None
+    credits_included: Optional[int] = None
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+    description: Optional[str] = None
+    features: Optional[str] = None
+    is_recommended: Optional[bool] = None
+
+class PromoCodeCreateRequest(BaseModel):
+    code: str = Field(..., min_length=3, max_length=50)
+    discount_type: str
+    discount_value: int
+    stripe_coupon_id: Optional[str] = None
+    applies_to_tier: Optional[str] = None
+    max_redemptions: Optional[int] = None
+    max_redemptions_per_user: int = 1
+    expires_at: Optional[datetime] = None
+
+    @validator('discount_type')
+    def valid_discount_type(cls, v):
+        if v not in ('percent_off', 'free_credits'):
+            raise ValueError("discount_type must be 'percent_off' or 'free_credits'")
+        return v
+
+    @validator('discount_value')
+    def valid_discount_value(cls, v, values):
+        if v <= 0:
+            raise ValueError('discount_value must be positive')
+        if values.get('discount_type') == 'percent_off' and v > 100:
+            raise ValueError('percent_off discount_value cannot exceed 100')
+        return v
+
+class PromoCodeUpdateRequest(BaseModel):
+    discount_value: Optional[int] = None
+    stripe_coupon_id: Optional[str] = None
+    max_redemptions: Optional[int] = None
+    max_redemptions_per_user: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    is_active: Optional[bool] = None
+
+class GrantCreditsRequest(BaseModel):
+    amount: int
+    note: Optional[str] = None
 
 # --- Dependency for Admin User ---
 async def get_admin_user(current_user: User = Depends(get_current_user)):
@@ -289,6 +337,8 @@ async def list_users():
                     u.created_at,
                     u.is_admin,
                     u.is_verified,
+                    u.subscription_tier,
+                    u.credits_balance,
                     COUNT(us.story_id) as story_count
                 FROM users u
                 LEFT JOIN user_stories us ON u.id = us.user_id
@@ -313,7 +363,8 @@ async def get_user_details(user_id: int):
             # Get user info (explicit columns - never return password_hash)
             cursor.execute(
                 """
-                SELECT id, email, username, created_at, updated_at, is_admin, is_verified, is_premium
+                SELECT id, email, username, created_at, updated_at, is_admin, is_verified, is_premium,
+                       subscription_tier, subscription_status, credits_balance
                 FROM users WHERE id = %s
                 """,
                 (user_id,)
@@ -557,8 +608,9 @@ async def list_all_stories():
         # Combine both
         all_stories = saved_stories + generated_stories
         
-        # Sort by created_at descending
-        all_stories.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        # Sort by created_at descending. MySQL returns datetime objects, SQLite
+        # returns strings for the same column - normalize to str for a safe compare.
+        all_stories.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
         
         return {
             "success": True,
@@ -632,6 +684,185 @@ async def delete_story(story_id: str):
         logger.error(f"Delete story failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/stories/{story_id}/cancel", dependencies=[Depends(get_admin_user)])
+async def cancel_story(story_id: str):
+    """Mark a stuck/hung generation job as failed and refund its credit."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, user_id FROM stories WHERE story_id = ?", (story_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Story not found")
+        if row["status"] != "processing":
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Story is not processing (status: {row['status']})")
+
+        cursor.execute("""
+            UPDATE stories SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+            WHERE story_id = ?
+        """, (story_id,))
+        conn.commit()
+        user_id = row["user_id"]
+        conn.close()
+
+        if user_id:
+            try:
+                refund_credit(user_id, story_id)
+            except Exception as refund_err:
+                logger.warning(f"Could not refund credit for cancelled job {story_id}: {refund_err}")
+
+        return {"success": True, "message": f"Story {story_id} cancelled"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Cancel story failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RetryResult(BaseModel):
+    scenes_queued: int
+    message: str
+
+
+def _retryable_scenes(story_id: str) -> list:
+    """Scenes that failed (or silently never produced a file) and can be redone.
+
+    Both halves are recoverable from what SQLite already stores: `text` drives
+    TTS, and `character_prompt` is the image prompt (verified - it holds strings
+    like "A 3D animated scene of ..."). What is NOT stored is the original
+    story_seed and voice, so a retried scene uses the configured defaults and may
+    differ slightly in style from its neighbours. That is the honest trade for
+    not having to re-upload a document that no longer exists on disk - uploads/
+    is emptied after processing.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT scene_id, scene_index, text, character_prompt, image_status, audio_status,
+                  image_url, audio_url
+           FROM scenes WHERE story_id = ? ORDER BY scene_index""",
+        (story_id,)
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    out = []
+    for r in rows:
+        needs_image = r["image_status"] != "completed" or not r["image_url"]
+        needs_audio = r["audio_status"] != "completed" or not r["audio_url"]
+        if needs_image or needs_audio:
+            r["needs_image"] = needs_image and bool(r["character_prompt"])
+            r["needs_audio"] = needs_audio and bool(r["text"])
+            if r["needs_image"] or r["needs_audio"]:
+                out.append(r)
+    return out
+
+
+async def _run_retry(story_id: str, scenes: list) -> None:
+    """Regenerate the failed halves of each scene, then settle the story status."""
+    from services.story_service import StoryService
+    from story_storage import storage_manager
+    from job_state import job_manager
+
+    service = StoryService()
+    seed = int(os.getenv("RUNPOD_SEED", "20240601"))
+    repaired = 0
+
+    for scene in scenes:
+        idx = scene["scene_index"]
+
+        if scene.get("needs_image"):
+            try:
+                img = await service.generate_image(
+                    scene["character_prompt"], story_seed=seed, scene_num=idx
+                )
+                if img:
+                    url = storage_manager.save_file(story_id, f"scene_{idx}.png", img, in_saved=False)
+                    job_manager.update_scene_image(scene["scene_id"], "completed", url)
+                    repaired += 1
+                else:
+                    job_manager.update_scene_image(scene["scene_id"], "failed")
+            except Exception as e:
+                logger.error(f"Retry image failed for {story_id} scene {idx}: {e}")
+                job_manager.update_scene_image(scene["scene_id"], "failed")
+
+        if scene.get("needs_audio"):
+            try:
+                audio = await asyncio.to_thread(generate_tts, scene["text"])
+                if audio:
+                    url = storage_manager.save_file(story_id, f"scene_{idx}.mp3", audio, in_saved=False)
+                    job_manager.update_scene_audio(scene["scene_id"], "completed", url)
+                    repaired += 1
+                else:
+                    job_manager.update_scene_audio(scene["scene_id"], "failed")
+            except Exception as e:
+                logger.error(f"Retry audio failed for {story_id} scene {idx}: {e}")
+                job_manager.update_scene_audio(scene["scene_id"], "failed")
+
+    # Settle: completed only if nothing is outstanding any more, otherwise back to
+    # failed so the admin can see it still needs attention rather than it sitting
+    # in 'processing' forever.
+    still_broken = _retryable_scenes(story_id)
+    final = "failed" if still_broken else "completed"
+    conn = get_db_connection()
+    conn.execute(
+        "UPDATE stories SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE story_id = ?",
+        (final, story_id)
+    )
+    conn.commit()
+    conn.close()
+    logger.info(
+        f"Retry finished for {story_id}: {repaired} asset(s) regenerated, "
+        f"{len(still_broken)} scene(s) still incomplete -> status '{final}'"
+    )
+
+
+@router.post("/stories/{story_id}/retry", dependencies=[Depends(get_admin_user)])
+async def retry_story(story_id: str):
+    """Regenerate the failed images/audio of a failed job, in place.
+
+    This is a repair, not a re-run: the source document is long gone, so the
+    story text is never regenerated. No credit is charged - the user's credit was
+    already refunded when the job failed.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM stories WHERE story_id = ?", (story_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Story not found")
+    if row["status"] == "processing":
+        raise HTTPException(status_code=400, detail="Story is already processing")
+
+    scenes = _retryable_scenes(story_id)
+    if not scenes:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to retry - this job has no recoverable scenes. "
+                   "It failed before any scene text was written, so it can only be deleted."
+        )
+
+    conn = get_db_connection()
+    conn.execute(
+        "UPDATE stories SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE story_id = ?",
+        (story_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    task = asyncio.create_task(_run_retry(story_id, scenes))
+    task.add_done_callback(
+        lambda t: logger.error(f"Retry task crashed for {story_id}: {t.exception()}") if t.exception() else None
+    )
+
+    return RetryResult(
+        scenes_queued=len(scenes),
+        message=f"Retrying {len(scenes)} scene(s). Refresh in a moment to see progress."
+    )
+
+
 @router.put("/stories/{story_id}", dependencies=[Depends(get_admin_user)])
 async def update_story(story_id: str, update: StoryUpdateRequest):
     """Update story metadata"""
@@ -670,3 +901,108 @@ async def update_story(story_id: str, update: StoryUpdateRequest):
     except Exception as e:
         logger.error(f"Update story failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+# --- Credit grants (support/comp cases) ---
+
+@router.post("/users/{user_id}/grant-credits", dependencies=[Depends(get_admin_user)])
+async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest):
+    """Admin-only credit adjustment. Logged in credit_transactions ('admin_grant') like every other credit change."""
+    if payload.amount == 0:
+        raise HTTPException(status_code=400, detail="amount must be non-zero")
+    with get_db_cursor(commit=True) as cursor:
+        cursor.execute("UPDATE users SET credits_balance = credits_balance + %s WHERE id = %s", (payload.amount, user_id))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+        cursor.execute(
+            "INSERT INTO credit_transactions (user_id, delta, reason) VALUES (%s, %s, 'admin_grant')",
+            (user_id, payload.amount)
+        )
+    return {"success": True, "message": f"{payload.amount:+d} credits applied"}
+
+
+# --- Subscription plans (hot-editable pricing - no deploy needed to change these) ---
+
+@router.get("/plans", dependencies=[Depends(get_admin_user)])
+async def admin_list_plans():
+    """All plans including inactive ones, for the Manage Plans admin tab."""
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT * FROM subscription_plans ORDER BY sort_order")
+        return {"success": True, "plans": cursor.fetchall()}
+
+@router.put("/plans/{tier_key}", dependencies=[Depends(get_admin_user)])
+async def admin_update_plan(tier_key: str, update: PlanUpdateRequest):
+    """Edit a plan's price/credits/active state/copy. Takes effect on the very next request - no deploy."""
+    updates = []
+    values = []
+    for field in ("display_name", "price_display", "stripe_price_id", "credits_included", "is_active",
+                  "sort_order", "description", "features", "is_recommended"):
+        value = getattr(update, field)
+        if value is not None:
+            updates.append(f"{field} = %s")
+            values.append(value)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT tier_key FROM subscription_plans WHERE tier_key = %s", (tier_key,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Plan not found")
+
+    values.append(tier_key)
+    with get_db_cursor(commit=True) as cursor:
+        # Only one plan can be "recommended" at a time - clear the others first.
+        if update.is_recommended is True:
+            cursor.execute("UPDATE subscription_plans SET is_recommended = FALSE WHERE tier_key != %s", (tier_key,))
+        cursor.execute(f"UPDATE subscription_plans SET {', '.join(updates)} WHERE tier_key = %s", values)
+
+    return {"success": True, "message": "Plan updated"}
+
+
+# --- Promo codes / discount vouchers (also hot-editable, no deploy needed) ---
+
+@router.get("/promo-codes", dependencies=[Depends(get_admin_user)])
+async def admin_list_promo_codes():
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
+        return {"success": True, "promo_codes": cursor.fetchall()}
+
+@router.post("/promo-codes", dependencies=[Depends(get_admin_user)])
+async def admin_create_promo_code(payload: PromoCodeCreateRequest):
+    code = payload.code.strip().upper()
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute(
+                """INSERT INTO promo_codes
+                   (code, discount_type, discount_value, stripe_coupon_id, applies_to_tier,
+                    max_redemptions, max_redemptions_per_user, expires_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (code, payload.discount_type, payload.discount_value, payload.stripe_coupon_id,
+                 payload.applies_to_tier, payload.max_redemptions, payload.max_redemptions_per_user,
+                 payload.expires_at)
+            )
+    except mysql.connector.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Promo code '{code}' already exists")
+    return {"success": True, "code": code}
+
+@router.put("/promo-codes/{code}", dependencies=[Depends(get_admin_user)])
+async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest):
+    code = code.strip().upper()
+    updates = []
+    values = []
+    for field in ("discount_value", "stripe_coupon_id", "max_redemptions", "max_redemptions_per_user", "expires_at", "is_active"):
+        value = getattr(update, field)
+        if value is not None:
+            updates.append(f"{field} = %s")
+            values.append(value)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT code FROM promo_codes WHERE code = %s", (code,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Promo code not found")
+
+    values.append(code)
+    with get_db_cursor(commit=True) as cursor:
+        cursor.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE code = %s", values)
+
+    return {"success": True, "message": "Promo code updated"}

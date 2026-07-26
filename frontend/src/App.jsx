@@ -15,6 +15,7 @@ import FileConfirmation from './components/FileConfirmation'
 import GeneratingSpinner from './components/GeneratingSpinner'
 import StoryPlayer from './components/StoryPlayer'
 const Scene3DBackground = lazy(() => import('./components/3d/Scene3DBackground'));
+const HeroScene = lazy(() => import('./components/3d/HeroScene'));
 import SaveStoryModal from './components/SaveStoryModal'
 import SaveFeedbackModal from './components/SaveFeedbackModal'
 import LoadStory from './components/LoadStory'
@@ -23,9 +24,12 @@ import UserProfile from './components/UserProfile'
 import ReuploadConfirmModal from './components/ReuploadConfirmModal'
 import UploadProgressOverlay from './components/UploadProgressOverlay'
 import DuplicateStoryModal from './components/DuplicateStoryModal'
+import PricingPage from './components/PricingPage'
+import UpgradeModal from './components/UpgradeModal'
 import TeacherCard from './components/TeacherCard'
 import NavigationMenu from './components/NavigationMenu'
 import BrandMark from './components/BrandMark'
+import Mascot from './components/Mascot'
 import ErrorBoundary from './components/ErrorBoundary'
 const AdminPanel = lazy(() => import('./components/AdminPanel'));
 import './App.css'
@@ -62,6 +66,11 @@ function MainApp() {
   const [progress, setProgress] = useState(0)
   const [totalScenes, setTotalScenes] = useState(0) // Track total scenes from backend
   const [completedSceneCount, setCompletedSceneCount] = useState(0) // Track completed scenes
+  // Save and Download stay unavailable until EVERY scene has both its image
+  // and its audio. Saving mid-generation moves the live story folder out
+  // from under the background TTS worker, so any scene still being written
+  // lands nowhere and its narration is lost silently.
+  const storyFullyReady = totalScenes > 0 && completedSceneCount >= totalScenes
   const [error, setError] = useState(null)
   const [gradeLevel, setGradeLevel] = useState(3)
   const [currentJobId, setCurrentJobId] = useState(null)
@@ -72,14 +81,21 @@ function MainApp() {
   const [showReuploadModal, setShowReuploadModal] = useState(false)
   const [showDuplicateModal, setShowDuplicateModal] = useState(false)
   const [duplicateInfo, setDuplicateInfo] = useState(null)
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  const [upgradeMessage, setUpgradeMessage] = useState('')
   const [fileHash, setFileHash] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadFileName, setUploadFileName] = useState('')
   const [showUploadProgress, setShowUploadProgress] = useState(false)
   const fileInputRef = useRef(null)
   const pollTimerRef = useRef(null)
+  const pollErrorsRef = useRef(0)
+  const pollLastProgressRef = useRef({ at: 0, value: -1 })
   const generationStartRef = useRef(0)
   const [generatingStage, setGeneratingStage] = useState(0)
+  // 0 = running (or unknown); >0 means the job is still waiting for a
+  // generation worker, and the number is how many stories are ahead of it.
+  const [queuePosition, setQueuePosition] = useState(0)
   const storyDataRef = useRef(null)
   const stepRef = useRef(step)
   const [showUpdateNotification, setShowUpdateNotification] = useState(false)
@@ -95,9 +111,7 @@ function MainApp() {
   }, [step])
 
   useEffect(() => {
-    return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
-    }
+    return () => stopPolling()
   }, [])
 
   useEffect(() => {
@@ -175,6 +189,39 @@ function MainApp() {
   // avatar-based flow) so there's a single place that knows how to interpret a
   // /api/status/{job_id} tick — the two previously had separate, drifting copies
   // of this logic, which is how one of them ended up with a real bug.
+  // Polling control. A fixed 2s setInterval that aborted on the first failed
+  // fetch was a bad fit for the target device: a phone that briefly drops to no
+  // signal would kill a perfectly healthy 3-minute generation with
+  // "Connection lost". Now: tolerate transient failures, slow down once the job
+  // is clearly long-running, and give up only when nothing has actually moved
+  // for a long time.
+  const POLL_FAST_MS = 2000
+  const POLL_SLOW_MS = 5000
+  const POLL_SLOW_AFTER_MS = 60000
+  const POLL_MAX_CONSECUTIVE_ERRORS = 4
+  const POLL_STALL_TIMEOUT_MS = 300000
+
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+  }
+
+  const startPolling = (jobId) => {
+    stopPolling()
+    pollErrorsRef.current = 0
+    pollLastProgressRef.current = { at: Date.now(), value: -1 }
+    const tick = () => {
+      pollTimerRef.current = setTimeout(async () => {
+        const stillRunning = await pollJobStatus(jobId)
+        if (stillRunning) tick()
+      }, Date.now() - generationStartRef.current > POLL_SLOW_AFTER_MS ? POLL_SLOW_MS : POLL_FAST_MS)
+    }
+    tick()
+  }
+
+  // Returns true if polling should continue.
   const pollJobStatus = async (jobId) => {
     try {
       const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
@@ -183,6 +230,28 @@ function MainApp() {
       if (!statusRes.ok) throw new Error('Could not fetch status')
 
       const job = await statusRes.json()
+      pollErrorsRef.current = 0
+
+      // Queue position, when the backend reports one. A queued job has no
+      // progress and no scenes by definition, so this has to be read before
+      // stall detection or a healthy wait looks identical to a hang.
+      const position = job.queue_position ?? 0
+      setQueuePosition(position)
+
+      // Stall detection: a wedged backend job used to be polled forever with no
+      // feedback. Track real forward motion, not just "did the request succeed".
+      // Queue position is part of the marker so a queue that is draining counts
+      // as motion, and a job that is merely waiting is never tripped at all -
+      // the backend's own generation timeout is what reclaims a stuck worker.
+      const marker = (job.progress ?? 0) * 1000 + (job.completed_scene_count ?? 0) - position
+      if (marker !== pollLastProgressRef.current.value) {
+        pollLastProgressRef.current = { at: Date.now(), value: marker }
+      } else if (position === 0 && Date.now() - pollLastProgressRef.current.at > POLL_STALL_TIMEOUT_MS) {
+        stopPolling()
+        setError("This story seems to be stuck - nothing has moved for 5 minutes. Your credit hasn't been used up; please try again.")
+        navigateTo('upload')
+        return false
+      }
 
       const elapsedSinceStart = Date.now() - generationStartRef.current
       setGeneratingStage(elapsedSinceStart < 8000 ? 0 : elapsedSinceStart < 20000 ? 1 : 2)
@@ -204,7 +273,7 @@ function MainApp() {
           }
         }
       } else if (job.status === 'completed') {
-        clearInterval(pollTimerRef.current)
+        stopPolling()
         setStoryData(job.result)
         setProgress(100)
         if (job.total_scenes > 0) {
@@ -214,14 +283,25 @@ function MainApp() {
         if (stepRef.current !== 'playing') {
           navigateTo('playing')
         }
+        return false
       } else if (job.status === 'failed') {
-        clearInterval(pollTimerRef.current)
-        throw new Error(job.error || 'AI Generation failed.')
+        stopPolling()
+        setError(job.error || 'AI Generation failed.')
+        navigateTo('upload')
+        return false
       }
+      return true
     } catch (err) {
-      clearInterval(pollTimerRef.current)
+      // Transient network blips are expected on mobile; only surface an error
+      // once several consecutive attempts have failed.
+      pollErrorsRef.current += 1
+      if (pollErrorsRef.current < POLL_MAX_CONSECUTIVE_ERRORS) {
+        return true
+      }
+      stopPolling()
       setError('Connection lost: ' + err.message)
       navigateTo('upload')
+      return false
     }
   }
 
@@ -310,7 +390,7 @@ function MainApp() {
             setCurrentJobId(pointer.jobId)
             generationStartRef.current = Date.now()
             navigateTo('playing')
-            pollTimerRef.current = setInterval(() => pollJobStatus(pointer.jobId), 2000)
+            startPolling(pointer.jobId)
           } else {
             localStorage.removeItem(ACTIVE_SESSION_KEY)
           }
@@ -326,7 +406,7 @@ function MainApp() {
   // If not logged in and not loading, show auth screen
   if (isLoading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#050810' }}>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#150d33' }}>
         <div style={{ color: '#f8fafc', fontSize: '20px' }}>Loading...</div>
       </div>
     )
@@ -472,11 +552,31 @@ function MainApp() {
             generationStartRef.current = Date.now()
             setGeneratingStage(0)
             // Start polling for job status
-            pollTimerRef.current = setInterval(() => pollJobStatus(jobId), 2000)
+            startPolling(jobId)
           } catch (parseErr) {
             setError('Invalid response from server')
             navigateTo('upload')
           }
+        } else if (xhr.status === 429) {
+          // Admission control: the queue is full, or this account already has
+          // the maximum number of stories generating. Nothing was charged and
+          // nothing was created - retrying later is all that is needed.
+          try {
+            const result = JSON.parse(xhr.responseText)
+            setError(result?.detail?.message || 'Too many stories are generating right now. Please try again in a few minutes.')
+          } catch (parseErr) {
+            setError('Too many stories are generating right now. Please try again in a few minutes.')
+          }
+          navigateTo('upload')
+        } else if (xhr.status === 402) {
+          try {
+            const result = JSON.parse(xhr.responseText)
+            setUpgradeMessage(result.detail || '')
+          } catch (parseErr) {
+            setUpgradeMessage('')
+          }
+          setShowUpgradeModal(true)
+          navigateTo('upload')
         } else {
           setError('Upload failed with status: ' + xhr.status)
           navigateTo('upload')
@@ -569,13 +669,27 @@ function MainApp() {
         }
       })
       
+      if (response.status === 429) {
+        // See the XHR path above - nothing charged, nothing created.
+        const result = await response.json().catch(() => ({}))
+        setError(result?.detail?.message || 'Too many stories are generating right now. Please try again in a few minutes.')
+        navigateTo('upload')
+        return
+      }
+      if (response.status === 402) {
+        const result = await response.json().catch(() => ({}))
+        setUpgradeMessage(result.detail || '')
+        setShowUpgradeModal(true)
+        navigateTo('upload')
+        return
+      }
       if (!response.ok) throw new Error("Failed to start story generation.")
       
       const { job_id } = await response.json()
       setCurrentJobId(job_id)
 
       // Polling Loop
-      pollTimerRef.current = setInterval(() => pollJobStatus(job_id), 2000)
+      startPolling(job_id)
 
     } catch (err) {
       setError(err.message)
@@ -588,22 +702,14 @@ function MainApp() {
     logout()
   }
 
-  const handleRestart = async () => {
+  const handleRestart = () => {
     // Cleanup unsaved story
     if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current)
+      stopPolling()
       pollTimerRef.current = null
     }
-    if (currentJobId && !isSaved) {
-      try {
-        await fetch(`${API_URL}/api/delete-story/${currentJobId}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
-        })
-      } catch (error) {
-        if (DEBUG) console.error('Cleanup failed:', error)
-      }
-    }
+    // Captured before the state resets below, which would otherwise clear it.
+    const jobToDelete = currentJobId && !isSaved ? currentJobId : null
     
     navigateTo('home')
     setUploadedFile(null)
@@ -617,6 +723,21 @@ function MainApp() {
     setIsSaved(false)
     setSavedStoryId(null)
     setIsOfflineMode(false)
+
+    // Fire-and-forget, and deliberately AFTER the navigation. This DELETE used
+    // to be awaited before any UI work happened, so a slow or hanging request -
+    // the backend is single-worker and busy while scenes are still generating -
+    // left the button looking completely dead: no spinner, no navigation, no
+    // error. Server-side cleanup is not something the user should wait on to
+    // leave a screen.
+    if (jobToDelete) {
+      fetch(`${API_URL}/api/delete-story/${jobToDelete}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+      }).catch((error) => {
+        if (DEBUG) console.error('Cleanup failed:', error)
+      })
+    }
   }
 
   const handleSaveStory = () => {
@@ -692,11 +813,11 @@ function MainApp() {
 
   return (
     <ErrorBoundary>
-    <div className="app">
+    <div className={`app${step === 'playing' ? ' is-playing' : ''}`}>
       <header className="app-header">
         <div className="app-header-content">
           <BrandMark />
-          <p className="header-subtitle">AI-Powered Storymaker</p>
+          <p className="header-subtitle">Where lessons become adventures</p>
         </div>
         {isAuthenticated && (
           <NavigationMenu
@@ -708,9 +829,10 @@ function MainApp() {
             onOfflineManager={() => navigateTo('offline')}
             onAdminClick={() => navigateTo('admin')}
             onProfile={() => navigateTo('profile')}
+            onPricing={() => navigateTo('pricing')}
             onLogout={handleLogout}
-            onSaveStory={step === 'playing' && !isSaved ? handleSaveStory : null}
-            onDownloadStory={step === 'playing' ? () => storyPlayerRef.current?.triggerDownload() : null}
+            onSaveStory={step === 'playing' && storyFullyReady && !isSaved ? handleSaveStory : null}
+            onDownloadStory={step === 'playing' && storyFullyReady ? () => storyPlayerRef.current?.triggerDownload() : null}
             isPlayingStory={step === 'playing'}
             onCheckUpdate={handleCheckForUpdate}
           />
@@ -721,7 +843,9 @@ function MainApp() {
         {step !== 'playing' && (
           <ErrorBoundary fallback={<div className="bg-fallback" />}>
             <Suspense fallback={null}>
-              <Scene3DBackground className="global-3d-background" />
+              {step === 'home'
+                ? <HeroScene className="global-3d-background" />
+                : <Scene3DBackground className="global-3d-background" />}
             </Suspense>
           </ErrorBoundary>
         )}
@@ -757,9 +881,17 @@ function MainApp() {
             {step === 'home' && (
               <motion.div key="home" className="home-wrapper">
                 <div className="home-content-overlay">
-                  <div className="home-pill"><Sparkles size={14} aria-hidden="true" /> AI-Powered Storymaker</div>
+                  <div className="home-mascot-stage">
+                    <Mascot
+                      mood="happy"
+                      size={132}
+                      trackPointer
+                      message="Hoot! What are we learning today?"
+                    />
+                  </div>
+                  <div className="home-pill"><Sparkles size={14} aria-hidden="true" /> Made for curious minds</div>
                   <h1 className="home-title">Turn Lessons into Adventures</h1>
-                  <p className="home-subtitle">Upload a PDF, choose your grade level, and let AI create an immersive story with custom images and voiceovers.</p>
+                  <p className="home-subtitle">Hand Ollie a lesson. He'll turn it into an illustrated story, read it out loud, and quiz you at the end.</p>
                   <div className="home-buttons">
                     <motion.button
                       className="home-btn"
@@ -768,8 +900,8 @@ function MainApp() {
                       whileTap={{ scale: 0.98 }}
                     >
                       <div className="home-btn-icon home-btn-icon-primary"><Sparkles size={22} aria-hidden="true" /></div>
-                      <strong>Create New Story</strong>
-                      <span>Upload a lesson file and let AI turn it into a story</span>
+                      <strong>Start an Adventure</strong>
+                      <span>Pick a lesson and watch it turn into a story</span>
                     </motion.button>
                     <motion.button
                       className="home-btn"
@@ -778,8 +910,8 @@ function MainApp() {
                       whileTap={{ scale: 0.98 }}
                     >
                       <div className="home-btn-icon home-btn-icon-secondary"><BookOpen size={22} aria-hidden="true" /></div>
-                      <strong>Load Online Story</strong>
-                      <span>Pull down a saved adventure from the cloud</span>
+                      <strong>My Story Shelf</strong>
+                      <span>Open an adventure you've already made</span>
                     </motion.button>
                     <motion.button
                       className="home-btn"
@@ -788,8 +920,8 @@ function MainApp() {
                       whileTap={{ scale: 0.98 }}
                     >
                       <div className="home-btn-icon home-btn-icon-tertiary"><Smartphone size={22} aria-hidden="true" /></div>
-                      <strong>Offline Manager</strong>
-                      <span>Manage locally stored stories without an internet connection</span>
+                      <strong>Read Offline</strong>
+                      <span>Your downloaded stories work with no internet at all</span>
                     </motion.button>
                   </div>
                 </div>
@@ -852,36 +984,73 @@ function MainApp() {
                 user={user}
                 onBack={() => navigateTo('home')}
                 onLogout={handleLogout}
+                onViewPlans={() => navigateTo('pricing')}
               />
+            </motion.div>
+          )}
+
+          {step === 'pricing' && (
+            <motion.div key="pricing" className="step-container">
+              <PricingPage onBack={() => navigateTo('home')} />
             </motion.div>
           )}
 
           {step === 'generating' && (
             <motion.div key="generating" className="generating-container">
-              <GeneratingSpinner />
-              <h2>Creating Your Story...</h2>
-              <div className="progress-container">
-                <div className="progress-bar-bg">
-                  <motion.div 
-                    className="progress-bar-fill"
-                    initial={{ width: 0 }}
-                    animate={{ width: `${progress}%` }}
-                    transition={{ duration: 0.5 }}
-                  />
+              {/* Progress ring replaces the flat bar: the number is readable at a
+                  glance on a phone, and the conic sweep keeps moving so a long
+                  generation never looks frozen. */}
+              <div
+                className="progress-ring"
+                style={{ '--ring-progress': `${progress}%` }}
+                role="progressbar"
+                aria-valuenow={progress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Story generation progress"
+              >
+                <div className="progress-ring-track" />
+                <div className="progress-ring-core">
+                  <span className="progress-ring-value">{progress}<i>%</i></span>
+                  <span className="progress-ring-label">Building</span>
                 </div>
-                <p>{progress}% Complete</p>
+              </div>
+              <div className="generating-mascot">
+                <Mascot mood={generatingStage === 0 ? 'reading' : 'thinking'} size={104} />
+              </div>
+              <h2>
+                {queuePosition > 0
+                  ? (queuePosition > 1 ? `Waiting in line - ${queuePosition - 1} ahead of you` : 'Starting your story...')
+                  : ['Ollie is reading your lesson', 'Ollie is writing your story', 'Ollie is painting the pictures'][generatingStage]}
+              </h2>
+              <div className="progress-container">
                 {totalScenes > 0 && (
-                  <p className="scene-progress">
-                    {completedSceneCount} of {totalScenes} scenes ready
-                  </p>
+                  <>
+                    {/* One dot per scene. Each lights up the moment that scene's
+                        audio is actually published, which is what makes the
+                        progressive delivery visible instead of implied. */}
+                    <div className="scene-dots" aria-hidden="true">
+                      {Array.from({ length: totalScenes }).map((_, i) => (
+                        <span
+                          key={i}
+                          className={`scene-dot ${i < completedSceneCount ? 'is-ready' : ''} ${i === completedSceneCount ? 'is-active' : ''}`}
+                        />
+                      ))}
+                    </div>
+                    <p className="scene-progress" aria-live="polite">
+                      {completedSceneCount} of {totalScenes} pages ready
+                    </p>
+                  </>
                 )}
               </div>
-              <p className="small-text">
-                {[
-                  'Reading your document...',
-                  'Writing your story...',
-                  'Bringing your first scene to life...',
-                ][generatingStage]}
+              <p className="small-text" aria-live="polite">
+                {queuePosition > 0
+                  ? 'Ollie is finishing someone else\u2019s story first. Yours starts automatically - you can leave this page open.'
+                  : [
+                      'Turning the pages of your document...',
+                      'Dreaming up characters and places...',
+                      'The first picture is nearly dry...',
+                    ][generatingStage]}
               </p>
             </motion.div>
           )}
@@ -892,9 +1061,10 @@ function MainApp() {
                 ref={storyPlayerRef}
                 storyData={storyData} 
                 avatar={selectedAvatar} 
+                onHome={() => navigateTo('home')}
                 onRestart={handleRestart}
-                onSave={!isSaved ? handleSaveStory : null}
-                onDownloadOffline={() => storyPlayerRef.current?.triggerDownload()}
+                onSave={storyFullyReady && !isSaved ? handleSaveStory : null}
+                onDownloadOffline={storyFullyReady ? () => storyPlayerRef.current?.triggerDownload() : null}
                 isSaved={isSaved}
                 isOffline={isOfflineMode}
                 savedStoryId={savedStoryId}
@@ -1014,6 +1184,13 @@ function MainApp() {
             />
           )}
 
+          <UpgradeModal
+            isOpen={showUpgradeModal}
+            onClose={() => setShowUpgradeModal(false)}
+            onViewPlans={() => { setShowUpgradeModal(false); navigateTo('pricing') }}
+            message={upgradeMessage}
+          />
+
           {showUploadProgress && (
             <UploadProgressOverlay
               progress={uploadProgress}
@@ -1033,10 +1210,10 @@ function MainApp() {
                 top: '20px',
                 right: '20px',
                 zIndex: 10000,
-                background: 'linear-gradient(135deg, #6366f1 0%, #06b6d4 100%)',
+                background: 'linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%)',
                 padding: '1rem 1.5rem',
                 borderRadius: '12px',
-                boxShadow: '0 8px 32px rgba(99, 102, 241, 0.35)',
+                boxShadow: '0 8px 32px rgba(139, 92, 246, 0.35)',
                 color: 'white',
                 maxWidth: '400px',
                 border: '1px solid rgba(255, 255, 255, 0.2)'
@@ -1058,7 +1235,7 @@ function MainApp() {
                     flex: 1,
                     padding: '0.65rem 1.2rem',
                     background: 'white',
-                    color: '#6366f1',
+                    color: '#8b5cf6',
                     border: 'none',
                     borderRadius: '8px',
                     fontWeight: 600,

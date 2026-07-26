@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { animate } from 'animejs'
 
-const COLORS = ['#6366f1', '#06b6d4', '#10b981', '#818cf8', '#22d3ee']
+const COLORS = ['#8b5cf6', '#22d3ee', '#fbbf24', '#f472b6', '#c4b5fd']
 const PARTICLE_COUNT = 16
 
 function ScoreBurst() {

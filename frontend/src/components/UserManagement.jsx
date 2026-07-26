@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, X, Plus, Shield, XCircle, Trash2, Save,
-  Calendar, Mail, AtSign, KeyRound, BookOpen, ChevronLeft, ChevronRight, UserPlus
+  Calendar, Mail, AtSign, KeyRound, BookOpen, ChevronLeft, ChevronRight, UserPlus, CreditCard, Gift
 } from 'lucide-react';
 import apiClient from '../services/api';
 import { getItemsPerPage } from '../utils/responsiveUtils';
@@ -41,6 +41,8 @@ const UserManagement = () => {
   const [createForm, setCreateForm] = useState(emptyCreateState);
   const [creating, setCreating] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(null);
+  const [creditInput, setCreditInput] = useState({});
+  const [grantingId, setGrantingId] = useState(null);
 
   useEffect(() => {
     fetchUsers();
@@ -111,6 +113,22 @@ const UserManagement = () => {
       await fetchUsers();
     } catch (err) {
       setError('Delete failed: ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const handleGrantCredits = async (user) => {
+    const amount = parseInt(creditInput[user.id], 10);
+    if (!amount) return;
+    setGrantingId(user.id);
+    setError(null);
+    try {
+      await apiClient.post(`/api/admin/users/${user.id}/grant-credits`, { amount });
+      setCreditInput((prev) => ({ ...prev, [user.id]: '' }));
+      await fetchUsers();
+    } catch (err) {
+      setError('Credit grant failed: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setGrantingId(null);
     }
   };
 
@@ -201,6 +219,10 @@ const UserManagement = () => {
                       <span><BookOpen size={13} /> {user.story_count || 0} stories</span>
                       <span><Calendar size={13} /> {formatDate(user.created_at)}</span>
                     </div>
+                    <div className="user-card-stats">
+                      <span><CreditCard size={13} /> {user.credits_balance ?? 0} credits</span>
+                      <span style={{ textTransform: 'capitalize' }}>{user.subscription_tier || 'free'} plan</span>
+                    </div>
                   </div>
                 }
                 back={
@@ -229,6 +251,26 @@ const UserManagement = () => {
                         <input type="checkbox" checked={edit.is_premium} onChange={(e) => setEdit(user, { is_premium: e.target.checked })} /> Premium
                       </label>
                     </div>
+                    <label className="field-label">
+                      <span className="field-label-text"><Gift size={12} /> Grant/deduct credits (+/-)</span>
+                      <div style={{ display: 'flex', gap: '0.4rem', minWidth: 0 }}>
+                        <input
+                          type="number"
+                          placeholder="e.g. 10 or -5"
+                          value={creditInput[user.id] || ''}
+                          onChange={(e) => setCreditInput((prev) => ({ ...prev, [user.id]: e.target.value }))}
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        <button
+                          className="save-btn"
+                          onClick={() => handleGrantCredits(user)}
+                          disabled={grantingId === user.id || !creditInput[user.id]}
+                          style={{ flexShrink: 0 }}
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </label>
                     <div className="user-card-actions">
                       <button className="save-btn" onClick={() => handleSave(user)} disabled={savingId === user.id}>
                         <Save size={14} /> {savingId === user.id ? 'Saving...' : 'Save'}

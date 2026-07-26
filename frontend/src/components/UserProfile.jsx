@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { ChevronLeft, Pencil, Check, X, Lock, LogOut } from 'lucide-react';
-import apiClient from '../services/api';
+import { ChevronLeft, Pencil, Check, X, Lock, LogOut, Sparkles, CreditCard, ExternalLink } from 'lucide-react';
+import apiClient, { getBillingBalance, createBillingPortalSession } from '../services/api';
 import './UserProfile.css';
 
-function UserProfile({ user, onBack, onLogout }) {
+function UserProfile({ user, onBack, onLogout, onViewPlans }) {
   const [isEditing, setIsEditing] = useState(false);
   const [username, setUsername] = useState(user?.email?.split('@')[0] || '');
   const [isChangingPassword, setIsChangingPassword] = useState(false);
@@ -15,11 +15,41 @@ function UserProfile({ user, onBack, onLogout }) {
   const [savedStoriesCount, setSavedStoriesCount] = useState(0);
   const [message, setMessage] = useState({ text: '', type: '' });
   const [loading, setLoading] = useState(false);
+  const [billing, setBilling] = useState(null);
+  const [billingLoading, setBillingLoading] = useState(true);
+  const [portalLoading, setPortalLoading] = useState(false);
 
   useEffect(() => {
     calculateStorageUsage();
     countSavedStories();
+    loadBilling();
   }, []);
+
+  const loadBilling = async () => {
+    setBillingLoading(true);
+    try {
+      const data = await getBillingBalance();
+      setBilling(data);
+    } catch (error) {
+      console.error('Failed to load billing info:', error);
+    } finally {
+      setBillingLoading(false);
+    }
+  };
+
+  const handleManageSubscription = async () => {
+    setPortalLoading(true);
+    try {
+      const { portal_url } = await createBillingPortalSession();
+      window.location.href = portal_url;
+    } catch (error) {
+      setMessage({
+        text: error.response?.data?.detail || 'Could not open the billing portal.',
+        type: 'error'
+      });
+      setPortalLoading(false);
+    }
+  };
 
   const calculateStorageUsage = async () => {
     try {
@@ -28,7 +58,7 @@ function UserProfile({ user, onBack, onLogout }) {
         const used = estimate.usage || 0;
         const total = estimate.quota || 0;
         const percentage = total > 0 ? ((used / total) * 100).toFixed(2) : 0;
-        
+
         setStorageUsage({
           used: (used / (1024 * 1024)).toFixed(2), // Convert to MB
           total: (total / (1024 * 1024)).toFixed(2),
@@ -49,7 +79,7 @@ function UserProfile({ user, onBack, onLogout }) {
           const transaction = db.transaction(['stories'], 'readonly');
           const store = transaction.objectStore('stories');
           const countRequest = store.count();
-          
+
           countRequest.onsuccess = () => {
             setSavedStoriesCount(countRequest.result);
           };
@@ -74,9 +104,9 @@ function UserProfile({ user, onBack, onLogout }) {
       setIsEditing(false);
       setTimeout(() => setMessage({ text: '', type: '' }), 3000);
     } catch (error) {
-      setMessage({ 
-        text: error.response?.data?.detail || 'Failed to update username', 
-        type: 'error' 
+      setMessage({
+        text: error.response?.data?.detail || 'Failed to update username',
+        type: 'error'
       });
     } finally {
       setLoading(false);
@@ -85,7 +115,7 @@ function UserProfile({ user, onBack, onLogout }) {
 
   const handleChangePassword = async (e) => {
     e.preventDefault();
-    
+
     if (newPassword !== confirmPassword) {
       setMessage({ text: 'New passwords do not match', type: 'error' });
       return;
@@ -102,7 +132,7 @@ function UserProfile({ user, onBack, onLogout }) {
         current_password: currentPassword,
         new_password: newPassword
       });
-      
+
       setMessage({ text: 'Password changed successfully!', type: 'success' });
       setIsChangingPassword(false);
       setCurrentPassword('');
@@ -110,9 +140,9 @@ function UserProfile({ user, onBack, onLogout }) {
       setConfirmPassword('');
       setTimeout(() => setMessage({ text: '', type: '' }), 3000);
     } catch (error) {
-      setMessage({ 
-        text: error.response?.data?.detail || 'Failed to change password', 
-        type: 'error' 
+      setMessage({
+        text: error.response?.data?.detail || 'Failed to change password',
+        type: 'error'
       });
     } finally {
       setLoading(false);
@@ -135,7 +165,7 @@ function UserProfile({ user, onBack, onLogout }) {
       </div>
 
       {message.text && (
-        <motion.div 
+        <motion.div
           className={`profile-message ${message.type}`}
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -146,15 +176,54 @@ function UserProfile({ user, onBack, onLogout }) {
       )}
 
       <div className="profile-content">
+        {/* Billing Card */}
+        <motion.div
+          className="profile-card"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05 }}
+        >
+          <h2><CreditCard size={18} aria-hidden="true" /> Billing</h2>
+
+          {billingLoading ? (
+            <p className="field-hint">Loading...</p>
+          ) : billing ? (
+            <>
+              <div className="storage-stats">
+                <div className="stat-item">
+                  <span className="stat-label">Story Credits</span>
+                  <span className="stat-value">{billing.unlimited ? 'Unlimited' : billing.credits_balance}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Plan</span>
+                  <span className="stat-value" style={{ textTransform: 'capitalize' }}>{billing.unlimited ? 'Admin' : billing.subscription_tier}</span>
+                </div>
+              </div>
+              <div className="password-actions" style={{ marginTop: '1rem' }}>
+                <button onClick={onViewPlans} className="save-button">
+                  <Sparkles size={14} /> View Plans
+                </button>
+                {billing.subscription_tier !== 'free' && (
+                  <button onClick={handleManageSubscription} disabled={portalLoading} className="cancel-button">
+                    <ExternalLink size={14} /> {portalLoading ? 'Opening...' : 'Manage Subscription'}
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="field-hint">Could not load billing info.</p>
+          )}
+        </motion.div>
+
         {/* User Details Card */}
-        <motion.div 
+        <motion.div
           className="profile-card"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
         >
           <h2>Account Details</h2>
-          
+
           <div className="profile-field">
             <label>User ID</label>
             <div className="field-group">
@@ -198,14 +267,14 @@ function UserProfile({ user, onBack, onLogout }) {
         </motion.div>
 
         {/* Change Password Card */}
-        <motion.div 
+        <motion.div
           className="profile-card"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
         >
           <h2>Security</h2>
-          
+
           {!isChangingPassword ? (
             <button onClick={() => setIsChangingPassword(true)} className="change-password-button">
               <Lock size={16} /> Change Password
@@ -251,14 +320,14 @@ function UserProfile({ user, onBack, onLogout }) {
                 <button type="submit" disabled={loading} className="save-button">
                   {loading ? 'Changing...' : 'Change Password'}
                 </button>
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   onClick={() => {
                     setIsChangingPassword(false);
                     setCurrentPassword('');
                     setNewPassword('');
                     setConfirmPassword('');
-                  }} 
+                  }}
                   className="cancel-button"
                 >
                   Cancel
@@ -269,25 +338,25 @@ function UserProfile({ user, onBack, onLogout }) {
         </motion.div>
 
         {/* Storage Usage Card */}
-        <motion.div 
+        <motion.div
           className="profile-card"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
         >
           <h2>Storage Usage</h2>
-          
+
           <div className="storage-stats">
             <div className="stat-item">
               <span className="stat-label">IndexedDB Usage</span>
               <span className="stat-value">{formatBytes(storageUsage.used)}</span>
             </div>
-            
+
             <div className="stat-item">
               <span className="stat-label">Total Available</span>
               <span className="stat-value">{formatBytes(storageUsage.total)}</span>
             </div>
-            
+
             <div className="stat-item">
               <span className="stat-label">Saved Stories</span>
               <span className="stat-value">{savedStoriesCount}</span>
@@ -295,8 +364,8 @@ function UserProfile({ user, onBack, onLogout }) {
           </div>
 
           <div className="storage-bar">
-            <div 
-              className="storage-fill" 
+            <div
+              className="storage-fill"
               style={{ width: `${Math.min(storageUsage.percentage, 100)}%` }}
             />
           </div>
@@ -304,7 +373,7 @@ function UserProfile({ user, onBack, onLogout }) {
         </motion.div>
 
         {/* Logout Card */}
-        <motion.div 
+        <motion.div
           className="profile-card danger-card"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama } from 'lucide-react'
+import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama, Users, Lock } from 'lucide-react'
 import apiClient from '../services/api'
 import { getItemsPerPage } from '../utils/responsiveUtils'
 import './LoadStory.css'
@@ -19,6 +19,8 @@ function LoadStory({ onLoad, onBack }) {
   const [stories, setStories] = useState([])
   const [loading, setLoading] = useState(true)
   const [downloading, setDownloading] = useState(null)
+  // story_id currently being flipped, so one row can spin without freezing the grid
+  const [visibilityBusy, setVisibilityBusy] = useState(null)
   const [downloadMessage, setDownloadMessage] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
@@ -151,6 +153,33 @@ function LoadStory({ onLoad, onBack }) {
     }
   }
 
+  const handleToggleVisibility = async (story) => {
+    const next = !story.is_public
+
+    // Unsharing is not retroactive and the confirm says so. A toggle that
+    // implies a recall it cannot perform is worse than no toggle.
+    if (!next && !window.confirm(
+      'Stop sharing this story?\n\n' +
+      'It will no longer appear for other people who upload the same file. ' +
+      'Anyone who already opened it keeps what they have - unsharing cannot undo that.'
+    )) return
+
+    setVisibilityBusy(story.story_id)
+    try {
+      await apiClient.patch(`/api/stories/${story.story_id}/visibility`, { is_public: next })
+      // Local state is updated only after the server agrees, so a failed call
+      // cannot leave the card claiming a story is shared when it is not.
+      setStories(prev => prev.map(s => (
+        s.story_id === story.story_id ? { ...s, is_public: next } : s
+      )))
+    } catch (error) {
+      console.error('Error changing visibility:', error)
+      alert('Could not change sharing for this story. Please try again.')
+    } finally {
+      setVisibilityBusy(null)
+    }
+  }
+
   const formatDate = (timestamp) => {
     const date = new Date(parseInt(timestamp) / 10000 - 12219292800000)
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
@@ -241,6 +270,22 @@ function LoadStory({ onLoad, onBack }) {
                     <div className="story-date">
                       <Calendar size={14} /> {formatDate(story.saved_at)}
                     </div>
+                    <button
+                      className={`share-toggle ${story.is_public ? 'is-on' : ''}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleToggleVisibility(story)
+                      }}
+                      disabled={visibilityBusy !== null}
+                      title={story.is_public
+                        ? 'Shared: anyone who uploads the same file can read this story. They cannot edit or delete it. Tap to stop sharing.'
+                        : 'Private: only you can open this. Tap to let others who upload the same file read it.'}
+                    >
+                      {visibilityBusy === story.story_id
+                        ? <Loader2 size={14} className="spin-icon" />
+                        : (story.is_public ? <Users size={14} /> : <Lock size={14} />)}
+                      {story.is_public ? 'Shared' : 'Private'}
+                    </button>
                     <div className="story-card-actions">
                       <button
                         className="load-btn"

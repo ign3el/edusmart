@@ -3,24 +3,24 @@
 ================================ */
 :root {
   /* Core Palette - Dark Tech */
-  --bg-deep: #050810;
-  --bg-panel: rgba(11, 15, 26, 0.95);
-  --bg-panel-solid: #0b0f1a;
-  --bg-card: rgba(15, 20, 35, 0.9);
+  --bg-deep: #150d33;
+  --bg-panel: rgba(29, 17, 71, 0.95);
+  --bg-panel-solid: #1d1147;
+  --bg-card: rgba(36, 20, 86, 0.9);
   --fg-primary: #f8fafc;
   --fg-secondary: #94a3b8;
   --fg-muted: #64748b;
   
   /* Accents - Indigo/Cyan/Emerald */
-  --accent-1: #6366f1;
-  --accent-2: #06b6d4;
-  --accent-3: #10b981;
-  --accent-4: #818cf8;
-  --accent-5: #22d3ee;
-  --accent-gradient: linear-gradient(135deg, #6366f1, #06b6d4, #10b981);
-  --accent-glow: rgba(99, 102, 241, 0.4);
-  --accent-glow-cyan: rgba(6, 182, 212, 0.4);
-  --accent-glow-emerald: rgba(16, 185, 129, 0.4);
+  --accent-1: #8b5cf6;
+  --accent-2: #22d3ee;
+  --accent-3: #fbbf24;
+  --accent-4: #c4b5fd;
+  --accent-5: #f472b6;
+  --accent-gradient: linear-gradient(135deg, #8b5cf6, #f472b6, #fbbf24);
+  --accent-glow: rgba(139, 92, 246, 0.4);
+  --accent-glow-cyan: rgba(34, 211, 238, 0.4);
+  --accent-glow-amber: rgba(251, 191, 36, 0.45);
   
   /* Semantic */
   --danger: #ef4444;
@@ -45,8 +45,8 @@
 
   /* Shadows */
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-strong: 0 20px 40px rgba(99, 102, 241, 0.25);
-  --shadow-glow: 0 0 40px rgba(99, 102, 241, 0.25);
+  --shadow-strong: 0 20px 40px rgba(139, 92, 246, 0.25);
+  --shadow-glow: 0 0 40px rgba(139, 92, 246, 0.25);
   --blur: blur(20px);
   --transition: 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -59,21 +59,41 @@
   display: flex;
   flex-direction: column;
   background: 
-    radial-gradient(ellipse 80% 60% at 10% 10%, rgba(99, 102, 241, 0.15), transparent 40%),
-    radial-gradient(ellipse 60% 80% at 90% 80%, rgba(6, 182, 212, 0.10), transparent 40%),
-    radial-gradient(ellipse 50% 50% at 50% 50%, rgba(16, 185, 129, 0.05), transparent 50%),
-    linear-gradient(135deg, #050810 0%, #0b0f1a 50%, #0a0e1e 100%);
+    radial-gradient(ellipse 80% 60% at 10% 10%, rgba(139, 92, 246, 0.15), transparent 40%),
+    radial-gradient(ellipse 60% 80% at 90% 80%, rgba(34, 211, 238, 0.10), transparent 40%),
+    radial-gradient(ellipse 50% 50% at 50% 50%, rgba(251, 191, 36, 0.06), transparent 50%),
+    linear-gradient(135deg, #150d33 0%, #1d1147 50%, #200e52 100%);
   position: relative;
   color: var(--fg-primary);
+  /* Single source of truth for how much vertical space the persistent header
+     eats. StoryPlayer sizes itself to calc(100dvh - this), so the two can
+     never disagree about where the fold is. */
+  --app-header-h: 68px;
 }
+
+/* Playing a story: collapse the header to a compact bar. A full-size header
+   plus the player's own header plus 2rem of .app-main padding is what pushed
+   play/pause/next below the fold and made the player scroll. */
+.app.is-playing {
+  --app-header-h: 52px;
+}
+
+.app.is-playing .app-header {
+  padding: 0.35rem 1rem;
+}
+
+.app.is-playing .header-subtitle { display: none; }
+.app.is-playing .brand-mark { font-size: 1.15rem; }
+.app.is-playing .app-main { padding: 0; }
+.app.is-playing .content-shell { max-width: none; }
 
 .app::before {
   content: '';
   position: fixed;
   inset: 0;
   background: 
-    radial-gradient(ellipse 80% 60% at 20% 20%, rgba(99, 102, 241, 0.08), transparent 50%),
-    radial-gradient(ellipse 60% 80% at 80% 80%, rgba(6, 182, 212, 0.05), transparent 50%);
+    radial-gradient(ellipse 80% 60% at 20% 20%, rgba(139, 92, 246, 0.08), transparent 50%),
+    radial-gradient(ellipse 60% 80% at 80% 80%, rgba(34, 211, 238, 0.05), transparent 50%);
   pointer-events: none;
   z-index: -1;
 }
@@ -82,9 +102,11 @@
   position: sticky;
   top: 0;
   z-index: 100;
+  min-height: var(--app-header-h);
+  box-sizing: border-box;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  background: rgba(5, 8, 16, 0.85);
+  background: rgba(21, 13, 51, 0.85);
   border-bottom: 1px solid rgba(148, 163, 184, 0.08);
   display: flex;
   justify-content: space-between;
@@ -107,7 +129,7 @@
   font-size: 1.6rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #6366f1, #06b6d4, #10b981);
+  background: linear-gradient(135deg, #8b5cf6, #f472b6, #fbbf24);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -123,7 +145,7 @@
 
 .logout-btn {
   padding: 0.6rem 1.2rem;
-  background: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
+  background: linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%);
   color: white;
   border: none;
   border-radius: var(--radius-sm);
@@ -136,7 +158,7 @@
 
 .logout-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 5px 20px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 5px 20px rgba(139, 92, 246, 0.4);
 }
 
 .admin-btn {
@@ -210,7 +232,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  /* No overflow:hidden here. Ollie's speech bubble is absolutely positioned
+     above him (bottom: 100% + 0.6rem) and on a 412px phone it wraps to three
+     lines - taller than the headroom it had - so this clipped the top off
+     "What are we learning today?". The rounded 3D backdrop that this was
+     clipping for (.home-3d-hero-bg) already clips itself. */
 }
 
 .home-3d-hero-bg {
@@ -240,7 +266,7 @@
   font-weight: 800;
   letter-spacing: -0.03em;
   margin-bottom: 0.5rem;
-  background: linear-gradient(135deg, #f8fafc 0%, #6366f1 50%, #06b6d4 100%);
+  background: linear-gradient(135deg, #f8fafc 0%, #8b5cf6 50%, #22d3ee 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -261,9 +287,9 @@
   gap: 0.4rem;
   padding: 0.5rem 1.2rem;
   border-radius: 999px;
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(139, 92, 246, 0.1);
   color: var(--accent-1);
-  border: 1px solid rgba(99, 102, 241, 0.3);
+  border: 1px solid rgba(139, 92, 246, 0.3);
   font-weight: 600;
   font-size: 0.85rem;
   margin-bottom: 1.5rem;
@@ -307,7 +333,7 @@
   min-height: 140px;
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: var(--radius-md);
-  background: rgba(11, 15, 26, 0.8);
+  background: rgba(29, 17, 71, 0.8);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--fg-primary);
@@ -334,9 +360,9 @@
 
 .home-btn:hover {
   transform: translateY(-4px);
-  border-color: rgba(99, 102, 241, 0.4);
-  box-shadow: 0 20px 40px rgba(99, 102, 241, 0.2), 0 0 40px rgba(99, 102, 241, 0.1);
-  background: rgba(15, 20, 40, 0.9);
+  border-color: rgba(139, 92, 246, 0.4);
+  box-shadow: 0 20px 40px rgba(139, 92, 246, 0.2), 0 0 40px rgba(139, 92, 246, 0.1);
+  background: rgba(36, 20, 86, 0.9);
 }
 
 .home-btn:active {
@@ -360,18 +386,18 @@
 }
 
 .home-btn-icon-primary {
-  background: linear-gradient(135deg, #6366f1, #818cf8);
-  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35);
+  background: linear-gradient(135deg, #8b5cf6, #c4b5fd);
+  box-shadow: 0 8px 20px rgba(139, 92, 246, 0.35);
 }
 
 .home-btn-icon-secondary {
-  background: linear-gradient(135deg, #06b6d4, #22d3ee);
-  box-shadow: 0 8px 20px rgba(6, 182, 212, 0.35);
+  background: linear-gradient(135deg, #22d3ee, #f472b6);
+  box-shadow: 0 8px 20px rgba(34, 211, 238, 0.35);
 }
 
 .home-btn-icon-tertiary {
-  background: linear-gradient(135deg, #10b981, #34d399);
-  box-shadow: 0 8px 20px rgba(16, 185, 129, 0.35);
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  box-shadow: 0 8px 20px rgba(251, 191, 36, 0.35);
 }
 
 .home-btn strong {
@@ -402,9 +428,9 @@
   width: 72px;
   height: 72px;
   border-radius: 50%;
-  border: 4px solid rgba(99, 102, 241, 0.12);
-  border-top-color: #6366f1;
-  border-right-color: #06b6d4;
+  border: 4px solid rgba(139, 92, 246, 0.12);
+  border-top-color: #8b5cf6;
+  border-right-color: #22d3ee;
   animation: spin 0.9s linear infinite;
 }
 
@@ -428,8 +454,8 @@
 
 .progress-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #6366f1, #06b6d4, #10b981);
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+  background: linear-gradient(90deg, #8b5cf6, #f472b6, #fbbf24);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.5);
   border-radius: 999px;
   transition: width 0.5s ease;
 }
@@ -439,6 +465,129 @@
   font-size: 0.85rem;
   color: var(--accent-3);
   font-weight: 500;
+}
+
+/* ---- Generation progress ring ---------------------------------------------
+   Sized for a phone first (168px), nudged up on wider screens. The conic
+   gradient is driven by the --ring-progress custom property set inline. */
+.progress-ring {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  display: grid;
+  place-items: center;
+  --ring-progress: 0%;
+}
+
+.progress-ring-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    #a855f7 0%,
+    #ec4899 calc(var(--ring-progress) * 0.55),
+    #22d3ee var(--ring-progress),
+    rgba(148, 163, 184, 0.10) var(--ring-progress)
+  );
+  transition: background 0.6s ease;
+  filter: drop-shadow(0 0 18px rgba(168, 85, 247, 0.45));
+}
+
+/* Slow counter-rotating sheen so the ring reads as "working" even while the
+   percentage sits still waiting on the image model. */
+.progress-ring::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0deg, rgba(236, 72, 153, 0.35) 40deg, transparent 90deg);
+  animation: ring-sweep 2.8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes ring-sweep {
+  to { transform: rotate(360deg); }
+}
+
+.progress-ring-core {
+  position: relative;
+  width: 78%;
+  height: 78%;
+  border-radius: 50%;
+  background: var(--bg-primary, #1d1147);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+}
+
+.progress-ring-value {
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+  background: linear-gradient(135deg, #a855f7, #ec4899 55%, #22d3ee);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.progress-ring-value i {
+  font-style: normal;
+  font-size: 1.1rem;
+  margin-left: 2px;
+}
+
+.progress-ring-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-3, #94a3b8);
+}
+
+/* ---- Per-scene readiness dots --------------------------------------------- */
+.scene-dots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.scene-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.22);
+  transition: background 0.35s ease, box-shadow 0.35s ease, transform 0.35s ease;
+}
+
+.scene-dot.is-ready {
+  background: linear-gradient(135deg, #a855f7, #22d3ee);
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.75);
+  transform: scale(1.15);
+}
+
+/* The scene currently being rendered pulses, so the eye lands on what's next. */
+.scene-dot.is-active {
+  background: rgba(236, 72, 153, 0.85);
+  animation: scene-dot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes scene-dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(236, 72, 153, 0.55); transform: scale(1); }
+  50%      { box-shadow: 0 0 0 7px rgba(236, 72, 153, 0); transform: scale(1.25); }
+}
+
+@media (min-width: 769px) {
+  .progress-ring { width: 200px; height: 200px; }
+  .progress-ring-value { font-size: 2.9rem; }
+}
+
+/* Respect the same motion preference the rest of the app already honours. */
+@media (prefers-reduced-motion: reduce) {
+  .progress-ring::after { animation: none; }
+  .scene-dot.is-active { animation: none; }
 }
 
 /* ================================
@@ -501,8 +650,8 @@
   gap: 0.45rem;
   padding: 0.65rem 1.2rem;
   margin-top: 1.25rem;
-  background: rgba(99, 102, 241, 0.08);
-  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.25);
   border-radius: 999px;
   color: var(--fg-primary);
   font-weight: 600;
@@ -512,7 +661,7 @@
 
 .back-to-home-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 8px 20px rgba(139, 92, 246, 0.15);
 }
 
 /* ================================
@@ -556,7 +705,7 @@
   width: 56px;
   height: 56px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   border: 2px solid rgba(255, 255, 255, 0.1);
   color: white;
   font-size: 1.5rem;
@@ -564,14 +713,14 @@
   display: none;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.4);
   transition: all 0.3s ease;
   z-index: 50;
 }
 
 .floating-menu-trigger:hover {
   transform: scale(1.1);
-  box-shadow: 0 12px 40px rgba(99, 102, 241, 0.5);
+  box-shadow: 0 12px 40px rgba(139, 92, 246, 0.5);
 }
 
 @media (max-width: 768px) {
@@ -609,6 +758,8 @@
   }
   .app-header h1 { font-size: 1.35rem; }
   .header-subtitle { font-size: 0.7rem; }
+  .app { --app-header-h: 60px; }
+  .app.is-playing { --app-header-h: 52px; }
   .app-main { padding: 1rem; }
   .home-content-overlay { padding: 1.5rem; }
   .generating-wrapper { padding: 1rem; min-height: 60vh; }
@@ -620,4 +771,52 @@
   .app-header h1 { font-size: 1.2rem; }
   .app-main { padding: 0.75rem; }
   .home-content-overlay { padding: 1rem; }
+}
+
+
+/* ================================
+   MASCOT STAGES
+================================ */
+.home-mascot-stage {
+  display: flex;
+  justify-content: center;
+  /* The speech bubble sits above the owl and is absolutely positioned, so the
+     stage needs headroom of its own or the bubble collides with the header.
+     Measured: a two-line bubble is 50px tall plus its 0.6rem tail. */
+  margin: 3rem 0 1.25rem;
+}
+
+.generating-mascot {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0.25rem;
+}
+
+@media (max-width: 768px) {
+  .home-mascot-stage {
+    /* Sized to the measured bubble, not guessed: 3.5rem puts its top 24px
+       clear of the sticky header at 412px without stealing more of the fold
+       than Ollie and the buttons can spare. */
+    margin: 3.5rem 0 1rem;
+  }
+  /* Ollie shares the fold with the buttons on a phone; shrink him so
+     "Start an Adventure" still lands above it. */
+  .home-mascot-stage .mascot {
+    width: 104px !important;
+    height: 104px !important;
+  }
+}
+
+/* ================================
+   HERO SCENE
+================================ */
+.hero-scene-static {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 20% 20%, rgba(139, 92, 246, 0.22), transparent 70%),
+    radial-gradient(50% 40% at 82% 72%, rgba(34, 211, 238, 0.16), transparent 70%),
+    var(--bg-deep);
 }

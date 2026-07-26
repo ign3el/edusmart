@@ -111,6 +111,7 @@ function FileConfirmation({ file, gradeLevel, onConfirm, onBack, onReupload, onE
             className="edit-icon-btn"
             onClick={onReupload}
             title="Re-upload file"
+            aria-label="Re-upload file"
           >
             <Edit3 size={16} aria-hidden="true" />
           </button>

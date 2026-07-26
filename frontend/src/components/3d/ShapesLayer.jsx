@@ -24,7 +24,7 @@ export function ShapesLayer({ count = 12 }) {
             {type === 1 && <sphereGeometry args={[0.8, 16, 16]} />}
             {type === 2 && <torusGeometry args={[0.6, 0.2, 16, 32]} />}
             <meshPhysicalMaterial
-              color={['#6366f1', '#06b6d4', '#10b981'][id % 3]}
+              color={['#8b5cf6', '#f472b6', '#fbbf24'][id % 3]}
               transparent
               opacity={0.15}
               transmission={0.3}

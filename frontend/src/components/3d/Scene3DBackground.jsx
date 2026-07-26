@@ -24,7 +24,7 @@ function Particles({ count = 200, spread = 50, speed = 0.05 }) {
         size={0.3}
         transparent
         opacity={0.6}
-        color="#6366f1"
+        color="#8b5cf6"
         sizeAttenuation
         depthWrite={false}
       />
@@ -34,7 +34,7 @@ function Particles({ count = 200, spread = 50, speed = 0.05 }) {
 
 // Aurora-like gradient planes
 function AuroraPlanes() {
-  const colors = ['#6366f1', '#06b6d4', '#10b981', '#818cf8', '#22d3ee']
+  const colors = ['#8b5cf6', '#22d3ee', '#fbbf24', '#f472b6', '#c4b5fd']
   
   return (
     <group>
@@ -68,15 +68,12 @@ function FloatingShape({ rotSpeed, scale, type, color }) {
       {type === 0 && <boxGeometry args={[1, 1, 1]} />}
       {type === 1 && <sphereGeometry args={[0.8, 16, 16]} />}
       {type === 2 && <torusGeometry args={[0.6, 0.2, 16, 32]} />}
-      <meshPhysicalMaterial
+      <meshStandardMaterial
         color={color}
         transparent
         opacity={0.15}
-        transmission={0.3}
         roughness={0.1}
         metalness={0.2}
-        clearcoat={1}
-        clearcoatRoughness={0.1}
       />
     </mesh>
   )
@@ -93,7 +90,7 @@ function FloatingShapes() {
       rotSpeed: Math.random() * 2 + 1,
       scale: Math.random() * 0.5 + 0.5,
       type: Math.floor(Math.random() * 3), // 0: box, 1: sphere, 2: torus
-      color: ['#6366f1', '#06b6d4', '#10b981'][i % 3],
+      color: ['#8b5cf6', '#f472b6', '#fbbf24'][i % 3],
     }))
   , [])
 
@@ -113,6 +110,7 @@ function FloatingShapes() {
 export function Scene3DBackground({ className = '', style = {} }) {
   const prefersReducedMotion = typeof window !== 'undefined' && 
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
 
   if (prefersReducedMotion) {
     return (
@@ -126,24 +124,28 @@ export function Scene3DBackground({ className = '', style = {} }) {
       <Canvas
         camera={{ position: [0, 0, 30], fov: 60 }}
         style={{ width: '100%', height: '100%', display: 'block' }}
-        gl={{ antialias: true, alpha: true, preserveDrawingBuffer: false }}
+        // Uncapped DPR on a 3x phone screen means ~9x the fragments for a
+        // backdrop nobody is inspecting, and antialiasing costs another full
+        // resolve pass that is invisible on soft particles.
+        dpr={isMobile ? 1 : [1, 1.75]}
+        gl={{ antialias: !isMobile, alpha: true, preserveDrawingBuffer: false }}
       >
-        <color attach="background" args={['#0b0f1a']} />
-        <fog attach="fog" args={['#0b0f1a', 10, 100]} />
+        <color attach="background" args={['#1d1147']} />
+        <fog attach="fog" args={['#1d1147', 10, 100]} />
         
         {/* Stars from drei */}
         <Stars 
           radius={100} 
           depth={100} 
-          count={2000} 
+          count={isMobile ? 700 : 2000} 
           saturation={0.2} 
           factor={4} 
           size={0.5}
-          color="#6366f1"
+          color="#8b5cf6"
         />
         
         {/* Custom particles */}
-        <Particles count={300} spread={80} speed={0.02} />
+        <Particles count={isMobile ? 120 : 300} spread={80} speed={0.02} />
         
         {/* Aurora gradient planes */}
         <AuroraPlanes />
@@ -152,9 +154,9 @@ export function Scene3DBackground({ className = '', style = {} }) {
         <FloatingShapes />
         
         {/* Subtle ambient light */}
-        <ambientLight intensity={0.3} color="#6366f1" />
-        <directionalLight position={[10, 10, 5]} intensity={0.5} color="#6366f1" />
-        <pointLight position={[-10, -10, 10]} intensity={0.3} color="#06b6d4" />
+        <ambientLight intensity={0.3} color="#8b5cf6" />
+        <directionalLight position={[10, 10, 5]} intensity={0.5} color="#8b5cf6" />
+        <pointLight position={[-10, -10, 10]} intensity={0.3} color="#22d3ee" />
         
 
       </Canvas>

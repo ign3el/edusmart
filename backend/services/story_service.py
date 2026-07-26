@@ -11,9 +11,14 @@ import aiohttp
 import aiofiles
 import requests
 from urllib.parse import quote
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Callable, Awaitable
 from models import StorySchema
 from groq import Groq  # Groq API client
+from services.concurrency import (
+    image_governor,
+    tts_governor,
+    MAX_IMAGES_PER_STORY,
+)
 
 class StoryService:
     def __init__(self) -> None:
@@ -449,6 +454,29 @@ HARD RULES:
             return None
 
     async def generate_image(self, prompt: str, scene_text: str = "", story_seed: Optional[int] = None, is_mobile: bool = False, scene_num: Optional[int] = None) -> Optional[bytes]:
+        """Governed entry point for image generation.
+
+        Every image in the app is produced through this method - scene 0 in
+        main.py, the parallel fan-out in generate_images_parallel, and the
+        admin retry endpoint - which makes it the one place a process-wide
+        ceiling can actually be enforced. Before this the only limit was the
+        Semaphore inside generate_images_parallel, which is per story: ten
+        concurrent stories meant forty concurrent RunPod requests and nothing
+        in the process knew the total.
+
+        The slot is held for the whole call including the spend-cap check, so
+        the cap lock is never contended by more callers than there are slots.
+        """
+        async with image_governor.slot():
+            return await self._generate_image_unbounded(
+                prompt,
+                scene_text=scene_text,
+                story_seed=story_seed,
+                is_mobile=is_mobile,
+                scene_num=scene_num,
+            )
+
+    async def _generate_image_unbounded(self, prompt: str, scene_text: str = "", story_seed: Optional[int] = None, is_mobile: bool = False, scene_num: Optional[int] = None) -> Optional[bytes]:
         """Unified image generation via RunPod ComfyUI FLUX.1-dev with mobile optimization support. Uses story_seed for character consistency.
         
         Args:
@@ -496,24 +524,39 @@ HARD RULES:
         # Simple spend guard (estimates). Reset monthly and block when over cap.
         cap_aed = float(os.getenv("RUNPOD_MONTHLY_CAP_AED", "25"))
         est_cost_per_image = float(os.getenv("RUNPOD_COST_AED_PER_IMAGE", "0.02"))  # FLUX is slightly more expensive
-        usage_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runpod_usage.json")
+        # The spend counter must live on a writable, persisted path. It used to sit
+        # next to this file inside services/ - part of the read-only-ish source tree
+        # owned by www, while the container runs as 1001 - so every save silently
+        # failed ("Usage file save failed: [Errno 13]") and the count reset to its
+        # last-writable value on each restart. The monthly cap was therefore not
+        # enforcing at all between 2026-07-20 and 2026-07-25. db_data is the Docker
+        # named volume the job-state DB already lives in: writable and persistent.
+        _app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        usage_file = os.path.join(_app_root, "db_data", "runpod_usage.json")
+        legacy_usage_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runpod_usage.json")
         month_key = time.strftime("%Y-%m")
 
         def load_usage():
-            if os.path.exists(usage_file):
-                try:
-                    with open(usage_file, "r") as f:
-                        return json.load(f)
-                except Exception:
-                    return {"month": month_key, "images": 0}
+            # Prefer the new location, but carry the old counter over on first run
+            # so a migration doesn't hand back a free month of quota.
+            for path in (usage_file, legacy_usage_file):
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r") as f:
+                            return json.load(f)
+                    except Exception:
+                        continue
             return {"month": month_key, "images": 0}
 
         def save_usage(data):
             try:
+                os.makedirs(os.path.dirname(usage_file), exist_ok=True)
                 with open(usage_file, "w") as f:
                     json.dump(data, f)
             except Exception as e:
-                print(f"Usage file save failed: {e}")
+                # A cap that cannot persist is a cap that does not exist - make this
+                # loud rather than a stray print nobody reads.
+                logger.error(f"⚠️ RunPod spend cap NOT persisted ({usage_file}): {e}")
 
         # Check-and-reserve must be atomic: with parallel scene generation
         # (up to max_workers concurrent calls), reading usage and deciding to
@@ -774,7 +817,7 @@ HARD RULES:
         self,
         scenes: List[dict],
         story_seed: int,
-        max_workers: int = 4,
+        max_workers: Optional[int] = None,
         is_mobile: bool = False,
         start_index: int = 0
     ) -> Dict[int, bytes]:
@@ -795,6 +838,12 @@ HARD RULES:
         Returns:
             Dictionary mapping scene number to image bytes
         """
+        # Per-story fairness cap, applied on top of the process-wide
+        # image_governor inside generate_image. The governor keeps the app as
+        # a whole from flooding RunPod; this keeps a single long story from
+        # taking every slot the governor has and starving everyone queued
+        # behind it. Env-driven so a bigger RunPod endpoint is a config change.
+        max_workers = max_workers or MAX_IMAGES_PER_STORY
         semaphore = asyncio.Semaphore(max_workers)
         
         async def bounded_generate(i: int, scene: dict):
@@ -853,8 +902,9 @@ HARD RULES:
         story_id: str,
         scenes: List[dict],
         voice: str = "af_sarah",
-        batch_size: int = 2,
-        max_threads_per_tts: int = 1
+        batch_size: int = 1,
+        max_threads_per_tts: int = 1,
+        on_scene_ready: Optional[Callable[[int], Awaitable[None]]] = None
     ) -> None:
         """Generate TTS for scenes in parallel batches with CPU management.
 
@@ -894,6 +944,19 @@ HARD RULES:
             
             # Count successes
             successes = sum(1 for r in results if r is True)
+
+            # Publish every finished scene the instant it lands. Without this the
+            # caller only marked scenes completed after the ENTIRE story's TTS
+            # finished, so /api/status kept reporting "1/N ready" and progressive
+            # playback never actually progressed (confirmed in production
+            # 2026-07-25: scene 1 audio existed 51s before the UI was told).
+            if on_scene_ready:
+                for idx, result in enumerate(results):
+                    if result is True:
+                        try:
+                            await on_scene_ready(i + idx + 1)
+                        except Exception as cb_error:
+                            print(f"⚠ on_scene_ready failed for scene {i + idx + 1}: {cb_error}")
             
             # Update progress
             completed = min(i + batch_size, total_scenes)
@@ -937,20 +1000,28 @@ HARD RULES:
                 import time
                 start_time = time.time()
 
-                if voice == "ar_teacher":
-                    # Arabic voice: route to the self-hosted Piper service, not Kokoro
-                    from services.piper_client import piper_tts
-                    audio_bytes = await piper_tts.generate_audio(text, speed=1.0, silence=0.3)
-                else:
-                    # Use the original working kokoro_client
-                    from services.kokoro_client import generate_tts
+                # Kokoro currently runs on CPU in a shared container: each
+                # request occupies a core for its whole duration, so unbounded
+                # parallelism makes every request slower rather than finishing
+                # more of them. The governor is process-wide, so ten stories
+                # narrating at once queue against one ceiling instead of each
+                # opening its own batch. Raise MAX_CONCURRENT_TTS after the GPU
+                # migration - this is the dial, not the batch_size above.
+                async with tts_governor.slot():
+                    if voice == "ar_teacher":
+                        # Arabic voice: route to the self-hosted Piper service, not Kokoro
+                        from services.piper_client import piper_tts
+                        audio_bytes = await piper_tts.generate_audio(text, speed=1.0, silence=0.3)
+                    else:
+                        # Use the original working kokoro_client
+                        from services.kokoro_client import generate_tts
 
-                    audio_bytes = await asyncio.to_thread(
-                        generate_tts,
-                        text=text,
-                        voice=voice,
-                        speed=1.0
-                    )
+                        audio_bytes = await asyncio.to_thread(
+                            generate_tts,
+                            text=text,
+                            voice=voice,
+                            speed=1.0
+                        )
 
                 if audio_bytes:
                     # Cache audio

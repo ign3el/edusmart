@@ -1,7 +1,7 @@
 // Service Worker for EduSmart Stories
 // Implements App Shell architecture with offline-first strategy
 
-const CACHE_VERSION = 'build-20260720105849';
+const CACHE_VERSION = 'build-20260725203733';
 const APP_SHELL_CACHE = `edusmart-shell-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `edusmart-runtime-${CACHE_VERSION}`;
 
@@ -19,6 +19,11 @@ const APP_SHELL_FILES = [
   '/icon-192.png',
   '/icon-384.png',
   '/icon-512.png',
+  // Self-hosted fonts. Only the latin subsets: latin-ext is a progressive
+  // enhancement and is not worth blocking the install event on.
+  '/fonts/fonts.css',
+  '/fonts/baloo2-latin.woff2',
+  '/fonts/nunito-latin.woff2',
 ];
 
 // Install event: Pre-cache the app shell

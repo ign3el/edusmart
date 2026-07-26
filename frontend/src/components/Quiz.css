@@ -1,7 +1,20 @@
 .quiz-container {
+  /* Correctness is green, not the amber --accent-3 this file used to
+     reference. Matches the rgba(122,246,194,...) tints already used for
+     correct-state backgrounds and borders throughout this file. */
+  --quiz-correct: #7af6c2;
   width: 100%;
   max-width: 820px;
   margin: 0 auto;
+  /* .quiz-overlay is fixed/inset:0 and centres its child with no overflow
+     of its own, so a long review list had no scroll container at all and
+     ran off both ends of the viewport. Bounding the card to the overlay
+     and scrolling inside it keeps short quizzes centred - a max-height can
+     never overflow its parent, so centring cannot clip the top. */
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: clamp(1rem, 3vw, 1.4rem);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--edge);
@@ -99,7 +112,7 @@
 .option-btn.correct {
   border-color: rgba(122, 246, 194, 0.6);
   background: rgba(122, 246, 194, 0.12);
-  color: var(--accent-3);
+  color: var(--quiz-correct);
 }
 
 .option-btn.wrong {
@@ -122,7 +135,7 @@
   background: linear-gradient(135deg, rgba(109, 228, 255, 0.2), rgba(122, 246, 194, 0.15));
   display: grid;
   place-items: center;
-  color: #04101f;
+  color: #1a0f3d;
   font-weight: 800;
   box-shadow: var(--shadow-soft);
 }
@@ -193,7 +206,7 @@
 
 .finish-btn {
   background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  color: #04101f;
+  color: #1a0f3d;
   border: none;
 }
 
@@ -246,7 +259,7 @@
 }
 
 .review-item.correct-answer {
-  border-left-color: var(--accent-3);
+  border-left-color: var(--quiz-correct);
 }
 
 .review-item.wrong-answer {
@@ -279,13 +292,13 @@
 }
 
 .badge-correct {
-  background: var(--accent-3);
-  color: #04101f;
+  background: var(--quiz-correct);
+  color: #1a0f3d;
 }
 
 .badge-wrong {
   background: #ff7b7b;
-  color: #04101f;
+  color: #1a0f3d;
 }
 
 .source-badge {
@@ -358,13 +371,13 @@
 }
 
 .option-review-correct .option-tag {
-  background: var(--accent-3);
-  color: #04101f;
+  background: var(--quiz-correct);
+  color: #1a0f3d;
 }
 
 .option-review-wrong .option-tag {
   background: #ff7b7b;
-  color: #04101f;
+  color: #1a0f3d;
 }
 
 .explanation {
@@ -392,11 +405,11 @@
   padding: 1rem;
   background: rgba(122, 246, 194, 0.08);
   border-radius: 8px;
-  border-left: 3px solid var(--accent-3);
+  border-left: 3px solid var(--quiz-correct);
 }
 
 .why-correct strong {
-  color: var(--accent-3);
+  color: var(--quiz-correct);
   display: block;
   margin-bottom: 0.5rem;
 }
@@ -454,4 +467,12 @@
 .error-state .small {
   font-size: 0.9rem;
   opacity: 0.8;
+}
+
+
+.quiz-mascot {
+  display: flex;
+  justify-content: center;
+  /* Bubble headroom - it is absolutely positioned above the owl. */
+  margin: 2rem 0 0.75rem;
 }

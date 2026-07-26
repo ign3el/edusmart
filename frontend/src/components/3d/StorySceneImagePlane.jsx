@@ -18,6 +18,12 @@ const MAX_CACHED_TEXTURES = 16
 // across CameraRig's full breathing range, plus the smaller shrink tilt rotation
 // itself causes. Reads as "distorted/blurry edges during 3D motion."
 const TILT_OVERSCAN = 1.2
+// How far a page hinges as it turns, in radians, and how far it slides sideways
+// as a fraction of its own width. Tuned together: more yaw than this and the
+// cover-fit plane turns edge-on and briefly disappears; more shift and it clears
+// the frame before it has finished fading.
+const PAGE_TURN_YAW = 0.85
+const PAGE_TURN_SHIFT = 0.38
 
 // Persistent texture cache, shared across scene changes and story replays for the
 // life of the page. A story never exceeds 10 scenes, so this is small — LRU-capped
@@ -99,7 +105,7 @@ function fitPlaneSize(texture, viewport) {
 // A single image, rendered as background (soft, offset, low-parallax) + foreground
 // (crisp, full-parallax) copies for a cheap layered-depth look from one texture,
 // plus a hue-drifting additive "contact glow" behind/below it for grounding.
-function ImageLayer({ texture, viewport, tiltRef, entering, isPlaying, skipTransition }) {
+function ImageLayer({ texture, viewport, tiltRef, entering, isPlaying, skipTransition, turnDir = 1 }) {
   const fgRef = useRef()
   const bgRef = useRef()
   const glowRef = useRef()
@@ -127,15 +133,27 @@ function ImageLayer({ texture, viewport, tiltRef, entering, isPlaying, skipTrans
     const tiltY = tiltRef.current.x * FG_TILT
     const breathe = 1 + Math.sin(state.clock.elapsedTime * 1.6) * (isPlaying ? 0.014 : 0.005)
 
+    // swing: 1 at the far end of the transition, 0 at rest. The entering page
+    // arrives from the leading edge, the outgoing one leaves past the trailing
+    // one, so a back-navigation visibly turns the other way.
+    const swing = entering ? 1 - eased : eased
+    const side = entering ? 1 : -1
+    const yaw = turnDir * side * swing * PAGE_TURN_YAW
+    const shift = turnDir * side * swing * fgW * PAGE_TURN_SHIFT
+
     fgRef.current.position.z = z
+    fgRef.current.position.x = shift
     fgRef.current.rotation.x = tiltX
-    fgRef.current.rotation.y = tiltY
+    fgRef.current.rotation.y = tiltY + yaw
     fgRef.current.scale.set(fgW * breathe * TILT_OVERSCAN, fgH * breathe * TILT_OVERSCAN, 1)
     fgRef.current.material.opacity = opacity
 
     bgRef.current.position.z = z + BG_Z
+    // The blurred backing layer swings less, so it reads as the page behind the
+    // page rather than a second sheet glued to the first.
+    bgRef.current.position.x = shift * 0.45
     bgRef.current.rotation.x = tiltX * (BG_TILT / FG_TILT)
-    bgRef.current.rotation.y = tiltY * (BG_TILT / FG_TILT)
+    bgRef.current.rotation.y = tiltY * (BG_TILT / FG_TILT) + yaw * 0.45
     bgRef.current.material.opacity = opacity * BG_OPACITY
 
     if (glowRef.current) {
@@ -159,7 +177,14 @@ function ImageLayer({ texture, viewport, tiltRef, entering, isPlaying, skipTrans
       </mesh>
       <mesh ref={fgRef}>
         <planeGeometry args={[1, 1]} />
-        <meshBasicMaterial map={texture} transparent opacity={0} toneMapped={false} />
+        {/* depthWrite MUST stay false. This plane spends most of its life at
+            opacity 0 (the outgoing page never unmounts - prevImageUrl keeps it
+            alive), and a transparent plane that writes depth still occludes
+            whatever is behind it. While the transition only moved planes along
+            z the two stayed concentric so it never showed; the moment the page
+            turn shifts one sideways, the invisible outgoing page punches a
+            hard-edged hole through the incoming one. */}
+        <meshBasicMaterial map={texture} transparent opacity={0} toneMapped={false} depthWrite={false} />
       </mesh>
     </group>
   )
@@ -180,7 +205,7 @@ function useTiltRef(pointerTiltRef, isMobile) {
   return smoothed
 }
 
-export function StorySceneImagePlane({ imageUrl, prevImageUrl, isMobile, isPlaying, pointerTiltRef }) {
+export function StorySceneImagePlane({ imageUrl, prevImageUrl, isMobile, isPlaying, turnDir = 1, pointerTiltRef }) {
   const { viewport } = useThree()
   const [texture, wasCachedRef] = useSceneTexture(imageUrl)
   const [prevTexture] = useSceneTexture(prevImageUrl)
@@ -194,9 +219,9 @@ export function StorySceneImagePlane({ imageUrl, prevImageUrl, isMobile, isPlayi
   return (
     <group>
       {prevTexture && prevTexture !== texture && (
-        <ImageLayer texture={prevTexture} viewport={viewport} tiltRef={tiltRef} entering={false} isPlaying={isPlaying} />
+        <ImageLayer texture={prevTexture} viewport={viewport} tiltRef={tiltRef} entering={false} isPlaying={isPlaying} turnDir={turnDir} />
       )}
-      <ImageLayer texture={texture} viewport={viewport} tiltRef={tiltRef} entering isPlaying={isPlaying} skipTransition={wasCachedRef.current} />
+      <ImageLayer texture={texture} viewport={viewport} tiltRef={tiltRef} entering isPlaying={isPlaying} skipTransition={wasCachedRef.current} turnDir={turnDir} />
     </group>
   )
 }

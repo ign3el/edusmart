@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, forwardRef, useImperativeHandle, lazy, Sus
 import { motion, AnimatePresence } from 'framer-motion'
 import { animate } from 'animejs'
 import {
-  Play, Pause, SkipForward, SkipBack, RotateCw, Menu as MenuIcon, X,
-  BookOpen, Download, Save, Volume2, ImageOff, Loader2
+  Play, Pause, SkipForward, SkipBack, RotateCw, Home,
+  BookOpen, Volume2, ImageOff, Loader2
 } from 'lucide-react'
 import { buildFullUrl } from '../utils/urlHelpers'
 import Quiz from './Quiz'
@@ -12,6 +12,26 @@ import './StoryPlayer.css'
 const StoryScene3DLayer = lazy(() => import('./StoryScene3DLayer'))
 
 const API_URL = import.meta.env.VITE_API_URL || ''
+
+/* A real page turn, not a crossfade: the outgoing page swings away around the
+   spine while the next one swings in from the opposite edge. transformOrigin is
+   set per-element (not here) because it is a plain style, not an animatable
+   value - Framer would ignore it inside a variant. */
+const PAGE_TURN = {
+  enter: (dir) => ({
+    rotateY: dir > 0 ? 68 : -68,
+    x: dir > 0 ? '30%' : '-30%',
+    opacity: 0,
+  }),
+  center: { rotateY: 0, x: '0%', opacity: 1 },
+  exit: (dir) => ({
+    rotateY: dir > 0 ? -68 : 68,
+    x: dir > 0 ? '-30%' : '30%',
+    opacity: 0,
+  }),
+}
+
+const PAGE_TURN_TRANSITION = { duration: 0.5, ease: [0.36, 0.06, 0.2, 1] }
 
 function hasWebGL() {
   if (typeof document === 'undefined') return false
@@ -26,6 +46,7 @@ function hasWebGL() {
 const StoryPlayer = forwardRef(({
   storyData,
   avatar,
+  onHome,
   onRestart,
   onSave,
   onDownloadOffline,
@@ -40,7 +61,6 @@ const StoryPlayer = forwardRef(({
   const [currentScene, setCurrentScene] = useState(initialScene)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showQuiz, setShowQuiz] = useState(false)
-  const [showActionMenu, setShowActionMenu] = useState(false)
   const [progress, setProgress] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -59,6 +79,11 @@ const StoryPlayer = forwardRef(({
     hasWebGL()
   )
   const userPausedRef = useRef(false)
+  // canplaythrough fires again after every re-buffer on mobile Chrome. This
+  // marks "this scene has already had its one automatic start" so a re-fire
+  // can't restart audio the user deliberately paused.
+  const autoPlayedRef = useRef(false)
+  const seekingRef = useRef(false)
   const savedTimeRef = useRef(0)
   const audioRef = useRef(null)
   const lastUpdateRef = useRef(0)
@@ -70,6 +95,9 @@ const StoryPlayer = forwardRef(({
   const prefetchedUrlsRef = useRef(new Set())
   const playbackRateRef = useRef(1)
   const [playbackRate, setPlaybackRate] = useState(1)
+  // +1 = moving forward through the book, -1 = back. Drives which way the page
+  // swings, so jumping backwards doesn't look like turning forwards.
+  const [turnDir, setTurnDir] = useState(1)
 
   const scenes = storyData?.scenes || []
   // Use max of what backend promised vs what we actually received
@@ -103,6 +131,7 @@ const StoryPlayer = forwardRef(({
     setAudioError(false)
     setGeneratingMessage('')  // Clear "Preparing next scene..." when new scene loads
     userPausedRef.current = false
+    autoPlayedRef.current = false
     pendingAdvanceRef.current = false
 
     // Preload image
@@ -123,12 +152,23 @@ const StoryPlayer = forwardRef(({
         setGeneratingMessage('') // Clear waiting message once audio loads
         setAudioError(false)
         audioRef.current.playbackRate = playbackRateRef.current
+        // Auto-start exactly once per scene, and never against the user's
+        // wishes. This used to call play() unconditionally, so a paused story
+        // resumed itself the moment the network re-buffered enough to re-fire
+        // canplaythrough - the "pause doesn't work" report.
+        if (userPausedRef.current || autoPlayedRef.current) return
+        autoPlayedRef.current = true
         audioRef.current.play().catch(() => {
           setAudioError(true)
           setIsPlaying(false)
         })
       }
     }
+
+    // Detach the handler with the scene it belongs to, or a late canplaythrough
+    // from the previous src can fire against the new one.
+    const el = audioRef.current
+    return () => { if (el) el.oncanplaythrough = null }
   }, [currentScene, fullImageUrl, fullAudioUrl])
 
   // Warm the browser cache for the next scene's image/audio as soon as it's ready,
@@ -203,6 +243,11 @@ const StoryPlayer = forwardRef(({
     }
     const handlePause = () => {
       if (audio.currentTime > 0) savedTimeRef.current = audio.currentTime
+      // The <audio> element is the single source of truth for playing state.
+      // Without this, any pause the button didn't cause - a scene change, an
+      // incoming call, unplugged headphones, a backgrounded tab - left the icon
+      // showing Pause with nothing playing.
+      setIsPlaying(false)
     }
     const handleEnded = () => {
       savedTimeRef.current = 0
@@ -266,30 +311,72 @@ const StoryPlayer = forwardRef(({
     }
   }, [scenes.length, actualTotal, currentScene])
 
+  // A detached <audio> can keep playing in Chrome, so leaving the player
+  // mid-story used to narrate over whatever screen you navigated to.
+  useEffect(() => {
+    const audio = audioRef.current
+    return () => {
+      if (!audio) return
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+  }, [])
+
   const togglePlay = () => {
-    if (!audioRef.current) return
-    if (audioRef.current.paused) {
+    const audio = audioRef.current
+    if (!audio) return
+    if (audio.paused) {
       if (audioError) setAudioError(false)
-      const targetTime = savedTimeRef.current > 0 ? savedTimeRef.current : 0
-      audioRef.current.currentTime = targetTime
-      audioRef.current.play().catch(() => {
+      userPausedRef.current = false
+      // Resume from wherever the element already is. It used to rewind to
+      // savedTimeRef, which is written on pause but NOT on seek - so seeking
+      // while paused and then pressing play silently threw the seek away.
+      audio.play().catch(() => {
         setAudioError(true)
         setIsPlaying(false)
       })
     } else {
-      savedTimeRef.current = audioRef.current.currentTime
-      audioRef.current.pause()
+      savedTimeRef.current = audio.currentTime
+      audio.pause()
       userPausedRef.current = true
-      setIsPlaying(false)
     }
+    // isPlaying is set by the element's own play/pause events, not here, so it
+    // cannot claim playback that never actually started.
   }
 
-  const handleSeek = (e) => {
-    if (!audioRef.current?.duration) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX
+  // Pointer events, so a drag scrubs instead of only a tap landing. The track
+  // was bound to onClick AND onTouchStart, which double-fired on every touch,
+  // and the 250ms throttle in handleTimeUpdate then swallowed the resulting
+  // position change - which is what read as "seek doesn't work".
+  const seekToClientX = (clientX, rect) => {
+    const audio = audioRef.current
+    if (!audio?.duration) return
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    audioRef.current.currentTime = ratio * audioRef.current.duration
+    const target = ratio * audio.duration
+    audio.currentTime = target
+    savedTimeRef.current = target
+    lastUpdateRef.current = 0
+    setProgress(ratio * 100)
+    setCurrentTime(target)
+  }
+
+  const handleSeekStart = (e) => {
+    if (!audioRef.current?.duration) return
+    seekingRef.current = true
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    seekToClientX(e.clientX, e.currentTarget.getBoundingClientRect())
+  }
+
+  const handleSeekMove = (e) => {
+    if (!seekingRef.current) return
+    seekToClientX(e.clientX, e.currentTarget.getBoundingClientRect())
+  }
+
+  const handleSeekEnd = (e) => {
+    if (!seekingRef.current) return
+    seekingRef.current = false
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
   }
 
   const handleTimeUpdate = () => {
@@ -307,11 +394,44 @@ const StoryPlayer = forwardRef(({
   const goToScene = (idx) => {
     if (audioRef.current) audioRef.current.pause()
     setGeneratingMessage('')
+    setTurnDir(idx >= currentScene ? 1 : -1)
     // isPlaying is no longer set optimistically here - the real 'play' event
     // (wired below) is the single source of truth, so the button can't get
     // stuck showing Pause when playback actually failed to start (blocked
     // autoplay, network hiccup, etc.) without anything ever rolling it back.
     setCurrentScene(idx)
+  }
+
+  // The circular arrow in the header now does what a circular arrow means:
+  // replay from the top. It used to be wired to onRestart, which DELETES the
+  // current unsaved story from the server and navigates away - a destructive,
+  // irreversible action one mis-tap deep, behind an icon that reads as
+  // "reload". "New Story" still exists, spelled out in words, in the app
+  // drawer. Nothing here touches the network.
+  const handleReplay = () => {
+    const audio = audioRef.current
+    userPausedRef.current = false
+    setGeneratingMessage('')
+    setTurnDir(-1)
+
+    if (currentScene !== 0) {
+      if (audio) audio.pause()
+      setCurrentScene(0)
+      return
+    }
+
+    // Already on scene 1: setCurrentScene(0) is a no-op, so the scene-change
+    // effect never fires and nothing would restart. Rewind the element itself.
+    if (!audio) return
+    audio.currentTime = 0
+    savedTimeRef.current = 0
+    lastUpdateRef.current = 0
+    setProgress(0)
+    setCurrentTime(0)
+    audio.play().catch(() => {
+      setAudioError(true)
+      setIsPlaying(false)
+    })
   }
 
   const cyclePlaybackRate = () => {
@@ -408,7 +528,7 @@ const StoryPlayer = forwardRef(({
 
       {/* Header */}
       <header className="player-header">
-        <button className="icon-btn" onClick={onRestart} aria-label="Restart"><RotateCw size={18} /></button>
+        <button className="icon-btn" onClick={onHome} aria-label="Back to home"><Home size={18} /></button>
         <div className="header-title-area">
           <h1 className="story-title">{storyData?.title || 'Untitled Story'}</h1>
           <span className="scene-badge">
@@ -421,24 +541,14 @@ const StoryPlayer = forwardRef(({
             )}
           </span>
         </div>
-        <button className="icon-btn" onClick={() => setShowActionMenu(!showActionMenu)} aria-label="Menu">
-          {showActionMenu ? <X size={18} /> : <MenuIcon size={18} />}
-        </button>
+        {/* This slot used to hold a SECOND hamburger whose menu offered only
+            Restart / Quiz / Save / Download - no navigation at all. On a phone
+            it sat ~60px under the app's real hamburger, so tapping the obvious
+            one gave a dead end ("navigation doesn't work while playing"). All
+            four entries already exist elsewhere: Save and Download in the app
+            drawer, Quiz as the button below, Restart as New Story. */}
+        <button className="icon-btn" onClick={handleReplay} aria-label="Replay from the beginning"><RotateCw size={18} /></button>
       </header>
-
-      {/* Action menu */}
-      <AnimatePresence>
-        {showActionMenu && (
-          <motion.div className="action-menu" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
-            <button className="action-item" onClick={() => { setShowActionMenu(false); onRestart() }}><RotateCw size={16} /> Restart</button>
-            <button className="action-item" onClick={() => { setShowActionMenu(false); setShowQuiz(true) }}><BookOpen size={16} /> Quiz</button>
-            {onSave && !isSaved && (
-              <button className="action-item" onClick={() => { setShowActionMenu(false); onSave() }}><Save size={16} /> Save</button>
-            )}
-            <button className="action-item" onClick={() => { setShowActionMenu(false); handleOfflineDownload() }}><Download size={16} /> Download</button>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Main content */}
       <main className="player-content">
@@ -456,6 +566,7 @@ const StoryPlayer = forwardRef(({
                 isMobile={isMobile}
                 isPlaying={isPlaying}
                 sceneIndex={currentScene}
+                turnDir={turnDir}
                 pointerTiltRef={pointerTiltRef}
               />
             </Suspense>
@@ -473,13 +584,23 @@ const StoryPlayer = forwardRef(({
             </div>
           )}
           {!show3D && fullImageUrl && (
-            <img
-              src={fullImageUrl}
-              alt={`Scene ${currentScene + 1}`}
-              className={`scene-image ${imageLoaded ? 'loaded' : ''}`}
-              onLoad={() => setImageLoaded(true)}
-              onError={() => setImageError(true)}
-            />
+            <AnimatePresence initial={false} custom={turnDir}>
+              <motion.img
+                key={fullImageUrl}
+                src={fullImageUrl}
+                alt={`Scene ${currentScene + 1}`}
+                className="scene-image scene-page"
+                custom={turnDir}
+                variants={PAGE_TURN}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                transition={PAGE_TURN_TRANSITION}
+                style={{ transformOrigin: turnDir > 0 ? 'left center' : 'right center' }}
+                onLoad={() => setImageLoaded(true)}
+                onError={() => setImageError(true)}
+              />
+            </AnimatePresence>
           )}
           {/* Scene dots overlay */}
           <div className="scene-dots-overlay">
@@ -509,9 +630,9 @@ const StoryPlayer = forwardRef(({
             <motion.p
               key={currentScene}
               className="narration-text"
-              initial={{ opacity: 0, y: 15, filter: 'blur(4px)' }}
-              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              transition={{ duration: 0.45, ease: 'easeOut' }}
+              initial={{ opacity: 0, x: turnDir > 0 ? 26 : -26, filter: 'blur(4px)' }}
+              animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
+              transition={{ duration: 0.45, ease: 'easeOut', delay: 0.12 }}
             >
               {scene.text}
             </motion.p>
@@ -523,7 +644,14 @@ const StoryPlayer = forwardRef(({
         {/* Audio progress */}
         <div className="audio-row">
           <span className="time">{formatTime(currentTime)}</span>
-          <div className="progress-track" onClick={handleSeek} onTouchStart={handleSeek}>
+          <div
+            className="progress-track"
+            onPointerDown={handleSeekStart}
+            onPointerMove={handleSeekMove}
+            onPointerUp={handleSeekEnd}
+            onPointerCancel={handleSeekEnd}
+            style={{ touchAction: 'none' }}
+          >
             <motion.div className="progress-fill" style={{ width: `${progress}%` }} />
             <div className="progress-thumb" style={{ left: `${progress}%` }} />
           </div>

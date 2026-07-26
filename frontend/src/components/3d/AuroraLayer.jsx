@@ -1,6 +1,6 @@
 // Aurora-like gradient planes
 export function AuroraLayer() {
-  const colors = ['#6366f1', '#06b6d4', '#10b981', '#818cf8', '#22d3ee']
+  const colors = ['#8b5cf6', '#22d3ee', '#fbbf24', '#f472b6', '#c4b5fd']
 
   return (
     <group>

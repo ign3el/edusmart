@@ -9,17 +9,17 @@ export function SceneContent() {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
   return (
     <>
-      <color attach="background" args={['#0b0f1a']} />
-      <fog attach="fog" args={['#0b0f1a', 10, 100]} />
-      <Stars radius={100} depth={100} count={isMobile ? 500 : 2000} saturation={0.2} factor={4} size={0.5} color="#6366f1" />
+      <color attach="background" args={['#1d1147']} />
+      <fog attach="fog" args={['#1d1147', 10, 100]} />
+      <Stars radius={100} depth={100} count={isMobile ? 500 : 2000} saturation={0.2} factor={4} size={0.5} color="#8b5cf6" />
       <ParticlesLayer count={isMobile ? 100 : 300} />
       <AuroraLayer />
       <ShapesLayer count={isMobile ? 6 : 12} />
       <PerlinFluid />
       <DiamondLogo />
-      <ambientLight intensity={0.3} color="#6366f1" />
-      <directionalLight position={[10, 10, 5]} intensity={0.5} color="#6366f1" />
-      <pointLight position={[-10, -10, 10]} intensity={0.3} color="#06b6d4" />
+      <ambientLight intensity={0.3} color="#8b5cf6" />
+      <directionalLight position={[10, 10, 5]} intensity={0.5} color="#8b5cf6" />
+      <pointLight position={[-10, -10, 10]} intensity={0.3} color="#22d3ee" />
     </>
   )
 }

@@ -1,7 +1,7 @@
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 14, 39, 0.85);
+  background: rgba(26, 15, 58, 0.85);
   display: grid;
   place-items: center;
   z-index: 1000;
@@ -11,7 +11,7 @@
 
 .modal-content {
   width: min(520px, 100%);
-  background: linear-gradient(150deg, rgba(15, 22, 66, 0.92), rgba(18, 31, 77, 0.85));
+  background: linear-gradient(150deg, rgba(34, 20, 74, 0.92), rgba(18, 31, 77, 0.85));
   border: 1.5px solid rgba(168, 85, 247, 0.3);
   border-radius: var(--radius-lg);
   padding: clamp(1.4rem, 4vw, 1.9rem);
@@ -138,4 +138,63 @@
 .modal-buttons button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Consent to be discoverable. `.modal-content input` styles the name field
+   full-width with heavy padding, which would stretch a checkbox into a bar -
+   hence the explicit reset below. The whole row is the hit target, comfortably
+   over 44px on a phone. */
+.share-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  min-height: 44px;
+  padding: 0.85rem;
+  border-radius: 12px;
+  border: 1.5px solid rgba(168, 85, 247, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.share-consent.is-on {
+  border-color: rgba(168, 85, 247, 0.55);
+  background: rgba(168, 85, 247, 0.1);
+}
+
+.modal-content .share-consent input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  margin: 2px 0 0;
+  padding: 0;
+  border-radius: 6px;
+  accent-color: #a855f7;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.share-consent-body {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.share-consent-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.share-consent-title svg {
+  color: #a855f7;
+  flex-shrink: 0;
+}
+
+.share-consent-hint {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--ink-2);
 }

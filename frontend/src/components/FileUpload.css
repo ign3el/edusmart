@@ -69,7 +69,7 @@
   border-radius: var(--radius-md);
   padding: clamp(1.8rem, 6vw, 2.6rem);
   cursor: pointer;
-  background: linear-gradient(140deg, rgba(109, 228, 255, 0.12), rgba(12, 21, 40, 0.7));
+  background: linear-gradient(140deg, rgba(109, 228, 255, 0.12), rgba(30, 18, 66, 0.7));
   transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
   display: grid;
   gap: 0.65rem;
@@ -87,7 +87,7 @@
 .upload-icon {
   display: flex;
   color: var(--accent-1);
-  filter: drop-shadow(0 0 12px rgba(99, 102, 241, 0.35));
+  filter: drop-shadow(0 0 12px rgba(139, 92, 246, 0.35));
 }
 
 .dropzone p {

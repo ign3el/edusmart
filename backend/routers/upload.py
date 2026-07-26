@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import io
 import httpx
@@ -133,11 +134,24 @@ async def tts_preview(
             # English and others - prefer local Kokoro first to avoid external auth/cors issues
             try:
                 from services.kokoro_client import generate_tts
-                audio_bytes = generate_tts(
-                    text=request.text,
-                    voice=request.voice,
-                    speed=float(request.speed or 1.0)
-                )
+                from services.concurrency import tts_governor
+                # generate_tts is a blocking requests.post with a 90 second
+                # timeout. Called bare from an async endpoint it stalls the
+                # event loop for the entire process - one user previewing a
+                # voice froze every other user's request until it returned.
+                # Every other call site already offloads it the same way.
+                #
+                # It also shares the story pipeline's TTS governor: previews
+                # hit the same CPU-bound Kokoro container, and a few users
+                # clicking through voices should queue behind narration rather
+                # than compete with it.
+                async with tts_governor.slot():
+                    audio_bytes = await asyncio.to_thread(
+                        generate_tts,
+                        text=request.text,
+                        voice=request.voice,
+                        speed=float(request.speed or 1.0)
+                    )
                 if audio_bytes:
                     return Response(
                         content=audio_bytes,

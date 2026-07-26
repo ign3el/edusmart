@@ -1,7 +1,7 @@
 .upload-progress-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(5, 11, 22, 0.85);
+  background: rgba(18, 11, 44, 0.85);
   display: grid;
   place-items: center;
   z-index: 2500;
@@ -11,7 +11,7 @@
 
 .upload-progress-overlay .progress-container {
   width: min(460px, 100%);
-  background: linear-gradient(150deg, rgba(12, 21, 40, 0.92), rgba(12, 21, 40, 0.8));
+  background: linear-gradient(150deg, rgba(30, 18, 66, 0.92), rgba(30, 18, 66, 0.8));
   border: 1px solid var(--edge);
   border-radius: var(--radius-lg);
   padding: 1.6rem;

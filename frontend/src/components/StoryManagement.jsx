@@ -243,7 +243,7 @@ const StoryManagement = ({ onPlayStory }) => {
                         <Save size={14} /> {savingId === story.story_id ? 'Saving...' : 'Save'}
                       </button>
                       <button
-                        className="play-btn"
+                        className="story-play-btn"
                         onClick={() => handlePlay(story)}
                         disabled={playingStoryId === story.story_id}
                       >

@@ -18,17 +18,25 @@ class HashService:
     def __init__(self):
         self.saved_stories_dir = Path("saved_stories")
         self.generated_stories_dir = Path("generated_stories")
-        self.hash_cache_file = Path("backend/hash_cache.json")
+        # db_data is the Docker named volume that already holds job_state.db and
+        # the RunPod usage counter: writable by the container user, and persistent
+        # across rebuilds. The old location (backend/hash_cache.json -> a path
+        # inside the source tree) only worked by accident of the bind mount.
+        self.hash_cache_file = Path("db_data/hash_cache.json")
+        self._legacy_cache_file = Path("backend/hash_cache.json")
         self.hash_cache = self._load_hash_cache()
     
     def _load_hash_cache(self) -> Dict[str, Dict]:
         """Load hash cache from disk"""
-        if self.hash_cache_file.exists():
-            try:
-                with open(self.hash_cache_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load hash cache: {e}")
+        # Carry the old file over on first run so the migration doesn't throw
+        # away a warm cache and re-flag every recent upload as new.
+        for path in (self.hash_cache_file, getattr(self, "_legacy_cache_file", None)):
+            if path and path.exists():
+                try:
+                    with open(path, 'r') as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.warning(f"Failed to load hash cache from {path}: {e}")
         return {}
     
     def _save_hash_cache(self):

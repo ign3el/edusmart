@@ -16,7 +16,7 @@ function BrandMark({ className = '' }) {
 
     const animation = animate(glowRef.current, {
       opacity: [0.55, 1, 0.55],
-      filter: ['drop-shadow(0 0 6px rgba(99,102,241,0.35))', 'drop-shadow(0 0 16px rgba(6,182,212,0.55))', 'drop-shadow(0 0 6px rgba(99,102,241,0.35))'],
+      filter: ['drop-shadow(0 0 6px rgba(139,92,246,0.35))', 'drop-shadow(0 0 16px rgba(34,211,238,0.55))', 'drop-shadow(0 0 6px rgba(139,92,246,0.35))'],
       duration: 3200,
       easing: 'easeInOutSine',
       loop: true,

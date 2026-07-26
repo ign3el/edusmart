@@ -22,6 +22,18 @@ FROM_EMAIL = os.getenv("MAIL_FROM", "EduSmart <noreply@edusmart.com>")
 FRONTEND_URL = os.getenv("APP_URL") or os.getenv("FRONTEND_URL", "http://localhost:5173")
 MAIL_STARTTLS = os.getenv("MAIL_STARTTLS", "True").lower() == "true"
 
+# Recipients on these domains are logged and dropped, never handed to SMTP.
+# Test scripts that exercise the real signup endpoint would otherwise make the
+# production mail account send genuine messages - which is exactly how three
+# probe emails ended up in the account holder's Sent folder on 2026-07-26.
+# EMAIL_BACKEND=console cannot cover this: it is all-or-nothing and would
+# silence real users' mail too.
+MAIL_SUPPRESS_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv("MAIL_SUPPRESS_DOMAINS", "probe.edusmart.internal").split(",")
+    if d.strip()
+}
+
 # Log configuration on startup
 logger.info(f"Email Service Configuration:")
 logger.info(f"  Backend: {EMAIL_BACKEND}")
@@ -43,6 +55,12 @@ def send_email(to_email: str, subject: str, html_content: str, text_content: Opt
     Returns:
         True if email sent successfully, False otherwise
     """
+    # Hard stop before any backend is chosen: a suppressed domain must never
+    # reach a real relay, whatever EMAIL_BACKEND says.
+    if to_email.rsplit("@", 1)[-1].strip().lower() in MAIL_SUPPRESS_DOMAINS:
+        logger.info(f"✉️  Suppressed (test domain), not sent: {to_email} | {subject}")
+        return True
+
     if EMAIL_BACKEND == "console":
         logger.info(f"""
 {'='*80}

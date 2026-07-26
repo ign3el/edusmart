@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import ForgotPassword from './ForgotPassword';
+import Mascot from './Mascot';
+import SocialAuthButtons from './SocialAuthButtons';
 import './Auth.css';
 
 export default function Login({ onSwitchToSignup, onSuccess }) {
@@ -106,8 +108,11 @@ export default function Login({ onSwitchToSignup, onSuccess }) {
       exit={{ opacity: 0, y: -20 }}
     >
       <div className="auth-box">
+        <div className="auth-mascot">
+          <Mascot mood={loading ? 'thinking' : 'idle'} size={84} trackPointer />
+        </div>
         <h2>Welcome Back</h2>
-        <p className="auth-subtitle">Login to continue your learning adventure</p>
+        <p className="auth-subtitle">Ollie kept your stories warm. Let's carry on.</p>
         
         <form onSubmit={handleSubmit} noValidate>
           <div className="input-group">
@@ -175,6 +180,8 @@ export default function Login({ onSwitchToSignup, onSuccess }) {
             {loading ? 'Logging In...' : 'Login'}
           </button>
         </form>
+
+        <SocialAuthButtons mode="login" />
         
         <p className="auth-switch">
           Don't have an account?{' '}

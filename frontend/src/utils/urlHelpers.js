@@ -1,8 +1,10 @@
-// Story media (/api/saved-stories/, /api/generated-stories/) requires auth +
-// ownership on the backend. <img>/<audio> tags can't send an Authorization
-// header, so the token is passed as a query param instead - this appends it.
+// Story media requires auth + ownership on the backend. <img>/<audio> tags can't
+// send an Authorization header, so the token is passed as a query param instead.
+// /api/outputs/ (the live progressive-generation cache and legacy story media)
+// belongs on this list too - it was missing, which is why a host-level nginx
+// alias was serving that whole directory unauthenticated as a workaround.
 const withAuthToken = (url) => {
-  if (!/^\/api\/(saved|generated)-stories\//.test(url)) {
+  if (!/^\/api\/((saved|generated)-stories|outputs)\//.test(url)) {
     return url
   }
   const token = localStorage.getItem('auth_token')

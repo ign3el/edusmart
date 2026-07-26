@@ -59,8 +59,8 @@ export function PerlinFluid() {
   const meshRef = useRef()
   const uniforms = useMemo(() => ({
     uTime: { value: 0 },
-    uColor1: { value: new THREE.Color('#6366f1') },
-    uColor2: { value: new THREE.Color('#06b6d4') },
+    uColor1: { value: new THREE.Color('#8b5cf6') },
+    uColor2: { value: new THREE.Color('#22d3ee') },
   }), [])
 
   useFrame((state) => {

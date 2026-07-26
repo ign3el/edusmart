@@ -6,12 +6,26 @@ import {
 } from 'lucide-react';
 import { markQuizComplete } from '../services/api';
 import ScoreBurst from './ScoreBurst';
+import Mascot from './Mascot';
 import './Quiz.css';
 
 // Progress is keyed per-story so closing the quiz (or losing the tab to a
 // refresh, now that App.jsx also survives that) and reopening it later picks
 // up on the same question with the same score, instead of starting over.
 const progressKey = (storyId) => `edusmart_quiz_progress_${storyId}`;
+
+// correct_answer arrives as a bare letter ("B") while options are full
+// prefixed strings ("B. A diet that..."). Comparing them directly is always
+// false, so everything that decides correctness must go through here first.
+// Returns null when no letter can be read, and null never equals null here
+// because callers compare against a real letter.
+const letterOf = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toUpperCase();
+  const prefixed = trimmed.match(/^([A-D])[.)\s]/);
+  if (prefixed) return prefixed[1];
+  return /^[A-D]$/.test(trimmed) ? trimmed : null;
+};
 
 function loadProgress(storyId) {
   if (!storyId) return null;
@@ -78,11 +92,10 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
     const correctAnswer = currentQ.correct_answer || currentQ.answer;
     const questionText = currentQ.question_text || currentQ.question;
 
-    // Extract letter from option (e.g., "A. Option text" -> "A")
-    const selectedLetter = option.match(/^([A-D])\./)?.[1];
-    const correctLetter = correctAnswer.match(/^([A-D])\./)?.[1] || correctAnswer;
+    const selectedLetter = letterOf(option);
+    const correctLetter = letterOf(correctAnswer);
 
-    const correct = selectedLetter === correctLetter;
+    const correct = selectedLetter !== null && selectedLetter === correctLetter;
     setIsCorrect(correct);
 
     // Track user answer with proper state update
@@ -94,7 +107,10 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
       isCorrect: correct,
       // Include additional metadata if available
       source: currentQ.source,
-      document_section: currentQ.document_section
+      document_section: currentQ.document_section,
+      // Without this the why_correct block in review mode never renders,
+      // even though the backend supplies the field.
+      why_correct: currentQ.why_correct
     };
 
     setUserAnswers(prev => [...prev, newAnswer]);
@@ -126,11 +142,28 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
     return (
       <motion.div className="quiz-container results" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
         <h2><Trophy size={22} aria-hidden="true" /> Learning Complete!</h2>
+        <div className="quiz-mascot">
+          {/* Half marks or better is a win worth celebrating; below that Ollie
+              thinks rather than cheers, so the praise still means something. */}
+          <Mascot
+            mood={score >= questions.length / 2 ? 'happy' : 'thinking'}
+            size={92}
+            message={
+              score === questions.length ? 'A perfect run!'
+                : score >= questions.length / 2 ? 'Nicely done!'
+                : "Let's read that again together."
+            }
+          />
+        </div>
         <div className="score-circle">
           <ScoreBurst />
           <span>{score}</span> / {questions.length}
         </div>
-        <p>{score === questions.length ? "Perfect Score! Excellent work!" : "Great job! Keep learning!"}</p>
+        <p>{score === questions.length
+          ? "Perfect score - you read every page properly."
+          : score >= questions.length / 2
+            ? "Good work. Review the ones you missed and try again."
+            : "Worth another read. The answers are all in the story."}</p>
         <div className="result-buttons">
           <button onClick={retakeQuiz} className="retake-btn"><RefreshCw size={16} aria-hidden="true" /> Retake Quiz</button>
           <button onClick={() => setReviewMode(true)} className="review-btn"><BookOpen size={16} aria-hidden="true" /> Review Answers</button>
@@ -173,8 +206,8 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
                   <div className="options-review-list">
                     {options.map((opt, i) => {
                       const letter = String.fromCharCode(65 + i);
-                      const isSelected = answer.selected === opt;
-                      const isCorrectOption = answer.correct === opt;
+                      const isSelected = letterOf(answer.selected) === letter;
+                      const isCorrectOption = letterOf(answer.correct) === letter;
                       let rowClass = 'option-review';
                       if (isCorrectOption) rowClass += ' option-review-correct';
                       else if (isSelected && !isCorrectOption) rowClass += ' option-review-wrong';

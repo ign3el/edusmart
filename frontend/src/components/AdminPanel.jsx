@@ -5,6 +5,8 @@ import './AdminPanel.css';
 import JobStatusViewer from './JobStatusViewer';
 import UserManagement from './UserManagement';
 import StoryManagement from './StoryManagement';
+import PlanManagement from './PlanManagement';
+import PromoCodeManagement from './PromoCodeManagement';
 
 const AdminPanel = ({ onPlayStory, onBack }) => {
     const [activeTab, setActiveTab] = useState('story-management');
@@ -17,19 +19,31 @@ const AdminPanel = ({ onPlayStory, onBack }) => {
                     <button onClick={onBack} className="admin-back-button"><ChevronLeft size={14} /> Back to Home</button>
                 </div>
                 <nav className="admin-panel-nav">
-                    <button 
+                    <button
                         className={`admin-nav-button ${activeTab === 'story-management' ? 'active' : ''}`}
                         onClick={() => setActiveTab('story-management')}
                     >
                         All Stories
                     </button>
-                    <button 
+                    <button
                         className={`admin-nav-button ${activeTab === 'users' ? 'active' : ''}`}
                         onClick={() => setActiveTab('users')}
                     >
                         Users
                     </button>
-                    <button 
+                    <button
+                        className={`admin-nav-button ${activeTab === 'plans' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('plans')}
+                    >
+                        Plans
+                    </button>
+                    <button
+                        className={`admin-nav-button ${activeTab === 'promo-codes' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('promo-codes')}
+                    >
+                        Promo Codes
+                    </button>
+                    <button
                         className={`admin-nav-button ${activeTab === 'jobs' ? 'active' : ''}`}
                         onClick={() => setActiveTab('jobs')}
                     >
@@ -48,6 +62,8 @@ const AdminPanel = ({ onPlayStory, onBack }) => {
                     >
                         {activeTab === 'story-management' && <StoryManagement onPlayStory={onPlayStory} />}
                         {activeTab === 'users' && <UserManagement />}
+                        {activeTab === 'plans' && <PlanManagement />}
+                        {activeTab === 'promo-codes' && <PromoCodeManagement />}
                         {activeTab === 'jobs' && <JobStatusViewer />}
                     </motion.div>
                 </AnimatePresence>

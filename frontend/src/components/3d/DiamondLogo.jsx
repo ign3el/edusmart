@@ -22,14 +22,14 @@ export function DiamondLogo({ position = [0, 3, 5], scale = 1 }) {
         <mesh ref={meshRef}>
           <octahedronGeometry args={[1, 0]} />
           <meshPhysicalMaterial
-            color="#6366f1" metalness={0.8} roughness={0.1}
+            color="#8b5cf6" metalness={0.8} roughness={0.1}
             transmission={0.3} clearcoat={1}
-            emissive="#6366f1" emissiveIntensity={0.2}
+            emissive="#8b5cf6" emissiveIntensity={0.2}
           />
         </mesh>
         <mesh ref={glowRef} scale={1.5}>
           <sphereGeometry args={[1, 16, 16]} />
-          <meshBasicMaterial color="#6366f1" transparent opacity={0.1} side={2} depthWrite={false} />
+          <meshBasicMaterial color="#8b5cf6" transparent opacity={0.1} side={2} depthWrite={false} />
         </mesh>
       </group>
     </Float>

@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.json" />
     
     <!-- Theme colors for mobile browsers -->
-    <meta name="theme-color" content="#7c3aed" />
+    <meta name="theme-color" content="#150d33" />
     <meta name="msapplication-TileColor" content="#7c3aed" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     
@@ -32,6 +32,13 @@
     <meta name="msapplication-TileImage" content="/icon-144.png" />
     <meta name="msapplication-config" content="/browserconfig.xml" />
     
+    <!-- Self-hosted fonts (see public/fonts/). Preload only the latin
+         subsets: they cover every glyph the UI paints, and preloading the
+         latin-ext files too would just be 60KB of unused bytes on first paint. -->
+    <link rel="preload" href="/fonts/baloo2-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/nunito-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/fonts/fonts.css" />
+
     <title>EduSmart - Interactive Learning</title>
   </head>
   <body>

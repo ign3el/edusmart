@@ -1,6 +1,6 @@
 {
   "a463fb2524d53a18648a6e22ce5b53e938c49fffaae6962987af454a39e01b57": {
-    "timestamp": 1784496164.872438,
+    "timestamp": 1784989807.2541356,
     "duplicate_info": {
       "hash": "a463fb2524d53a18648a6e22ce5b53e938c49fffaae6962987af454a39e01b57",
       "story_id": "6cea3376-d637-4ce4-9ab1-426d15996424",
@@ -20,6 +20,18 @@
           "path": "saved_stories/75d63aa4-9e53-4d6d-9f40-c4b499fb886a/Gr_5_Science_Food_and_Health_1.pdf",
           "source": "file_scan",
           "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        },
+        {
+          "story_id": "a2b1765f-ecfd-4b86-813c-88428aaa19fd",
+          "path": "saved_stories/a2b1765f-ecfd-4b86-813c-88428aaa19fd/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        },
+        {
+          "story_id": "b8555277-b415-4188-9be5-0b4592696eff",
+          "path": "generated_stories/b8555277-b415-4188-9be5-0b4592696eff/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
         }
       ],
       "saved_stories": [
@@ -34,13 +46,22 @@
           "path": "saved_stories/75d63aa4-9e53-4d6d-9f40-c4b499fb886a/Gr_5_Science_Food_and_Health_1.pdf",
           "source": "file_scan",
           "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        },
+        {
+          "story_id": "a2b1765f-ecfd-4b86-813c-88428aaa19fd",
+          "path": "saved_stories/a2b1765f-ecfd-4b86-813c-88428aaa19fd/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
         }
       ],
-      "generated_stories": []
+      "generated_stories": [
+        {
+          "story_id": "b8555277-b415-4188-9be5-0b4592696eff",
+          "path": "generated_stories/b8555277-b415-4188-9be5-0b4592696eff/Gr_5_Science_Food_and_Health_1.pdf",
+          "source": "file_scan",
+          "relative_path": "Gr_5_Science_Food_and_Health_1.pdf"
+        }
+      ]
     }
-  },
-  "d284bd8975d3e70388eb46182781d9d7fd62bbf5f0e4cbe474f7c9b0e9934031": {
-    "timestamp": 1784536674.6529138,
-    "duplicate_info": null
   }
 }

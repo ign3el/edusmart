@@ -1,10 +1,13 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Save, CheckCircle2 } from 'lucide-react'
+import { Save, CheckCircle2, Users, Lock } from 'lucide-react'
 import './SaveStoryModal.css'
 
 function SaveStoryModal({ jobId, onSave, onCancel }) {
   const [storyName, setStoryName] = useState('')
+  // Off by default: sharing is something the user opts into, never a default
+  // they have to notice and undo.
+  const [makePublic, setMakePublic] = useState(false)
   const [saving, setSaving] = useState(false)
   const [downloadMessage, setDownloadMessage] = useState('')
   const [downloadProgress, setDownloadProgress] = useState(0)
@@ -19,6 +22,7 @@ function SaveStoryModal({ jobId, onSave, onCancel }) {
     try {
       const formData = new FormData()
       formData.append('story_name', storyName.trim())
+      formData.append('make_public', makePublic ? 'true' : 'false')
       
       setDownloadProgress(35)
       
@@ -83,6 +87,26 @@ function SaveStoryModal({ jobId, onSave, onCancel }) {
           disabled={saving}
         />
         
+        <label className={`share-consent ${makePublic ? 'is-on' : ''}`}>
+          <input
+            type="checkbox"
+            checked={makePublic}
+            onChange={(e) => setMakePublic(e.target.checked)}
+            disabled={saving}
+          />
+          <span className="share-consent-body">
+            <span className="share-consent-title">
+              {makePublic ? <Users size={16} /> : <Lock size={16} />}
+              {makePublic ? 'Share with other readers' : 'Keep this story private'}
+            </span>
+            <span className="share-consent-hint">
+              {makePublic
+                ? 'Anyone who uploads the same file can open your story instead of waiting for a new one. They cannot edit or delete it.'
+                : 'Only you can open this story. Others who upload the same file will generate their own.'}
+            </span>
+          </span>
+        </label>
+
         <AnimatePresence>
           {downloadMessage && (
             <motion.div 

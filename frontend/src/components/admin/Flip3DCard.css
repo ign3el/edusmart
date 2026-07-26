@@ -3,6 +3,14 @@
   width: 100%;
 }
 
+/* Flipped card claims a second grid column so its edit face has more room
+   and neighboring cards visibly reflow around it, instead of just growing
+   taller in place. Grid auto-placement handles the reflow natively - no
+   animation library needed for the sibling shift itself. */
+.flip3d-outer--expanded {
+  grid-column: span 2;
+}
+
 .flip3d-tilt {
   width: 100%;
   height: 100%;
@@ -23,9 +31,10 @@
   -webkit-backface-visibility: hidden;
   border-radius: var(--radius-lg, 24px);
   border: 1px solid var(--edge, rgba(148, 163, 184, 0.12));
-  background: linear-gradient(150deg, rgba(15, 22, 66, 0.85), rgba(18, 31, 77, 0.8));
+  background: linear-gradient(150deg, rgba(34, 20, 74, 0.85), rgba(18, 31, 77, 0.8));
   box-shadow: var(--shadow-soft, 0 8px 24px rgba(0, 0, 0, 0.4));
   padding: 1.1rem;
+  overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   color: var(--ink-1);
@@ -47,7 +56,7 @@
   place-items: center;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(15, 22, 66, 0.55);
+  background: rgba(34, 20, 74, 0.55);
   backdrop-filter: blur(6px);
   color: var(--ink-2);
   cursor: pointer;
@@ -58,8 +67,8 @@
 
 .flip3d-handle:hover {
   color: var(--ink-1);
-  border-color: var(--accent-1, #6366f1);
-  background: rgba(99, 102, 241, 0.18);
+  border-color: var(--accent-1, #8b5cf6);
+  background: rgba(139, 92, 246, 0.18);
 }
 
 @media (max-width: 768px) {

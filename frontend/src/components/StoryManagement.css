@@ -87,7 +87,7 @@
 
 .filter-tab.active {
   background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  color: #04101f;
+  color: #1a0f3d;
   border-color: transparent;
 }
 
@@ -120,7 +120,7 @@
 .search-input:focus {
   outline: none;
   border-color: var(--accent-1);
-  box-shadow: 0 8px 25px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 8px 25px rgba(139, 92, 246, 0.2);
 }
 
 .clear-search {
@@ -194,9 +194,9 @@
 }
 
 .type-badge.generated {
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent-1, #818cf8);
-  border: 1px solid rgba(99, 102, 241, 0.35);
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--accent-1, #c4b5fd);
+  border: 1px solid rgba(139, 92, 246, 0.35);
 }
 
 .status-badge {
@@ -323,7 +323,7 @@
 }
 
 .save-btn,
-.play-btn,
+.story-play-btn,
 .delete-btn {
   display: inline-flex;
   align-items: center;
@@ -343,10 +343,10 @@
 
 .save-btn {
   background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  color: #04101f;
+  color: #1a0f3d;
 }
 
-.play-btn {
+.story-play-btn {
   background: rgba(255, 255, 255, 0.08);
   color: var(--ink-1);
   border: 1px solid var(--edge);
@@ -359,14 +359,14 @@
 }
 
 .save-btn:hover:not(:disabled),
-.play-btn:hover:not(:disabled),
+.story-play-btn:hover:not(:disabled),
 .delete-btn:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-soft);
 }
 
 .save-btn:disabled,
-.play-btn:disabled {
+.story-play-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -414,7 +414,7 @@
 .confirm-dialog-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 14, 39, 0.85);
+  background: rgba(26, 15, 58, 0.85);
   display: grid;
   place-items: center;
   z-index: 1000;
@@ -422,7 +422,7 @@
 }
 
 .confirm-dialog {
-  background: linear-gradient(150deg, rgba(15, 22, 66, 0.92), rgba(18, 31, 77, 0.85));
+  background: linear-gradient(150deg, rgba(34, 20, 74, 0.92), rgba(18, 31, 77, 0.85));
   border: 1.5px solid var(--edge);
   border-radius: var(--radius-lg);
   padding: 2rem;
@@ -502,7 +502,7 @@
   }
 
   .save-btn,
-  .play-btn,
+  .story-play-btn,
   .delete-btn {
     width: 100%;
   }

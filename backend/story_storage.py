@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 GENERATED_STORIES_DIR = "generated_stories"
 SAVED_STORIES_DIR = "saved_stories"
 STORY_TTL_HOURS = 24
+# outputs/ holds the live progressive-generation cache (audio_cache/*.mp3) and
+# per-job status JSON. Nothing in the codebase ever deleted these, so the folder
+# grew unbounded: 94 files / 77MB dating back to February on a disk already at
+# 79%. Every scene's audio is written here AND published to generated_stories/,
+# so once a story is delivered the cache copy is pure waste.
+OUTPUTS_TTL_HOURS = 24
+OUTPUTS_DIR = "outputs"
+# Log loudly once free space drops below this - a full disk breaks generation in
+# ways that look like unrelated application bugs.
+DISK_WARN_PERCENT = 90
 
 class StoryStorageManager:
     """Manages story folders in generated_stories with time-based cleanup"""
@@ -265,6 +275,60 @@ class StoryStorageManager:
         
         return deleted_count
     
+    def cleanup_outputs_cache(self) -> int:
+        """Delete outputs/ working files older than OUTPUTS_TTL_HOURS.
+
+        Deliberately mtime-based rather than metadata-based: these are transient
+        working files, not stories, and an in-flight job touches its files
+        continuously - so anything untouched for a full day is finished or dead
+        either way. The published copy under generated_stories/ is what the user
+        actually plays, and it has its own TTL.
+        """
+        cutoff = time.time() - (OUTPUTS_TTL_HOURS * 3600)
+        deleted = 0
+        freed = 0
+
+        for subdir in ("audio_cache", "status"):
+            dir_path = os.path.join(OUTPUTS_DIR, subdir)
+            if not os.path.isdir(dir_path):
+                continue
+            for name in os.listdir(dir_path):
+                file_path = os.path.join(dir_path, name)
+                try:
+                    if not os.path.isfile(file_path):
+                        continue
+                    if os.path.getmtime(file_path) >= cutoff:
+                        continue
+                    size = os.path.getsize(file_path)
+                    os.remove(file_path)
+                    deleted += 1
+                    freed += size
+                except FileNotFoundError:
+                    continue  # raced with an in-flight job, fine
+                except OSError as e:
+                    logger.warning(f"Could not remove stale output {file_path}: {e}")
+
+        if deleted:
+            logger.info(f"🧹 outputs/ cleanup: removed {deleted} file(s), freed {freed / 1048576:.1f}MB")
+        return deleted
+
+    def check_disk_pressure(self) -> None:
+        """Warn before a full disk turns into mystery generation failures."""
+        try:
+            usage = shutil.disk_usage("/")
+        except OSError as e:
+            logger.warning(f"Could not read disk usage: {e}")
+            return
+        used_pct = usage.used / usage.total * 100
+        free_gb = usage.free / 1073741824
+        if used_pct >= DISK_WARN_PERCENT:
+            logger.error(
+                f"⚠️ DISK PRESSURE: {used_pct:.0f}% used, only {free_gb:.1f}GB free. "
+                f"Story generation will start failing."
+            )
+        else:
+            logger.info(f"💾 Disk: {used_pct:.0f}% used, {free_gb:.1f}GB free")
+
     def list_generated_stories(self) -> list:
         """List all stories in generated_stories with metadata"""
         stories = []
@@ -469,6 +533,8 @@ async def cleanup_scheduler_task():
     while True:
         try:
             storage_manager.cleanup_expired_stories()
+            storage_manager.cleanup_outputs_cache()
+            storage_manager.check_disk_pressure()
         except Exception as e:
             logger.error(f"❌ Error in cleanup scheduler: {e}", exc_info=True)
             # Continue running even if cleanup fails

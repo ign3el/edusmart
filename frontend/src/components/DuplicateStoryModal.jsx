@@ -32,6 +32,10 @@ function DuplicateStoryModal({ isOpen, onClose, onLoadExisting, onCreateNew, dup
 
   if (!isOpen || !duplicateInfo) return null;
 
+  // The backend now says whose story this is. It used to report the *viewer* as
+  // the creator no matter who owned it, so this distinction could not be drawn.
+  const isOwn = duplicateInfo.is_own !== false;
+
   return (
     <AnimatePresence>
       <motion.div
@@ -51,7 +55,7 @@ function DuplicateStoryModal({ isOpen, onClose, onLoadExisting, onCreateNew, dup
         >
           <div className="duplicate-header">
             <div className="duplicate-icon"><Search size={32} aria-hidden="true" /></div>
-            <h2>Story Already Exists!</h2>
+            <h2>{isOwn ? 'You already made this!' : 'Someone already made this'}</h2>
             <button onClick={onClose} className="duplicate-close" aria-label="Close">
               <X size={18} aria-hidden="true" />
             </button>
@@ -60,13 +64,18 @@ function DuplicateStoryModal({ isOpen, onClose, onLoadExisting, onCreateNew, dup
           <div className="duplicate-content">
             <div className="duplicate-info-card">
               <p className="duplicate-message">
-                This file was already uploaded and processed recently.
+                {isOwn
+                  ? 'You uploaded this file before, so the story is ready to open.'
+                  : `${duplicateInfo.created_by} made a story from this file and chose to share it. You can read it, or make your own version.`}
               </p>
               
               <div className="duplicate-details">
                 <div className="detail-item">
                   <span className="detail-label">Created by</span>
-                  <span className="detail-value">{duplicateInfo.created_by}</span>
+                  <span className="detail-value">
+                    {duplicateInfo.created_by}
+                    {!isOwn && <span className="duplicate-shared-tag">shared</span>}
+                  </span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Created</span>

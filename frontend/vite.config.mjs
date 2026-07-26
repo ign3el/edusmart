@@ -22,6 +22,12 @@ export default defineConfig({
       }
     }
   },
+  // 29 console.log calls were shipping to production. Dropped as pure calls so
+  // they vanish from the bundle, while console.error/warn survive - those are
+  // the ones worth having in a user's devtools when something actually breaks.
+  esbuild: {
+    pure: ['console.log', 'console.debug', 'console.info'],
+  },
   build: {
     rollupOptions: {
       output: {

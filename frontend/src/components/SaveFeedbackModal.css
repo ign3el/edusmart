@@ -1,7 +1,7 @@
 .feedback-modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 14, 39, 0.85);
+  background: rgba(26, 15, 58, 0.85);
   display: grid;
   place-items: center;
   z-index: 1200;
@@ -11,7 +11,7 @@
 
 .feedback-modal-content {
   width: min(360px, 100%);
-  background: linear-gradient(150deg, rgba(15, 22, 66, 0.92), rgba(18, 31, 77, 0.85));
+  background: linear-gradient(150deg, rgba(34, 20, 74, 0.92), rgba(18, 31, 77, 0.85));
   border-radius: var(--radius-lg);
   padding: clamp(1.6rem, 5vw, 2.1rem);
   display: grid;

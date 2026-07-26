@@ -3,11 +3,11 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Home, BookOpen, FolderOpen, Settings, Save, Download, FileText,
-  Sparkles, RefreshCw, User, LogOut, Menu, X, Smartphone, Check
+  Sparkles, RefreshCw, User, LogOut, Menu, X, Smartphone, Check, CreditCard
 } from 'lucide-react'
 import './NavigationMenu.css'
 
-function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOfflineManager, onAdminClick, onProfile, onLogout, onSaveStory, onDownloadStory, isPlayingStory, currentStory, onShowFileViewer, onCheckUpdate }) {
+function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOfflineManager, onAdminClick, onProfile, onLogout, onSaveStory, onDownloadStory, isPlayingStory, currentStory, onShowFileViewer, onCheckUpdate, onPricing }) {
   const [isMobileOpen, setIsMobileOpen] = useState(false)
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
   const [showInstallPrompt, setShowInstallPrompt] = useState(false)
@@ -127,6 +127,11 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
         >
           <RefreshCw size={16} aria-hidden="true" className={isCheckingUpdate ? 'spin-icon' : ''} /> Update
         </button>
+        {onPricing && (
+          <button onClick={() => handleAction(onPricing)} className="menu-btn" title="Plans & Credits">
+            <CreditCard size={16} aria-hidden="true" /> Plans
+          </button>
+        )}
         {onProfile && (
           <button onClick={() => handleAction(onProfile)} className="menu-btn profile" title="Account">
             <User size={16} aria-hidden="true" /> {user?.email?.split('@')[0] || 'Account'}
@@ -199,6 +204,7 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
                     <div className="section-divider"></div>
                     <div>
                       <h4 className="section-header">Account</h4>
+                      {onPricing && <button onClick={() => handleAction(onPricing)} className="drawer-btn"><span className="icon"><CreditCard size={18} aria-hidden="true" /></span><span>Plans & Credits</span></button>}
                       <button onClick={() => { handleCheckUpdate(); setIsMobileOpen(false) }} className="drawer-btn" disabled={isCheckingUpdate}>
                         <span className="icon"><RefreshCw size={18} aria-hidden="true" className={isCheckingUpdate ? 'spin-icon' : ''} /></span><span>Check for Updates</span>
                       </button>

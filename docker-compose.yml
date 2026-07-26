@@ -21,14 +21,54 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - HF_TOKEN=${HF_TOKEN:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-https://edusmart.ign3el.com}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Concurrency limits. These bound simultaneous I/O, not CPU work, so
+      # they scale with expected in-flight requests rather than core count.
+      # MYSQL_POOL_SIZE is capped at 32 in code (mysql-connector's own
+      # CNX_POOL_MAXSIZE); the MySQL server allows 151 connections total.
+      # Raise these on bigger hardware - no rebuild required, just a restart.
+      - MYSQL_POOL_SIZE=${MYSQL_POOL_SIZE:-32}
+      - THREAD_POOL_WORKERS=${THREAD_POOL_WORKERS:-128}
+      - SQLITE_BUSY_TIMEOUT_MS=${SQLITE_BUSY_TIMEOUT_MS:-30000}
+      # Wire format requested from Kokoro. mp3 is ~66% smaller than wav for the
+      # same input and Kokoro encodes it itself, so it costs us no local CPU.
+      # Set to wav only to debug audio quality - it triples egress per scene.
+      - TTS_AUDIO_FORMAT=${TTS_AUDIO_FORMAT:-mp3}
+      # "cpu" (self-hosted Kokoro container) or "runpod" (RunPod Flash GPU
+      # endpoint). See RUNPOD_ENDPOINT_ID_KOKORO below.
+      - TTS_BACKEND=${TTS_BACKEND:-cpu}
+      - TTS_RUNPOD_FALLBACK_TO_CPU=${TTS_RUNPOD_FALLBACK_TO_CPU:-true}
+      - RUNPOD_TTS_TIMEOUT_S=${RUNPOD_TTS_TIMEOUT_S:-180}
+      # --- Generation queue (services/job_queue.py) ---
+      # GENERATION_WORKERS is the headline dial: how many stories generate at
+      # once, process-wide. It is what decides throughput, NOT how many users
+      # press upload at the same time - the rest wait in a durable queue.
+      # 4 suits 3 vCPUs with CPU-bound Kokoro. Raise it after the GPU move.
+      - GENERATION_WORKERS=${GENERATION_WORKERS:-4}
+      - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-200}
+      - MAX_JOBS_PER_USER=${MAX_JOBS_PER_USER:-3}
+      - QUEUE_POLL_SECONDS=${QUEUE_POLL_SECONDS:-2.0}
+      - QUEUE_RETENTION_HOURS=${QUEUE_RETENTION_HOURS:-48}
+      # Hard ceiling on one story. A fixed worker pool turns any hang into a
+      # permanent loss of capacity, so a wedged job is reclaimed rather than
+      # holding its worker until the next deploy.
+      - GENERATION_TIMEOUT_SECONDS=${GENERATION_TIMEOUT_SECONDS:-1800}
+      # --- Concurrency governors (services/concurrency.py) ---
+      # Process-wide ceilings on external calls, replacing the old per-story
+      # semaphores. MAX_CONCURRENT_TTS is the one to raise once Kokoro is on
+      # the GPU pod; MAX_CONCURRENT_IMAGES tracks the RunPod endpoint's own
+      # max-worker count.
+      - MAX_CONCURRENT_IMAGES=${MAX_CONCURRENT_IMAGES:-6}
+      - MAX_CONCURRENT_TTS=${MAX_CONCURRENT_TTS:-4}
+      - MAX_CONCURRENT_LLM=${MAX_CONCURRENT_LLM:-8}
+      - MAX_IMAGES_PER_STORY=${MAX_IMAGES_PER_STORY:-4}
       - RUNPOD_ENDPOINT_ID_FLUX=${RUNPOD_ENDPOINT_ID_FLUX:-}
       - RUNPOD_ENDPOINT_ID_A1111=${RUNPOD_ENDPOINT_ID_A1111:-}
       - RUNPOD_KEY=${RUNPOD_KEY:-}
       - RUNPOD_SEED=${RUNPOD_SEED:-20240601}
       - RUNPOD_MONTHLY_CAP_AED=${RUNPOD_MONTHLY_CAP_AED:-25}
       - RUNPOD_COST_AED_PER_IMAGE=${RUNPOD_COST_AED_PER_IMAGE:-0.02}
+      - RUNPOD_ENDPOINT_ID_KOKORO=${RUNPOD_ENDPOINT_ID_KOKORO:-}
       # TTS Configuration
       - CHATTERBOX_URL=http://kokoro-tts:8880
       - KOKORO_URL=http://kokoro-tts:8880
@@ -44,6 +84,18 @@ services:
       # JWT Configuration
       - JWT_SECRET=${JWT_SECRET}
       # Email Configuration
+      # Outbound mail abuse controls. /signup, /forgot-password and
+      # /resend-verification each make this server's SMTP account mail an
+      # address the caller chose, so they are budgeted per visitor IP.
+      # Signup is looser because a school or household shares one public IP.
+      # Under `uvicorn --workers N` the counters are per worker: divide by N.
+      - SIGNUP_RATE_MAX_ATTEMPTS=${SIGNUP_RATE_MAX_ATTEMPTS:-10}
+      - MAIL_RATE_MAX_ATTEMPTS=${MAIL_RATE_MAX_ATTEMPTS:-5}
+      - MAIL_RATE_WINDOW_SECONDS=${MAIL_RATE_WINDOW_SECONDS:-3600}
+      # Signup refuses these outright (null MX = the bounce lands in our inbox).
+      - BLOCKED_EMAIL_DOMAINS=${BLOCKED_EMAIL_DOMAINS:-example.com,example.net,example.org,example.edu,test.com,localhost}
+      # Addresses here are logged instead of sent - the safe target for probes.
+      - MAIL_SUPPRESS_DOMAINS=${MAIL_SUPPRESS_DOMAINS:-probe.edusmart.internal}
       - EMAIL_BACKEND=${EMAIL_BACKEND:-smtp}
       - MAIL_USERNAME=${MAIL_USERNAME}
       - MAIL_PASSWORD=${MAIL_PASSWORD}
@@ -53,8 +105,30 @@ services:
       - MAIL_STARTTLS=${MAIL_STARTTLS:-True}
       - MAIL_SSL_TLS=${MAIL_SSL_TLS:-False}
       - APP_URL=${APP_URL:-https://edusmart.ign3el.com}
+      # billing.py reads FRONTEND_URL for Stripe success/cancel/portal redirects.
+      # It was never passed - the code only worked because its hardcoded default
+      # happened to match production. Any domain change would have broken
+      # checkout redirects silently. Left empty by default on purpose: billing.py
+      # then falls back to APP_URL above, so there is one source of truth.
+      - FRONTEND_URL=${FRONTEND_URL:-}
+      # Stripe (Payment Layer) - credentials only, pricing lives in the DB
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Social sign-in. Empty by default: oauth_service reports the provider as
+      # unavailable and the UI hides its button, rather than the container
+      # failing to start. GOOGLE_CLIENT_ID must be the SAME value the frontend
+      # was built with - it is the audience the ID token is checked against, so
+      # a mismatch rejects every legitimate login.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - FACEBOOK_APP_ID=${FACEBOOK_APP_ID:-}
+      - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET:-}
     volumes:
-      - ./backend:/app
+      # NOTE: ./backend:/app is deliberately absent. It used to shadow the image's
+      # own `COPY . .` entirely, which meant production ran off the working
+      # directory rather than a built artifact: no rollback, no guarantee the
+      # image matched what was running, and 18 stray .bak files visible inside
+      # the container. Code now comes from the image; only data is mounted.
+      # Deploy with ./deploy.sh so each build is tagged and rollback works.
       - ./backend/outputs:/app/outputs
       - ./backend/uploads:/app/uploads
       - ./backend/saved_stories:/app/saved_stories
@@ -65,6 +139,15 @@ services:
     # ever fixed the ownership of the backend_db named volume.
     user: "1001:1001"
     restart: unless-stopped
+    # `restart: unless-stopped` only reacts to a dead process. This catches the
+    # more common production failure: uvicorn still running but wedged on an
+    # exhausted MySQL pool or a full disk. /api/health probes both.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - web_network
       - ai-services
@@ -73,12 +156,32 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Build-time config, sourced from the SAME .env as the backend so there
+      # is one file to manage. These three are public by design - Vite inlines
+      # them into a bundle anyone can read, and build args are recorded in
+      # `docker history`. Never add a secret here; MYSQL_PASSWORD, JWT_SECRET,
+      # MAIL_PASSWORD, STRIPE_SECRET_KEY and FACEBOOK_APP_SECRET stay backend
+      # runtime env vars and must never enter the build context.
+      #
+      # VITE_API_URL derives from APP_URL so the domain has a single source of
+      # truth; GOOGLE_CLIENT_ID feeds both the frontend build and the backend
+      # env, because a mismatch between those two rejects every valid login.
+      args:
+        VITE_API_URL: ${APP_URL:-https://edusmart.ign3el.com}
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+        VITE_FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
     container_name: edusmart-frontend
     ports:
       - "3004:80"
     depends_on:
       - backend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - web_network
 

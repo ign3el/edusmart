@@ -22,12 +22,21 @@ RUN pip install --upgrade pip setuptools && pip install -r requirements.txt
 # Verify imports
 RUN python -c "from pypdf import PdfReader; import docx; from langdetect import detect; print('All specified modules imported successfully during build.')"
 
+# Stamped by deploy.sh with the image tag, so /api/health can report exactly
+# which build is live. Placed after the pip layers so it never busts that cache.
+ARG BUILD_TAG=dev
+ENV BUILD_TAG=${BUILD_TAG}
+
 # Copy application code
 COPY . .
 
-# Create necessary directories at runtime (handled in main.py)
-# but we can ensure the base 'outputs' exists
-RUN mkdir -p uploads outputs saved_stories
+# Every directory the app writes to. These are all mount points in
+# docker-compose (bind mounts for media, a named volume for db_data), but they
+# must exist in the image too so a bare `docker run` of this image still works
+# and so the mount targets have the right ownership.
+RUN mkdir -p uploads outputs outputs/audio_cache outputs/status \
+        saved_stories generated_stories db_data \
+    && chown -R 1001:1001 /app
 
 EXPOSE 8000
 

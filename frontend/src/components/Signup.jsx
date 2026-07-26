@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
+import Mascot from './Mascot';
+import SocialAuthButtons from './SocialAuthButtons';
 import './Auth.css';
 
 // A validation utility function to check form data
@@ -112,21 +114,20 @@ export default function Signup({ onSwitchToLogin, onSuccess }) {
       await signup(formData.username, formData.email, formData.password, formData.passwordConfirm);
       setSignupSuccess(true);
     } catch (err) {
-      if (err.response?.data?.detail) {
-        const detail = err.response.data.detail;
-        if (Array.isArray(detail)) {
-          // Handle validation errors from backend
-          const errorMsg = detail.map(e => e.msg).join(', ');
-          setApiError(errorMsg);
-        } else if (detail.includes('email')) {
-          setApiError('Email already exists');
-        } else if (detail.includes('username')) {
-          setApiError('Username already taken');
-        } else {
-          setApiError(detail);
-        }
-      } else if (err.response?.status === 409) {
+      // Branch on the status code, never on words inside the message. The old
+      // version substring-matched detail for 'email' / 'username', which meant:
+      // the 409 branch below it was unreachable; "this email or username already
+      // exists" was reported as "Email already exists" even when the email was
+      // fine; and any unrelated 400 that happened to contain the word 'email'
+      // was rewritten into a false duplicate warning. The backend had to word
+      // its other errors around this matcher to avoid tripping it.
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409) {
         setApiError('An account with this email or username already exists');
+      } else if (Array.isArray(detail)) {
+        setApiError(detail.map(e => e.msg).join(', '));
+      } else if (typeof detail === 'string' && detail) {
+        setApiError(detail);
       } else {
         setApiError('An unexpected error occurred. Please try again');
       }
@@ -170,8 +171,11 @@ export default function Signup({ onSwitchToLogin, onSuccess }) {
       exit={{ opacity: 0, y: -20 }}
     >
       <div className="auth-box">
+        <div className="auth-mascot">
+          <Mascot mood={loading ? 'thinking' : 'idle'} size={84} trackPointer />
+        </div>
         <h2>Create Account</h2>
-        <p className="auth-subtitle">Join EduSmart and start your learning journey</p>
+        <p className="auth-subtitle">One account, and every lesson you upload becomes a story.</p>
         
         <form onSubmit={handleSubmit} noValidate>
           <div className="input-group">
@@ -270,6 +274,8 @@ export default function Signup({ onSwitchToLogin, onSuccess }) {
             {loading ? 'Creating Account...' : 'Sign Up'}
           </button>
         </form>
+
+        <SocialAuthButtons mode="signup" />
         
         <p className="auth-switch">
           Already have an account?{' '}

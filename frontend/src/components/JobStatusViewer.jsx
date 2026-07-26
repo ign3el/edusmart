@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
   Search, X, CheckCircle2, Loader2, XCircle, Circle, Calendar, Hash,
-  Image as ImageIcon, Volume2, ChevronLeft, ChevronRight
+  Image as ImageIcon, Volume2, ChevronLeft, ChevronRight, Ban, RefreshCw, Trash2
 } from 'lucide-react';
-import { getJobStateTableData } from '../services/api';
+import { getJobStateTableData, cancelStuckJob, retryFailedJob, deleteJob } from '../services/api';
 import { getItemsPerPage } from '../utils/responsiveUtils';
 import Flip3DCard from './admin/Flip3DCard';
 import './JobStatusViewer.css';
@@ -54,32 +54,88 @@ const JobStatusViewer = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(getItemsPerPage(window.innerWidth));
+  const [cancellingId, setCancellingId] = useState(null);
+  const [retryingId, setRetryingId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [notice, setNotice] = useState('');
+
+  const fetchData = useCallback(async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const [jobsResponse, scenesResponse] = await Promise.all([
+        getJobStateTableData('stories'),
+        getJobStateTableData('scenes')
+      ]);
+      setJobs(jobsResponse.content || []);
+      setScenes(scenesResponse.content || []);
+    } catch (err) {
+      setError('Failed to load job status data.');
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      setIsLoading(true);
-      setError('');
-      try {
-        const [jobsResponse, scenesResponse] = await Promise.all([
-          getJobStateTableData('stories'),
-          getJobStateTableData('scenes')
-        ]);
-        setJobs(jobsResponse.content || []);
-        setScenes(scenesResponse.content || []);
-      } catch (err) {
-        setError('Failed to load job status data.');
-        console.error(err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
     fetchData();
 
     const handleResize = () => setItemsPerPage(getItemsPerPage(window.innerWidth));
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [fetchData]);
+
+  const handleCancel = async (storyId) => {
+    if (!window.confirm('Mark this job as failed and refund the credit?')) return;
+    setCancellingId(storyId);
+    try {
+      await cancelStuckJob(storyId);
+      await fetchData();
+    } catch (err) {
+      setError('Failed to cancel job: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  // A failed job is only worth retrying if it actually has recoverable scenes.
+  // A job that died before any scene rows were written has nothing to rebuild
+  // from - the uploaded document is gone - so it can only be deleted.
+  const retryableCount = (storyId) =>
+    (scenesByJobId[storyId] || []).filter(
+      (s) => s.image_status !== 'completed' || s.audio_status !== 'completed'
+    ).length;
+
+  const handleRetry = async (storyId) => {
+    setRetryingId(storyId);
+    setError('');
+    setNotice('');
+    try {
+      const result = await retryFailedJob(storyId);
+      setNotice(result.message || 'Retry started.');
+      await fetchData();
+    } catch (err) {
+      setError('Retry failed: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setRetryingId(null);
+    }
+  };
+
+  const handleDelete = async (storyId) => {
+    if (!window.confirm('Permanently delete this job and all of its files? This cannot be undone.')) return;
+    setDeletingId(storyId);
+    setError('');
+    setNotice('');
+    try {
+      await deleteJob(storyId);
+      setNotice('Job deleted.');
+      await fetchData();
+    } catch (err) {
+      setError('Delete failed: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   useEffect(() => {
     setPage(1);
@@ -106,12 +162,14 @@ const JobStatusViewer = () => {
     return <div className="loading-message">Loading job statuses...</div>;
   }
 
-  if (error) {
+  if (error && jobs.length === 0) {
     return <div className="error-message">{error}</div>;
   }
 
   return (
     <div className="job-status-viewer">
+      {error && jobs.length > 0 && <div className="error-message inline">{error}</div>}
+      {notice && <div className="job-notice">{notice}</div>}
       <div className="search-container">
         <Search size={18} className="search-icon" />
         <input
@@ -155,6 +213,42 @@ const JobStatusViewer = () => {
                       </div>
                       <p className="job-progress-text">{job.completed_scenes} / {job.total_scenes} scenes</p>
                       <p className="job-card-date"><Calendar size={13} /> {formatDate(job.created_at)}</p>
+                      {job.status === 'processing' && (
+                        <button
+                          type="button"
+                          className="job-cancel-btn"
+                          onClick={(e) => { e.stopPropagation(); handleCancel(job.story_id); }}
+                          disabled={cancellingId === job.story_id}
+                        >
+                          <Ban size={13} /> {cancellingId === job.story_id ? 'Cancelling...' : 'Cancel stuck job'}
+                        </button>
+                      )}
+                      {job.status === 'failed' && (
+                        <div className="job-actions">
+                          {retryableCount(job.story_id) > 0 && (
+                            <button
+                              type="button"
+                              className="job-retry-btn"
+                              onClick={(e) => { e.stopPropagation(); handleRetry(job.story_id); }}
+                              disabled={retryingId === job.story_id}
+                              title="Regenerate only the images/audio that failed, reusing the stored scene text"
+                            >
+                              <RefreshCw size={13} />
+                              {retryingId === job.story_id
+                                ? 'Retrying...'
+                                : `Retry ${retryableCount(job.story_id)} scene${retryableCount(job.story_id) === 1 ? '' : 's'}`}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="job-delete-btn"
+                            onClick={(e) => { e.stopPropagation(); handleDelete(job.story_id); }}
+                            disabled={deletingId === job.story_id}
+                          >
+                            <Trash2 size={13} /> {deletingId === job.story_id ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   }
                   back={

@@ -6,11 +6,11 @@
 .duplicate-overlay,
 .duplicate-modal {
   /* Color palette */
-  --modal-bg-start: #0c1528;
-  --modal-bg-end: #0a0f1c;
+  --modal-bg-start: #1e1247;
+  --modal-bg-end: #1a0f3d;
   --modal-border: #e0e0e0;
   --modal-shadow: rgba(168, 85, 247, 0.4);
-  --overlay-bg: rgba(5, 11, 22, 0.95);
+  --overlay-bg: rgba(18, 11, 44, 0.95);
   
   /* Text colors */
   --text-primary: #f0f9ff;
@@ -57,7 +57,7 @@
   width: min(550px, 90vw);
   max-height: 85vh;
   background: linear-gradient(150deg, var(--modal-bg-start), var(--modal-bg-end));
-  background: #1a1f35; /* Fallback solid color */
+  background: #2b1a63; /* Fallback solid color */
   border: 1px solid var(--modal-border);
   border-radius: var(--radius-lg);
   box-shadow: 0 30px 60px var(--modal-shadow),
@@ -393,4 +393,20 @@
   .duplicate-actions {
     gap: 0.75rem;
   }
+}
+
+/* Shared-by-someone-else stories get a visible marker: the creator's name is
+   the whole point of this modal and used to be wrong. */
+.duplicate-shared-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #c4b5fd;
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(168, 85, 247, 0.35);
 }

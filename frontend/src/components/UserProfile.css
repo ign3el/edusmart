@@ -68,7 +68,7 @@
 }
 
 .profile-card {
-  background: linear-gradient(150deg, rgba(12, 21, 40, 0.7), rgba(12, 21, 40, 0.55));
+  background: linear-gradient(150deg, rgba(30, 18, 66, 0.7), rgba(30, 18, 66, 0.55));
   border: 1px solid var(--edge);
   border-radius: var(--radius-lg);
   padding: 2rem;
@@ -182,7 +182,7 @@
 
 .save-button {
   background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  color: #04101f;
+  color: #1a0f3d;
   border: none;
   box-shadow: var(--shadow-soft);
 }

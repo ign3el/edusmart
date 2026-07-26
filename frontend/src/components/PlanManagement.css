@@ -1,0 +1,175 @@
+.plan-management {
+  color: var(--ink-1, #e6e9f2);
+}
+
+.management-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.management-header h2 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.plan-management-note {
+  color: var(--ink-2, #9aa3b5);
+  font-size: 0.85rem;
+  margin: 0;
+  flex: 1;
+}
+
+.refresh-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--edge, rgba(148,163,184,0.12));
+  border-radius: 10px;
+  padding: 0.5rem 0.9rem;
+  color: var(--ink-1, #e6e9f2);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.error-message {
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.3);
+  color: #ff8a8a;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  margin-bottom: 1rem;
+}
+
+.plans-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: end;
+  background: var(--bg-card, rgba(36,20,86,0.9));
+  border: 1px solid var(--edge, rgba(148,163,184,0.12));
+  border-radius: 14px;
+  padding: 1rem;
+}
+
+.plan-row.inactive {
+  opacity: 0.55;
+}
+
+.plan-row-key {
+  font-family: monospace;
+  font-weight: 700;
+  color: var(--accent-2, #22d3ee);
+  align-self: center;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  flex: 0 0 auto;
+  min-width: 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.recommended-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+  font-size: 0.65rem;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.field-label-text {
+  color: var(--ink-2, #9aa3b5);
+}
+
+.field-label input,
+.field-label textarea {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge, rgba(148,163,184,0.12));
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  color: var(--ink-1, #e6e9f2);
+  font-size: 0.85rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.field-label textarea {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.plan-row-description,
+.plan-row-features {
+  flex-basis: 100%;
+}
+
+.plan-row-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.plan-row-actions button {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--edge, rgba(148,163,184,0.12));
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.save-btn {
+  background: var(--accent-gradient, linear-gradient(135deg, #8b5cf6, #22d3ee));
+  color: #150d33;
+  border: none !important;
+  font-weight: 700;
+}
+
+.toggle-btn {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-1, #e6e9f2);
+}
+
+.toggle-btn.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+}
+
+@media (max-width: 768px) {
+  .plan-row-actions {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+  .plan-row-actions button {
+    flex: 1;
+    justify-content: center;
+  }
+}

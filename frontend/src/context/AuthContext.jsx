@@ -95,6 +95,20 @@ export const AuthProvider = ({ children }) => {
     await fetchCurrentUser();
   }, [fetchCurrentUser]);
 
+  // Social sign-in (Google / Facebook).
+  // The provider token is verified server-side - nothing here decides who the
+  // user is. The backend returns the same JWT password login does, so the
+  // storage and fetch below are deliberately identical to login().
+  const socialLogin = useCallback(async (provider, token) => {
+    const response = await apiClient.post(`/api/auth/social/${provider}`, { token });
+
+    const { access_token } = response.data;
+    localStorage.setItem('auth_token', access_token);
+    setToken(access_token);
+
+    await fetchCurrentUser();
+  }, [fetchCurrentUser]);
+
   // Logout function
   const logout = useCallback(() => {
     localStorage.removeItem('auth_token');
@@ -110,6 +124,7 @@ export const AuthProvider = ({ children }) => {
     isAuthenticated: !!user,
     signup,
     login,
+    socialLogin,
     logout,
     resendVerificationEmail,
   }), [user, token, isLoading]);

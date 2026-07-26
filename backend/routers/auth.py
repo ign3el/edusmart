@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import Optional
@@ -30,6 +31,94 @@ class RateLimiter:
         return True
 
 _rate_limiter = RateLimiter()
+
+# --- Outbound mail abuse controls ---
+#
+# Three endpoints make this server's SMTP account send a message to an address
+# the caller supplies: /signup, /forgot-password and /resend-verification. None
+# of them required credentials and none of them were throttled, which made the
+# app an open mail amplifier - a loop against any one of them exhausts the
+# provider's daily send quota, delivers unsolicited mail to third parties under
+# the account holder's name, and gets the sending account suspended.
+#
+# Signup gets the looser budget on purpose: a classroom or a family shares one
+# public IP, and several genuine signups from one address in an hour is normal.
+# Password reset and resend have no such pattern, so they are tighter.
+#
+# NOTE: RateLimiter is in-process. Under `uvicorn --workers N` each worker keeps
+# its own counters, so the effective limit is N x these values. Divide the env
+# values by the worker count, or move the counters to Redis, when that lands.
+SIGNUP_RATE_MAX_ATTEMPTS = max(1, int(os.getenv('SIGNUP_RATE_MAX_ATTEMPTS', '10')))
+MAIL_RATE_MAX_ATTEMPTS = max(1, int(os.getenv('MAIL_RATE_MAX_ATTEMPTS', '5')))
+MAIL_RATE_WINDOW_SECONDS = max(1, int(os.getenv('MAIL_RATE_WINDOW_SECONDS', '3600')))
+
+# Domains that can never receive a real message. RFC 2606/6761 reserves these
+# for documentation and testing; example.com publishes a null MX, so every send
+# to it bounces straight back into the sending account's own inbox. Rejecting
+# them also keeps junk rows out of the users table.
+BLOCKED_EMAIL_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv(
+        'BLOCKED_EMAIL_DOMAINS',
+        'example.com,example.net,example.org,example.edu,test.com,localhost',
+    ).split(',')
+    if d.strip()
+}
+BLOCKED_EMAIL_SUFFIXES = ('.test', '.invalid', '.example', '.localhost', '.local')
+
+
+def _guard_mail_rate(request, bucket: str, max_attempts: int) -> None:
+    """429 when one IP has asked this endpoint to send too much mail.
+
+    Bucketed per endpoint so a burst of password resets cannot lock out signup
+    (and vice versa) for everyone sharing that IP.
+    """
+    ip = client_ip(request)
+    if not _rate_limiter.check(f'mail:{bucket}:{ip}', max_attempts=max_attempts,
+                               window_seconds=MAIL_RATE_WINDOW_SECONDS):
+        logger.warning(
+            f'Mail rate limit hit: bucket={bucket} ip={ip} '
+            f'({max_attempts}/{MAIL_RATE_WINDOW_SECONDS}s)'
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many requests from this connection. Please try again later.',
+        )
+
+
+def _reject_undeliverable(address: str) -> None:
+    """Refuse addresses that provably cannot receive mail.
+
+    The wording used to have to avoid the words 'email' and 'username': the
+    signup form substring-matched this detail string and would rewrite either
+    into 'already exists'. That matcher is gone - Signup.jsx branches on the 409
+    status now - so this text is free to say whatever is clearest to the user.
+    """
+    domain = address.rsplit('@', 1)[-1].strip().lower()
+    if domain in BLOCKED_EMAIL_DOMAINS or domain.endswith(BLOCKED_EMAIL_SUFFIXES):
+        logger.warning(f'Rejected signup for undeliverable domain: {domain}')
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='That address cannot receive mail. Please use a real inbox you can open.',
+        )
+
+
+def client_ip(request) -> str:
+    """The real visitor IP, for rate-limit bucketing.
+
+    request.client.host is the frontend container's address - every visitor
+    looks identical - so it is only the last resort. X-Real-IP is set by the
+    host nginx from $remote_addr, which the real_ip module has already restored
+    from CF-Connecting-IP for Cloudflare peers only; a client cannot overwrite
+    it. X-Forwarded-For is deliberately NOT trusted here: it is client-appendable
+    and picking an entry out of it is guesswork.
+    """
+    if request is None:
+        return "unknown"
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "unknown"
 
 # Create a new router for auth endpoints
 router = APIRouter(
@@ -109,11 +198,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 # --- Authentication Endpoints ---
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def signup(request: SignupRequest):
+def signup(request: SignupRequest, http_request: Request):
     """
     Handles user registration.
     Checks for existing email/username and creates a new user if they don't exist.
     """
+    # Both guards run before any database work, so a refused attempt costs
+    # nothing and leaves no row behind.
+    _guard_mail_rate(http_request, 'signup', SIGNUP_RATE_MAX_ATTEMPTS)
+    _reject_undeliverable(request.email)
+
     logger.info(f"Signup attempt for email: {request.email}, username: {request.username}")
     
     # Check if a user with that email or username already exists to provide a clear error.
@@ -157,7 +251,7 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
     Note: The 'username' field accepts EITHER username OR email.
     """
     # Rate limiting
-    ip = request.client.host if request else "unknown"
+    ip = client_ip(request)
     if not _rate_limiter.check(ip):
         raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
     
@@ -195,6 +289,109 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
     
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- Social sign-in (Google / Facebook) -------------------------------------
+#
+# The browser proves who it is to the provider, hands us the resulting token,
+# and we verify that token server-side before trusting a single field in it.
+# On success this mints exactly the same JWT that password login does, so every
+# protected route and the admin gate are untouched by this feature.
+
+from services import oauth_service
+
+
+class SocialAuthRequest(BaseModel):
+    """A provider-issued token. Google sends a JWT; Facebook an access token."""
+    token: str = Field(..., min_length=10, max_length=8192)
+
+
+@router.get("/social/providers", status_code=status.HTTP_200_OK)
+def social_providers():
+    """Lets the UI hide buttons for providers this server has no keys for."""
+    return {
+        "google": oauth_service.google_enabled(),
+        "facebook": oauth_service.facebook_enabled(),
+    }
+
+
+def _mark_verified(user_id: int) -> None:
+    """A social provider vouched for the address, so release the email gate."""
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s", (user_id,))
+    except Exception as e:
+        logger.error(f"Failed to mark user {user_id} verified after social login: {e}")
+
+
+def _login_or_create_social_user(profile: dict) -> User:
+    """Resolves a verified social profile to an account, creating one if needed."""
+    provider = profile["provider"]
+    provider_user_id = profile["provider_user_id"]
+    email = profile["email"]
+
+    # 1. This identity is already linked - the common path.
+    user = UserOperations.get_by_provider(provider, provider_user_id)
+    if user:
+        logger.info(f"Social login via {provider} for existing user {user['email']}")
+        return user
+
+    # 2. An account already owns this address. Linking is only safe because
+    #    oauth_service refuses to return an unverified email - otherwise anyone
+    #    could register someone else's address at a provider and inherit their
+    #    account here.
+    existing = UserOperations.get_by_email(email)
+    if existing:
+        already = existing.get("provider_user_id")
+        if already and str(already) != str(provider_user_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This email is already linked to a different social account.",
+            )
+        if not already and not UserOperations.link_provider(
+            existing["id"], provider, provider_user_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Could not link this account. Please sign in with your password.",
+            )
+        if not existing.get("is_verified"):
+            _mark_verified(existing["id"])
+        logger.info(f"Linked {provider} identity to existing user {email}")
+        return UserOperations.get_by_id(existing["id"])
+
+    # 3. Nobody here yet - create the account.
+    seed = profile.get("name") or email.split("@")[0]
+    username = UserOperations.generate_unique_username(seed)
+    user = UserOperations.create_social(email, username, provider, provider_user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create your account. Please try again.",
+        )
+    logger.info(f"New user '{username}' created via {provider}")
+    return user
+
+
+@router.post("/social/{provider}", response_model=TokenResponse)
+def social_login(provider: str, body: SocialAuthRequest, request: Request):
+    """Verifies a provider token and returns our own JWT."""
+    ip = client_ip(request)
+    if not _rate_limiter.check(f"social:{ip}", max_attempts=10, window_seconds=60):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many sign-in attempts. Please try again later.",
+        )
+
+    try:
+        profile = oauth_service.verify_social_token(provider, body.token)
+    except oauth_service.OAuthError as e:
+        logger.warning(f"Social sign-in rejected ({provider}) from {ip}: {e}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
+    user = _login_or_create_social_user(profile)
+    access_token = create_access_token(data={"sub": user["email"]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @router.get("/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     """
@@ -211,10 +408,15 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     )
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
-def resend_verification_email(email: EmailStr):
+def resend_verification_email(email: EmailStr, http_request: Request):
     """
     Resends the verification email. Has a 3-minute cooldown to prevent abuse.
     """
+    # The cooldown below is keyed on user id, so it does nothing against a caller
+    # cycling through addresses - one send each, unlimited. This is the per-IP
+    # budget that actually bounds outbound volume.
+    _guard_mail_rate(http_request, 'resend', MAIL_RATE_MAX_ATTEMPTS)
+
     user = UserOperations.get_by_email(email)
     if not user:
         # Don't reveal whether email exists for security
@@ -268,11 +470,17 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
-def forgot_password(request: ForgotPasswordRequest):
+def forgot_password(request: ForgotPasswordRequest, http_request: Request):
     """
     Sends a password reset email to the user.
     Always returns success to avoid revealing which emails are registered.
     """
+    # Rate limited on the IP, not the address: the endpoint answers identically
+    # for registered and unregistered addresses (deliberately, to avoid an
+    # account-enumeration oracle), so the caller's connection is the only thing
+    # left to budget.
+    _guard_mail_rate(http_request, 'reset', MAIL_RATE_MAX_ATTEMPTS)
+
     user = UserOperations.get_by_email(request.email)
     
     # Always return success, don't reveal if email exists
@@ -280,6 +488,16 @@ def forgot_password(request: ForgotPasswordRequest):
         logger.info(f"Password reset requested for non-existent email: {request.email}")
         return {"message": "If this email is registered, a password reset link has been sent."}
     
+    # Nothing to reset on a social-only account. The response below is
+    # deliberately identical either way - saying "that account uses Google"
+    # here would turn this endpoint into an account-enumeration oracle.
+    if not user.get('password_hash'):
+        logger.info(
+            f"Password reset skipped for social-only account: {request.email} "
+            f"({user.get('auth_provider')})"
+        )
+        return {"message": "If this email is registered, a password reset link has been sent."}
+
     try:
         token = UserOperations.create_password_reset_token(user['id'])
         send_password_reset_email(request.email, token)
@@ -372,6 +590,16 @@ def change_password(
     """
     from auth import verify_password, get_password_hash
     
+    # A social-only account has no hash to check. Without this, bcrypt is handed
+    # None and the endpoint 500s instead of explaining the situation.
+    if not current_user.get('password_hash'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=("This account signs in with "
+                    f"{current_user.get('auth_provider', 'a social provider').title()}, "
+                    "so it has no password to change."),
+        )
+
     # Verify current password
     if not verify_password(request.current_password, current_user['password_hash']):
         raise HTTPException(

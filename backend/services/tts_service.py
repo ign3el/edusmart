@@ -37,11 +37,14 @@ class KokoroTTSClient:
         """
         endpoint = f"{self.base_url}/v1/audio/speech"
         
+        from config import Config
+
         payload = {
             "model": "kokoro",
             "input": text,
             "voice": voice,
-            "response_format": "wav",
+            # See kokoro_client: "wav" here produced RIFF bytes in .mp3 files.
+            "response_format": Config.TTS_AUDIO_FORMAT,
             "speed": speed
         }
 

@@ -1,4 +1,44 @@
-<svg width="192" height="192" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
-  <rect width="192" height="192" fill="#7c3aed"/>
-  <text x="96" y="120" font-family="Arial, sans-serif" font-size="80" font-weight="bold" fill="white" text-anchor="middle">ES</text>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2b1a63"/>
+      <stop offset="100%" stop-color="#150d33"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="belly" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#c4b5fd"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <circle cx="256" cy="268" r="205" fill="url(#glow)"/>
+
+  <!-- Owl, scaled up from the in-app Mascot so the two read as the same
+       character. Kept inside a 78% safe zone so maskable/round crops on
+       Android don't slice the ear tufts off. -->
+  <g transform="translate(256 268) scale(3.05) translate(-60 -62)">
+    <path d="M30 40 L26 20 L44 32 Z" fill="url(#body)"/>
+    <path d="M90 40 L94 20 L76 32 Z" fill="url(#body)"/>
+    <ellipse cx="60" cy="62" rx="38" ry="42" fill="url(#body)"/>
+    <ellipse cx="60" cy="72" rx="25" ry="29" fill="url(#belly)"/>
+    <path d="M24 56 q-10 18 2 34 q10 6 12 -6 q-8 -14 -4 -28 Z" fill="#7c3aed"/>
+    <path d="M96 56 q10 18 -2 34 q-10 6 -12 -6 q8 -14 4 -28 Z" fill="#7c3aed"/>
+    <circle cx="47" cy="56" r="13" fill="#fdfcff"/>
+    <circle cx="73" cy="56" r="13" fill="#fdfcff"/>
+    <circle cx="47" cy="57" r="6.4" fill="#1d1147"/>
+    <circle cx="73" cy="57" r="6.4" fill="#1d1147"/>
+    <circle cx="49.4" cy="54.4" r="2.2" fill="#fdfcff"/>
+    <circle cx="75.4" cy="54.4" r="2.2" fill="#fdfcff"/>
+    <path d="M60 64 l-7 8 h14 Z" fill="#fbbf24"/>
+    <ellipse cx="35" cy="70" rx="6" ry="4" fill="#f472b6" opacity="0.5"/>
+    <ellipse cx="85" cy="70" rx="6" ry="4" fill="#f472b6" opacity="0.5"/>
+  </g>
 </svg>

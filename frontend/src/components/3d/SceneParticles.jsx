@@ -29,7 +29,7 @@ export function SceneParticles({ count = 50 }) {
         size={0.15}
         transparent
         opacity={0.4}
-        color="#818cf8"
+        color="#c4b5fd"
         sizeAttenuation
         depthWrite={false}
       />

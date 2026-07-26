@@ -32,6 +32,24 @@ export const getJobStateTableData = async (tableName) => {
   return response.data;
 };
 
+export const cancelStuckJob = async (storyId) => {
+  const response = await apiClient.post(`/api/admin/stories/${storyId}/cancel`);
+  return response.data;
+};
+
+// Repairs a failed job in place - regenerates only the scenes whose image or
+// audio is missing, reusing the stored scene text and image prompt. Does NOT
+// re-run the story text: the source document is deleted after processing.
+export const retryFailedJob = async (storyId) => {
+  const response = await apiClient.post(`/api/admin/stories/${storyId}/retry`);
+  return response.data;
+};
+
+export const deleteJob = async (storyId) => {
+  const response = await apiClient.delete(`/api/admin/stories/${storyId}`);
+  return response.data;
+};
+
 export const generateTestSpeech = async (settings) => {
   const { text, language, speed, silence } = settings;
   const response = await apiClient.post('/api/admin/tts/test', {
@@ -58,5 +76,36 @@ export const markQuizComplete = async (storyId) => {
   return response.data;
 };
 
+// --- Billing Functions ---
+// Pricing itself lives server-side in the subscription_plans table, not here -
+// getPlans() always reflects whatever an admin has configured, live.
+
+export const getPlans = async () => {
+  const response = await apiClient.get('/api/billing/plans');
+  return response.data;
+};
+
+export const getBillingBalance = async () => {
+  const response = await apiClient.get('/api/billing/balance');
+  return response.data;
+};
+
+export const redeemPromoCode = async (code) => {
+  const response = await apiClient.post('/api/billing/redeem-promo', { code });
+  return response.data;
+};
+
+export const createCheckoutSession = async (tierKey, promoCode) => {
+  const response = await apiClient.post('/api/billing/checkout', {
+    tier_key: tierKey,
+    promo_code: promoCode || undefined,
+  });
+  return response.data;
+};
+
+export const createBillingPortalSession = async () => {
+  const response = await apiClient.post('/api/billing/portal');
+  return response.data;
+};
 
 export default apiClient;

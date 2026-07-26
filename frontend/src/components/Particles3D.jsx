@@ -20,7 +20,7 @@ export function Particles3D({ count = 200, spread = 50, speed = 0.05 }) {
         size={0.3}
         transparent
         opacity={0.6}
-        color="#6366f1"
+        color="#8b5cf6"
         sizeAttenuation
         depthWrite={false}
       />

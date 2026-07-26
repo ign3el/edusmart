@@ -47,7 +47,7 @@
 .search-input:focus {
   outline: none;
   border-color: var(--accent-1);
-  box-shadow: 0 8px 25px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 8px 25px rgba(139, 92, 246, 0.2);
 }
 
 .clear-search {
@@ -141,6 +141,95 @@
   margin: 0;
   font-size: 0.82rem;
   color: var(--ink-2);
+}
+
+.job-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 0.5rem;
+}
+
+.job-retry-btn,
+.job-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.job-retry-btn {
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.35);
+}
+
+.job-delete-btn {
+  background: rgba(239, 68, 68, 0.12);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.job-retry-btn:hover:not(:disabled),
+.job-delete-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.job-delete-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+}
+
+.job-retry-btn:disabled,
+.job-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.job-notice {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #6ee7b7;
+  font-size: 0.85rem;
+}
+
+/* Touch targets stay comfortable on a phone. */
+@media (max-width: 768px) {
+  .job-retry-btn,
+  .job-delete-btn {
+    padding: 0.5rem 0.85rem;
+    font-size: 0.8rem;
+  }
+}
+
+.job-cancel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: auto;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.job-cancel-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .job-card-date {

@@ -1,0 +1,124 @@
+/* Social sign-in block. Palette matches Auth.css: violet #8b5cf6 / cyan #22d3ee
+   on the dark card, slate text. Mobile-first - every control clears 44px. */
+
+.social-auth {
+  margin-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.social-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: #64748b;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+
+.social-divider::before,
+.social-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.35), transparent);
+}
+
+.social-divider span {
+  white-space: nowrap;
+}
+
+/* Google renders its own button inside this slot, so the height is Google's.
+   min-height keeps the form from jumping while the SDK is still loading. */
+.social-google-slot {
+  min-height: 44px;
+  display: flex;
+  justify-content: center;
+}
+
+.social-google-slot > div {
+  max-width: 100%;
+}
+
+.social-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.7rem 1rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+.social-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.social-btn:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.social-btn:not(:disabled):active {
+  transform: translateY(0);
+}
+
+.social-btn:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+.social-btn--facebook {
+  background: #1877f2;
+  color: #ffffff;
+}
+
+.social-btn--facebook:not(:disabled):hover {
+  background: #166fe5;
+  box-shadow: 0 6px 18px rgba(24, 119, 242, 0.35);
+}
+
+.social-btn svg {
+  flex-shrink: 0;
+}
+
+.social-error {
+  margin: 0;
+  color: #f87171;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+@media (max-width: 480px) {
+  .social-auth {
+    margin-top: 1rem;
+    gap: 0.65rem;
+  }
+
+  .social-divider {
+    font-size: 0.74rem;
+  }
+
+  .social-btn {
+    font-size: 0.9rem;
+  }
+}
+
+/* The user's phone honours prefers-reduced-motion; nothing here should move. */
+@media (prefers-reduced-motion: reduce) {
+  .social-btn {
+    transition: none;
+  }
+
+  .social-btn:not(:disabled):hover,
+  .social-btn:not(:disabled):active {
+    transform: none;
+  }
+}

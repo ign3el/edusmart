@@ -1,0 +1,250 @@
+.pricing-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+  color: var(--ink-1);
+}
+
+.pricing-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.pricing-header h1 {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  margin: 0;
+}
+
+.back-button {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.9rem;
+  color: var(--ink-1);
+}
+
+.pricing-balance-card {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  background: var(--bg-card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.balance-count {
+  font-size: 2rem;
+  font-weight: 800;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.balance-label {
+  color: var(--ink-2);
+  font-size: 0.95rem;
+}
+
+.balance-tier {
+  text-transform: capitalize;
+}
+
+.pricing-promo-box {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--bg-card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 0.5rem;
+  color: var(--ink-2);
+}
+
+.pricing-promo-box input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink-1);
+  font-size: 0.95rem;
+}
+
+.pricing-promo-box button {
+  background: var(--accent-gradient);
+  color: #150d33;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 1rem;
+  font-weight: 700;
+  min-width: 70px;
+}
+
+.pricing-promo-box button:disabled {
+  opacity: 0.5;
+}
+
+.pricing-promo-status {
+  font-size: 0.85rem;
+  margin: 0 0 1.25rem 0.3rem;
+}
+
+.pricing-promo-status.success { color: var(--accent-3); }
+.pricing-promo-status.error { color: #ff5252; }
+
+.pricing-loading {
+  color: var(--ink-2);
+  padding: 2rem 0;
+  text-align: center;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.pricing-card {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 1.25rem;
+  text-align: center;
+  transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.pricing-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-soft);
+}
+
+.pricing-card.current {
+  border-color: var(--accent-2);
+  box-shadow: var(--shadow-glow);
+}
+
+.pricing-card.recommended {
+  border-color: #f59e0b;
+  box-shadow: 0 0 40px rgba(245, 158, 11, 0.25);
+}
+
+.current-badge,
+.recommended-badge {
+  position: absolute;
+  top: -0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
+  font-weight: 800;
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+
+.current-badge {
+  background: var(--accent-gradient);
+  color: #150d33;
+}
+
+.recommended-badge {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #1a0f00;
+}
+
+.pricing-card h3 {
+  margin: 0.5rem 0 0.3rem;
+  font-size: 1.1rem;
+}
+
+.pricing-description {
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+
+.pricing-price {
+  font-size: 1.6rem;
+  font-weight: 800;
+  margin: 0 0 0.75rem;
+}
+
+.pricing-credits {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  color: var(--ink-2);
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
+.pricing-features {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.pricing-features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+}
+
+.pricing-features li svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  color: var(--accent-3);
+}
+
+.pricing-discount-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  color: var(--accent-3);
+  font-size: 0.8rem;
+  margin: 0 0 0.75rem;
+}
+
+.pricing-subscribe-btn {
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--accent-gradient);
+  color: #150d33;
+  font-weight: 700;
+}
+
+.pricing-subscribe-btn:disabled {
+  opacity: 0.6;
+}
+
+.spin-icon {
+  animation: pricing-spin 1s linear infinite;
+}
+
+@keyframes pricing-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

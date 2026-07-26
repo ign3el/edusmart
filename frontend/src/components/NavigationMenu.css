@@ -9,12 +9,12 @@
   width: 3rem;
   height: 3rem;
   border-radius: 50%;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   border: 2px solid rgba(255, 255, 255, 0.1);
   color: white;
   font-size: 1.25rem;
   cursor: pointer;
-  box-shadow: 0 10px 25px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 10px 25px rgba(139, 92, 246, 0.4);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -23,7 +23,7 @@
 
 .mobile-menu-btn:hover {
   transform: scale(1.05);
-  box-shadow: 0 15px 35px rgba(99, 102, 241, 0.5);
+  box-shadow: 0 15px 35px rgba(139, 92, 246, 0.5);
 }
 
 /* Menu Buttons */
@@ -44,18 +44,18 @@
 }
 
 .menu-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.3);
+  background: rgba(139, 92, 246, 0.15);
+  border-color: rgba(139, 92, 246, 0.3);
 }
 
 .menu-btn.primary {
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   border: none;
   color: white;
 }
 
 .menu-btn.primary:hover {
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
 }
 
 .menu-btn.admin {
@@ -89,8 +89,8 @@
 }
 
 .menu-btn.profile {
-  background: rgba(99, 102, 241, 0.1);
-  border-color: rgba(99, 102, 241, 0.3);
+  background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(139, 92, 246, 0.3);
 }
 
 .menu-btn:disabled {
@@ -159,9 +159,9 @@
   width: min(85vw, 320px);
   background:
     radial-gradient(circle at 100% 0%, rgba(168, 85, 247, 0.16), transparent 55%),
-    radial-gradient(circle at 0% 100%, rgba(6, 182, 212, 0.14), transparent 55%),
-    linear-gradient(135deg, #0b0f1a, #0f1628);
-  border-left: 1px solid rgba(99, 102, 241, 0.2);
+    radial-gradient(circle at 0% 100%, rgba(34, 211, 238, 0.14), transparent 55%),
+    linear-gradient(135deg, #1d1147, #241456);
+  border-left: 1px solid rgba(139, 92, 246, 0.2);
   box-shadow: -10px 0 40px rgba(0, 0, 0, 0.5);
   z-index: 9999;
   display: flex;
@@ -186,8 +186,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 1.25rem;
-  border-bottom: 1px solid rgba(99, 102, 241, 0.15);
-  background: rgba(99, 102, 241, 0.06);
+  border-bottom: 1px solid rgba(139, 92, 246, 0.15);
+  background: rgba(139, 92, 246, 0.06);
 }
 
 .drawer-header h3 {
@@ -227,22 +227,22 @@
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem;
-  background: rgba(99, 102, 241, 0.06);
-  border: 1px solid rgba(99, 102, 241, 0.12);
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.12);
   border-radius: 0.75rem;
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .user-profile-card:hover {
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(139, 92, 246, 0.12);
 }
 
 .user-avatar {
   width: 3rem;
   height: 3rem;
   border-radius: 50%;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -267,7 +267,7 @@
 .user-badge {
   display: inline-block;
   padding: 0.125rem 0.5rem;
-  background: linear-gradient(135deg, #06b6d4, #6366f1);
+  background: linear-gradient(135deg, #22d3ee, #8b5cf6);
   border-radius: 0.75rem;
   color: white;
   font-size: 0.75rem;
@@ -295,7 +295,7 @@
   bottom: 0.15rem;
   width: 3px;
   border-radius: 2px;
-  background: linear-gradient(180deg, #a855f7, #06b6d4);
+  background: linear-gradient(180deg, #a855f7, #22d3ee);
 }
 
 /* Section Container */
@@ -310,7 +310,7 @@
 
 .section-divider {
   height: 1px;
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(139, 92, 246, 0.1);
   margin: 0.5rem 0;
 }
 
@@ -343,9 +343,9 @@
 }
 
 .drawer-btn:hover {
-  background: rgba(99, 102, 241, 0.1);
-  border-color: rgba(99, 102, 241, 0.35);
-  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15), 0 6px 20px rgba(99, 102, 241, 0.25);
+  background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(139, 92, 246, 0.35);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.15), 0 6px 20px rgba(139, 92, 246, 0.25);
   transform: translateX(4px);
 }
 
@@ -357,13 +357,13 @@
   height: 2.1rem;
   border-radius: 0.6rem;
   flex-shrink: 0;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(6, 182, 212, 0.25));
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(34, 211, 238, 0.25));
   color: #c7d2fe;
   transition: transform 0.2s ease;
 }
 
 .drawer-btn:hover .icon {
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   color: white;
   transform: scale(1.08);
 }
@@ -380,13 +380,13 @@
 
 /* Primary Drawer Buttons */
 .drawer-btn.primary {
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
   border: none;
   color: white;
 }
 
 .drawer-btn.primary:hover {
-  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 8px 20px rgba(139, 92, 246, 0.4);
   transform: translateX(4px);
 }
 
@@ -427,5 +427,5 @@
 /* Scrollbar Styling */
 .drawer-content::-webkit-scrollbar { width: 6px; }
 .drawer-content::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.2); }
-.drawer-content::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.3); border-radius: 3px; }
-.drawer-content::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.5); }
+.drawer-content::-webkit-scrollbar-thumb { background: rgba(139, 92, 246, 0.3); border-radius: 3px; }
+.drawer-content::-webkit-scrollbar-thumb:hover { background: rgba(139, 92, 246, 0.5); }
