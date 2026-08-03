@@ -175,97 +175,6 @@
   animation: pulse 1.5s ease-in-out infinite;
 }
 
-/* Speed Control Styling */
-.speed-control {
-  display: grid;
-  gap: 0.8rem;
-  margin-top: 1rem;
-  padding: 1.2rem;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--edge);
-}
-
-.speed-control label {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-weight: 600;
-  color: var(--ink-1);
-  font-size: 1rem;
-  margin-bottom: 0.3rem;
-}
-
-.speed-control label > span:first-child {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.speed-value {
-  padding: 0.3rem 0.8rem;
-  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  color: white;
-  border-radius: 20px;
-  font-size: 0.9rem;
-  font-weight: 700;
-}
-
-.slider {
-  width: 100%;
-  height: 8px;
-  border-radius: 10px;
-  background: linear-gradient(to right, 
-    rgba(168, 85, 247, 0.3) 0%, 
-    rgba(236, 72, 153, 0.5) 50%,
-    rgba(59, 130, 246, 0.3) 100%);
-  outline: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  cursor: pointer;
-  box-shadow: 0 4px 12px rgba(168, 85, 247, 0.4);
-  transition: all var(--transition);
-}
-
-.slider::-webkit-slider-thumb:hover {
-  transform: scale(1.15);
-  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.6);
-}
-
-.slider::-moz-range-thumb {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
-  cursor: pointer;
-  border: none;
-  box-shadow: 0 4px 12px rgba(168, 85, 247, 0.4);
-  transition: all var(--transition);
-}
-
-.slider::-moz-range-thumb:hover {
-  transform: scale(1.15);
-  box-shadow: 0 6px 18px rgba(168, 85, 247, 0.6);
-}
-
-.speed-labels {
-  display: flex;
-  justify-content: space-between;
-  color: var(--ink-2);
-  font-size: 0.85rem;
-  margin-top: 0.3rem;
-}
-
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
@@ -384,6 +293,10 @@
   box-shadow: 0 20px 50px rgba(168, 85, 247, 0.25);
   z-index: 10;
   backdrop-filter: blur(20px);
+  /* 12 grade options (KG-1 to Grade 10) no longer fit in one screen on
+     mobile without this - was fine at the old 7-option range. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .grade-option {
@@ -409,4 +322,202 @@
 
 .grade-info {
   position: relative;
+}
+/* ── Quiz size selector ────────────────────────────────────────────────────
+   Segmented control rather than a dropdown: four options is few enough to show
+   at once, and a native <select> on Android opens a full-screen sheet for what
+   should be one tap. */
+.quiz-size-block {
+  background: linear-gradient(150deg, rgba(30, 18, 66, 0.7), rgba(30, 18, 66, 0.55));
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-lg);
+  padding: 1.1rem 1.25rem 1.25rem;
+  display: grid;
+  gap: 0.85rem;
+  box-shadow: var(--shadow-soft);
+}
+
+.quiz-size-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+}
+
+.quiz-size-head svg {
+  color: var(--accent-1);
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+
+.quiz-size-head h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.quiz-size-head p {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.quiz-size-options {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.55rem;
+}
+
+.quiz-size-option {
+  /* 48px clears both the 44pt (Apple) and 48dp (Material) touch minimums. */
+  min-height: 48px;
+  border-radius: 12px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink-1);
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: transform 180ms ease-out, border-color 180ms ease-out,
+              background 180ms ease-out, box-shadow 180ms ease-out;
+}
+
+.quiz-size-option:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
+.quiz-size-option:active {
+  transform: scale(0.96);
+}
+
+.quiz-size-option.selected {
+  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+  color: #1a0f3d;
+  border-color: transparent;
+  box-shadow: 0 6px 18px rgba(139, 92, 246, 0.35);
+}
+
+/* Beyond what the document can support. Dimmed, never disabled - the user is
+   still allowed to ask for it, they just get told first. */
+.quiz-size-option.over-capacity:not(.selected) {
+  opacity: 0.45;
+}
+
+.quiz-size-option.over-capacity.selected {
+  background: linear-gradient(135deg, var(--warning), #fb923c);
+  box-shadow: 0 6px 18px rgba(245, 158, 11, 0.35);
+}
+
+.quiz-size-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--warning);
+}
+
+.quiz-size-warning svg {
+  flex-shrink: 0;
+}
+
+.quiz-size-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+@media (max-width: 768px) {
+  .quiz-size-block {
+    padding: 1rem;
+  }
+}
+
+/* ── Capacity confirmation dialog ─────────────────────────────────────────── */
+.capacity-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: rgba(10, 6, 24, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.capacity-dialog {
+  width: 100%;
+  max-width: 400px;
+  text-align: center;
+  padding: 1.75rem 1.4rem 1.4rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: linear-gradient(160deg, rgba(38, 24, 78, 0.98), rgba(26, 15, 58, 0.98));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.capacity-icon {
+  color: var(--warning);
+}
+
+.capacity-dialog h3 {
+  margin: 0.7rem 0 0.55rem;
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.capacity-dialog p {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.capacity-note {
+  margin-top: 0.6rem !important;
+  font-size: 0.82rem !important;
+  color: var(--accent-2) !important;
+}
+
+.capacity-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin-top: 1.35rem;
+}
+
+.capacity-cancel,
+.capacity-continue {
+  min-height: 48px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+}
+
+.capacity-cancel {
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-1);
+}
+
+.capacity-continue {
+  border: none;
+  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+  color: #1a0f3d;
+  box-shadow: var(--shadow-soft);
+}
+
+.capacity-cancel:active,
+.capacity-continue:active {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quiz-size-option,
+  .capacity-cancel,
+  .capacity-continue {
+    transition: none;
+  }
 }

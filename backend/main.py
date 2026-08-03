@@ -27,18 +27,32 @@ from routers.billing import router as billing_router, check_and_reserve_credit, 
 from core.setup import create_admin_user
 from database_models import User, StoryOperations, UserOperations
 from auth import verify_token
-from services.story_service import StoryService
+from services.story_service import (
+    StoryService,
+    normalize_quiz_size,
+    DEFAULT_QUIZ_SIZE,
+    QUIZ_SIZE_OPTIONS,
+)
 from services.tts_service import kokoro_tts
 from services.hash_service import hash_service
 from job_state import job_manager
 from story_storage import storage_manager, cleanup_scheduler_task, database_cleanup_scheduler_task
 from services.concurrency import tts_governor, governor_snapshot, log_limits
+from services import vision_budget
+from services import failure_reasons
 from services.job_queue import generation_queue, admit_generation
+from services.grade_bands import resolve_grade_spec
 from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
 # Type checking imports for Pylance
 if TYPE_CHECKING:
     from services.story_service import StoryService
+
+# Pause between generation attempt 1 and 2. Groq reserves prompt tokens plus
+# requested max_tokens against a single per-minute budget, so an immediate retry
+# arrives while attempt 1 still owns that window and 429s on contact - spending
+# the one retry without ever reaching the model.
+RETRY_COOLDOWN_SECONDS = 20
 
 # Load environment variables from .env file
 load_dotenv()
@@ -397,6 +411,7 @@ async def health_check():
         # ceiling you cannot tune: peak_wait_s and waiting are what tell you
         # whether raising a limit would change anything.
         "concurrency": governor_snapshot(),
+        "vision_budget": vision_budget.snapshot(),
         "queue": generation_queue.stats(),
     }
     if not healthy:
@@ -706,10 +721,28 @@ _ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv", "
 _MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024  # 20MB
 
 
+# Uncompressed-size ceiling for the ZIP-based Office formats (.docx/.pptx are
+# ZIP archives). python-docx/python-pptx decompress into memory with no regard
+# for the ratio, so a well-formed 20MB upload can expand to gigabytes and OOM
+# the process - a classic zip bomb. 300MB is far above any real lesson document
+# while staying survivable.
+_MAX_UNCOMPRESSED_ARCHIVE_BYTES = 300 * 1024 * 1024
+
+# Magic bytes per extension. Extension alone is a claim by the uploader, not a
+# fact about the bytes; the parsers downstream trust the type they are handed.
+_UPLOAD_MAGIC = {
+    ".pdf": (b"%PDF-",),
+    # OOXML formats are ZIP archives - both start with a local file header.
+    # PK\x03\x04 is a normal archive; PK\x05\x06 is a valid *empty* archive.
+    ".docx": (b"PK\x03\x04", b"PK\x05\x06"),
+    ".pptx": (b"PK\x03\x04", b"PK\x05\x06"),
+}
+
+
 def _validate_upload(filename: Optional[str], file_content: bytes):
-    """Reject oversized or wrong-type uploads before they reach the story
-    pipeline. Previously nothing checked either - any size/type was read
-    fully into memory and handed to the PDF/text extractor unvalidated."""
+    """Reject oversized, wrong-type, or archive-bomb uploads before they reach
+    the story pipeline. Previously nothing checked either - any size/type was
+    read fully into memory and handed to the PDF/text extractor unvalidated."""
     ext = os.path.splitext(filename or "")[1].lower()
     if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(
@@ -722,6 +755,39 @@ def _validate_upload(filename: Optional[str], file_content: bytes):
             detail=f"File too large ({len(file_content) / 1024 / 1024:.1f}MB). Max size is {_MAX_UPLOAD_SIZE_BYTES // 1024 // 1024}MB.",
         )
 
+    # Content must match the claimed extension. Only enforced for the binary
+    # formats: the text extensions (.txt/.md/.csv/.json/.xml/.html) have no
+    # reliable signature and are decoded as text anyway, so there is nothing
+    # to spoof into.
+    expected_magic = _UPLOAD_MAGIC.get(ext)
+    if expected_magic and not any(file_content.startswith(sig) for sig in expected_magic):
+        raise HTTPException(
+            status_code=400,
+            detail=f"File content does not match its '{ext}' extension. The file may be corrupted or renamed.",
+        )
+
+    # Decompression-bomb guard for the ZIP-based formats. Reads only the central
+    # directory (no extraction), so this is cheap and never materializes the
+    # payload it is protecting against.
+    if ext in (".docx", ".pptx"):
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
+                total_uncompressed = sum(info.file_size for info in zf.infolist())
+        except zipfile.BadZipFile:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This {ext} file is not a readable archive. It may be corrupted.",
+            )
+        if total_uncompressed > _MAX_UNCOMPRESSED_ARCHIVE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"This file expands to {total_uncompressed / 1024 / 1024:.0f}MB when opened, "
+                    f"which exceeds the {_MAX_UNCOMPRESSED_ARCHIVE_BYTES // 1024 // 1024}MB limit."
+                ),
+            )
+
 
 def _safe_story_dirname(story_name: str, story_id: str) -> str:
     """Create a filesystem-friendly folder name; fallback to ID fragment on collision/empty."""
@@ -731,11 +797,9 @@ def _safe_story_dirname(story_name: str, story_id: str) -> str:
         slug = f"{slug}-{story_id[:8]}"
     return slug
 
-async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, voice: str, storage_manager, job_manager):
+async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, voice: str, storage_manager, job_manager, grade_level: Optional[str] = None):
     """Generate TTS for scenes 1-9 in background using progressive batching"""
     try:
-        from services.chatterbox_client import chatterbox
-
         published = set()
 
         def _publish_scene(scene_num: int) -> bool:
@@ -772,7 +836,8 @@ async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, v
             voice=voice,
             batch_size=2,
             max_threads_per_tts=1,
-            on_scene_ready=on_scene_ready
+            on_scene_ready=on_scene_ready,
+            grade_level=grade_level
         )
 
         # Safety net - anything the callback missed still gets published (or marked
@@ -816,33 +881,85 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         })
         logger.info(f"📁 Created story folder: generated_stories/{story_id}")
         
+        # How many quiz questions the user asked for. Read back from job state
+        # rather than threaded through the queue, so the queue's handler
+        # signature stays as it is; initialize_story() recorded it at upload.
+        _job_row = job_manager.get_story_status(story_id) or {}
+        quiz_size = normalize_quiz_size(_job_row.get("quiz_size") or DEFAULT_QUIZ_SIZE)
+
         # Generate story structure
         # Groq's SDK is synchronous, so this occupies a thread-pool slot for the
         # entire round trip, and Groq itself rate-limits by tokens per minute.
         # The governor keeps a burst of simultaneous uploads from spending the
         # whole TPM budget in one second and failing all of them together.
         from services.concurrency import llm_governor
-        async with llm_governor.slot():
-            story_data = await asyncio.to_thread(gemini.process_file_to_story, file_path, grade_level)
-        
+
+        # One automatic retry. The model returning a malformed or incomplete
+        # story is a dice roll, not a property of the document - failing the
+        # user's upload on a single bad roll (and refunding a credit they would
+        # rather have spent on a working story) is the wrong trade.
+        #
+        # Verdict-style failures are excluded via failure_reasons.is_retryable:
+        # re-asking whether a bank receipt is educational costs a full
+        # generation to arrive at the same answer.
+        story_data = None
+        last_error: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                async with llm_governor.slot():
+                    story_data = await asyncio.to_thread(
+                        gemini.process_file_to_story, file_path, grade_level, user_id, quiz_size
+                    )
+                if story_data:
+                    break
+                last_error = Exception("AI failed to generate story content.")
+            except Exception as gen_error:
+                last_error = gen_error
+                if not failure_reasons.is_retryable(gen_error):
+                    logger.info(
+                        f"Story {story_id}: not retrying "
+                        f"{failure_reasons.classify(gen_error).code} - a retry cannot change it"
+                    )
+                    raise
+
+            if attempt == 1:
+                logger.warning(f"Story {story_id}: attempt 1 failed ({last_error}); retrying once")
+                job_manager.mark_story_retrying(story_id)
+                # Groq bills prompt + max_tokens against one per-minute budget and
+                # attempt 1 has just spent most of it. Going straight into attempt
+                # 2 would 429 on arrival and burn the retry for nothing.
+                await asyncio.sleep(RETRY_COOLDOWN_SECONDS)
+
         if not story_data:
-            raise Exception("AI failed to generate story content.")
+            raise last_error or Exception("AI failed to generate story content.")
         
         scenes = story_data.get("scenes", [])
         title = story_data.get("title", "Untitled Story")
         quiz = story_data.get("quiz", [])
-        
+
+        # Joined once per story, not re-derived per scene: the model defines each
+        # recurring character's fixed appearance once (unified_prompt's CHARACTER
+        # CONSISTENCY requirement) and repeats it verbatim inside each scene's own
+        # image_prompt already, so this column just needs to carry that same
+        # description for reference/debugging - it previously duplicated
+        # image_prompt here instead of holding anything character-specific.
+        characters = story_data.get("characters", [])
+        character_descriptions = "; ".join(
+            f"{c.get('name', '')}: {c.get('description', '')}"
+            for c in characters if isinstance(c, dict) and c.get("description")
+        )
+
         # Initialize job state with quiz data
         job_manager.update_story_metadata(story_id, title, len(scenes), quiz)
-        
+
         # Create scene records immediately (text is ready)
         scene_ids = []
         for i, scene in enumerate(scenes):
             scene_id = job_manager.create_scene(
-                story_id, 
-                i, 
+                story_id,
+                i,
                 scene.get("narrative_text", ""),
-                scene.get("image_prompt", "")
+                character_descriptions
             )
             scene_ids.append(scene_id)
         
@@ -853,7 +970,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         force_mobile = True
         
         # Define background task for remaining images (Scenes 1..N)
-        async def generate_remaining_images_background(r_scenes, seed, mobile):
+        async def generate_remaining_images_background(r_scenes, seed, mobile, reference_image=None):
             logger.info(f"🎨 Background generating images for {len(r_scenes)} scenes...")
             try:
                 images_map = await gemini.generate_images_parallel(
@@ -862,7 +979,9 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                     # max_workers now defaults to MAX_IMAGES_PER_STORY so the
                     # per-story cap is an env knob, not a literal buried here.
                     is_mobile=mobile,
-                    start_index=1
+                    start_index=1,
+                    grade_level=grade_level,
+                    reference_image=reference_image
                 )
                 for idx, img_bytes in images_map.items():
                     if img_bytes:
@@ -886,15 +1005,23 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                 scenes[0]['image_prompt'],
                 story_seed=story_seed,
                 is_mobile=force_mobile,
-                scene_num=0
+                scene_num=0,
+                grade_level=grade_level
             )
             
             # 🔗 CRITICAL: Trigger background generation IMMEDIATELY after Scene 0 Image finishes
             # This prevents RunPod 10s idle timeout if TTS takes longer than Image gen
             if len(scenes) > 1:
                 logger.info("🔗 Chaining background image generation immediately...")
+                # img_0 becomes the visual anchor for every later scene: a
+                # recurring character is then conditioned on the same actual
+                # pixels, not merely the same written description. If scene 0
+                # failed, img_0 is None and the batch falls back to plain
+                # text-to-image rather than blocking the whole story.
                 _bg_img_task = asyncio.create_task(
-                    generate_remaining_images_background(scenes[1:], story_seed, force_mobile)
+                    generate_remaining_images_background(
+                        scenes[1:], story_seed, force_mobile, reference_image=img_0
+                    )
                 )
                 _bg_img_task.add_done_callback(
                     lambda t: logger.error(f"Background image generation failed: {t.exception()}") if t.exception() else None
@@ -909,16 +1036,39 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         scene_0_image_task = generate_scene_0_image_and_chain()
         
         # 2. Generate Scene 0 TTS
-        from services.chatterbox_client import chatterbox
         tts_0_start_time = time.time()
         async def generate_scene_0_tts_timed():
             # Scene 0 narration goes through the same process-wide TTS governor
             # as scenes 1..N. It is the request the user is actually waiting on,
-            # but it is not exempt from the ceiling - Kokoro is CPU-bound, and
-            # letting first scenes bypass the limit is how twenty simultaneous
-            # uploads make all twenty slower than any of them queued.
+            # but it is not exempt from the ceiling - letting first scenes bypass
+            # the limit is how twenty simultaneous uploads make all twenty slower
+            # than any of them queued.
+            #
+            # It also goes through the SAME CLIENT as scenes 1..N. This used to
+            # call chatterbox.generate_audio(), which posts straight at
+            # CHATTERBOX_URL and has never once consulted Config.TTS_BACKEND - so
+            # with TTS_BACKEND=runpod every other scene ran on the GPU in 2.9-5.7s
+            # while scene 0, the only one blocking the player, sat on the CPU
+            # container for 26.5s. Route it through kokoro_client like everything
+            # else and the backend switch means what it says.
+            scene_0_text = scenes[0]['narrative_text']
+            scene_0_speed = resolve_grade_spec(grade_level)["tts_speed"]
             async with tts_governor.slot():
-                audio = await chatterbox.generate_audio(text=scenes[0]['narrative_text'], voice=voice)
+                if voice == "ar_teacher":
+                    # Arabic goes to Piper, mirroring story_service's scene 1..N
+                    # branch - Kokoro has no Arabic voice.
+                    from services.piper_client import piper_tts
+                    audio = await piper_tts.generate_audio(scene_0_text, speed=scene_0_speed, silence=0.3)
+                else:
+                    from services.kokoro_client import generate_tts
+                    # generate_tts is a blocking requests.post; called bare from
+                    # async it stalls the event loop for the whole process.
+                    audio = await asyncio.to_thread(
+                        generate_tts,
+                        text=scene_0_text,
+                        voice=voice,
+                        speed=scene_0_speed
+                    )
             logger.info(f"✓ Scene 0 TTS generated in {time.time() - tts_0_start_time:.2f}s")
             return audio
         scene_0_tts_task = generate_scene_0_tts_timed()
@@ -961,7 +1111,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         # 4. Background: Generate Remaining TTS (Scenes 1..N)
         if len(scenes) > 1:
             pending_tasks.append(asyncio.create_task(
-                generate_remaining_tts(story_id, scenes[1:], scene_ids[1:], voice, storage_manager, job_manager)
+                generate_remaining_tts(story_id, scenes[1:], scene_ids[1:], voice, storage_manager, job_manager, grade_level=grade_level)
             ))
         
         # ✅ CRITICAL FIX: Mark story as completed so frontend can display Scene 0 immediately
@@ -981,13 +1131,26 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         )
 
     except Exception as e:
+        # The raw exception stays in the logs, where an operator needs it. What
+        # reaches the user is the classified, actionable form - see
+        # services/failure_reasons for why the generic banner had to go.
         logger.error(f"AI Workflow Error after {time.time() - workflow_start_time:.2f}s: {e}")
-        job_manager.mark_story_failed(story_id, str(e))
+
+        # Refund BEFORE recording the failure, so the message we store can state
+        # truthfully whether the credit actually came back. Double-refunding is
+        # prevented by the uq_refund_per_story constraint, not by ordering, so
+        # it is safe for the reconciler to retry this if we die in between.
+        credit_refunded = False
         try:
             refund_credit(user_id, story_id)
+            credit_refunded = True
             logger.info(f"Refunded 1 credit to user {user_id} for failed story {story_id}")
         except Exception as refund_error:
             logger.error(f"Failed to refund credit for story {story_id}: {refund_error}")
+
+        details = failure_reasons.describe(e, credit_refunded=credit_refunded)
+        logger.error(f"Story {story_id} failed as {details['error_code']}: {details['error']}")
+        job_manager.mark_story_failed(story_id, json.dumps(details))
 
 @app.post("/api/check-duplicate")
 async def check_duplicate(
@@ -1019,8 +1182,12 @@ async def check_duplicate(
 async def upload_story(
     background_tasks: BackgroundTasksExplicit,  # type: ignore
     file: UploadFile = File(...), 
-    grade_level: str = Form("Grade 4"), 
-    voice: str = Form("af_sarah"), 
+    grade_level: str = Form("4"),
+    # How many quiz questions the user asked for. Coerced via normalize_quiz_size
+    # rather than validated strictly - an odd value should snap to the nearest
+    # offered size, not fail the upload after the file has already been sent.
+    quiz_size: int = Form(DEFAULT_QUIZ_SIZE),
+    voice: str = Form("af_sarah"),
     speed: float = Form(1.0),
     file_hash: str = Form(None),
     force_new: bool = Form(False),
@@ -1095,11 +1262,12 @@ async def upload_story(
     
     # Initialize job state
     job_manager.initialize_story(
-        story_id, 
-        grade_level, 
-        file_hash=file_hash, 
-        user_id=current_user['id'], 
-        username=current_user['username']
+        story_id,
+        grade_level,
+        file_hash=file_hash,
+        user_id=current_user['id'],
+        username=current_user['username'],
+        quiz_size=normalize_quiz_size(quiz_size),
     )
     
     # Detect if user is on mobile device
@@ -1142,7 +1310,8 @@ async def handle_duplicate_choice(
     duplicate_story_id: str = Form(...),
     duplicate_type: str = Form(...),  # "saved" or "generated"
     file: UploadFile = File(...),
-    grade_level: str = Form("Grade 4"),
+    grade_level: str = Form("4"),
+    quiz_size: int = Form(DEFAULT_QUIZ_SIZE),
     voice: str = Form("af_sarah"),
     speed: float = Form(1.0),
     user_agent: str = Form(None),
@@ -1201,11 +1370,12 @@ async def handle_duplicate_choice(
         
         # Initialize job state
         job_manager.initialize_story(
-            new_story_id, 
-            grade_level, 
-            file_hash=hash_service.generate_bytes_hash(file_content), 
-            user_id=current_user['id'], 
-            username=current_user['username']
+            new_story_id,
+            grade_level,
+            file_hash=hash_service.generate_bytes_hash(file_content),
+            user_id=current_user['id'],
+            username=current_user['username'],
+            quiz_size=normalize_quiz_size(quiz_size),
         )
         
         # Detect mobile
@@ -1532,6 +1702,27 @@ async def get_scene_status(story_id: str, scene_index: int, current_user: dict =
     }
 
 
+def _failure_payload(stored_error) -> Dict[str, Any]:
+    """Read back what mark_story_failed wrote, in either format.
+
+    Current failures store the classified dict as JSON. Rows written before that
+    change - and any row written by a path that still passes a bare string - hold
+    raw internal text, which must never be shown to a user verbatim (it leaks
+    validator internals and provider names). Those are re-classified on read, so
+    an old story in the DB still produces a decent message rather than a
+    stack-trace fragment in the UI.
+    """
+    if not stored_error:
+        return failure_reasons.describe("", credit_refunded=True)
+    try:
+        parsed = json.loads(stored_error)
+        if isinstance(parsed, dict) and "error_code" in parsed:
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return failure_reasons.describe(stored_error, credit_refunded=True)
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     if not _verify_story_access(job_id, current_user, allow_public=True):
@@ -1541,19 +1732,67 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
     status = job_manager.get_story_status(job_id)
     if status:
         scenes = job_manager.get_all_scenes(job_id)
-        # Filter to only include completed scenes (both image and audio ready)
-        completed_scenes = [
+
+        # Publish every scene that has TEXT, with image_url/audio_url left null
+        # until each asset actually lands. This used to require image AND audio
+        # both "completed" before a scene appeared at all, and the client only
+        # opens the player once it sees one scene - so the user watched a spinner
+        # for 34s while the story text had been sitting in SQLite since 7.6s.
+        # The picture and the narration now fill in underneath a story the child
+        # can already read. StoryPlayer must therefore treat a null image_url or
+        # audio_url as "not ready yet", never as an error.
+        published_scenes = [
             {
                 "text": s["text"],
-                "image_url": s["image_url"],
-                "audio_url": s["audio_url"]
+                "image_url": s["image_url"] if s["image_status"] == "completed" else None,
+                "audio_url": s["audio_url"] if s["audio_status"] == "completed" else None
             }
             for s in scenes
-            if s["image_status"] == "completed" and s["audio_status"] == "completed"
+            if s["text"]
         ]
-        
-        # Calculate real progress based on completed scenes
-        actual_progress = int((len(completed_scenes) / status["total_scenes"]) * 100) if status["total_scenes"] > 0 else 0
+
+        # Progress and completed_scene_count keep their original meaning: a scene
+        # counts only once BOTH its assets exist. A text-only scene must not count
+        # as progress or the client's stall detector (which watches this number
+        # for forward motion) would see a full story the instant the LLM returns
+        # and then nothing for another minute.
+        fully_ready = sum(
+            1 for s in scenes
+            if s["image_status"] == "completed" and s["audio_status"] == "completed"
+        )
+        completed_scenes = published_scenes
+
+        # Progress counts each ASSET, not each finished scene.
+        #
+        # This used to be `fully_ready / total_scenes`, which meant the number sat
+        # at exactly 0% for the whole LLM phase AND the whole first image render -
+        # the longest stretch of a generation - then jumped in coarse steps.
+        # Confirmed on a real run 2026-08-03: a full minute of "0% BUILDING" while
+        # the captions cycled through "writing your story" and "painting the
+        # pictures", because not one scene had both assets yet.
+        #
+        # Each scene contributes two half-credits, so an image landing moves the
+        # bar even while its narration is still rendering. STORY_TEXT_WEIGHT is
+        # awarded once the LLM returns, which is a real milestone the user just
+        # waited through and the single biggest chunk of wall-clock time.
+        STORY_TEXT_WEIGHT = 15
+        total_scenes = status["total_scenes"] or 0
+        if total_scenes > 0:
+            assets_done = sum(
+                (1 if s["image_status"] == "completed" else 0)
+                + (1 if s["audio_status"] == "completed" else 0)
+                for s in scenes
+            )
+            asset_fraction = assets_done / (total_scenes * 2)
+            actual_progress = int(STORY_TEXT_WEIGHT + asset_fraction * (100 - STORY_TEXT_WEIGHT))
+        else:
+            # Scene count is unknown until the LLM returns, so there is genuinely
+            # nothing to measure yet. Report 0 and let the client show an
+            # indeterminate state rather than inventing a fake ramp.
+            actual_progress = 0
+        # Never report done-but-not-done: the client treats 100% as terminal.
+        if status["status"] != "completed":
+            actual_progress = min(actual_progress, 99)
         
         # Parse quiz data if it's stored as JSON string
         quiz_data = status.get("quiz", [])
@@ -1563,11 +1802,11 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
             except json.JSONDecodeError:
                 quiz_data = []
         
-        return {
+        payload = {
             "status": status["status"],
             "progress": actual_progress,
             "total_scenes": status["total_scenes"],  # Always include total count
-            "completed_scene_count": len(completed_scenes),  # Number of completed scenes
+            "completed_scene_count": fully_ready,  # Scenes with BOTH image and audio
             # Queried only while the job could still be waiting. Every client
             # polls this endpoint every 2 seconds, and there is nothing to look
             # up once a worker has actually picked the story up.
@@ -1575,12 +1814,36 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
                 job_manager.queue_position(job_id)
                 if status["status"] == "initializing" else 0
             ),
+            # >1 means the first generation attempt failed and a second is running.
+            # The client uses this to explain the extra ~60s instead of showing
+            # unexplained dead air.
+            "attempt": status.get("attempt") or 1,
+            "quiz_size": status.get("quiz_size") or DEFAULT_QUIZ_SIZE,
             "result": {
                 "title": status["title"],
                 "scenes": completed_scenes,
                 "quiz": quiz_data
             }
         }
+
+        # The failure detail. This endpoint used to omit it entirely, so the
+        # client's `job.error || 'AI Generation failed.'` fallback was the ONLY
+        # message any user ever saw, for every cause. The column was being
+        # written the whole time; nothing read it back out.
+        if status["status"] == "failed":
+            payload.update(_failure_payload(status.get("error")))
+
+        # A quiz that came up short of what the user asked for is a note on a
+        # delivered story, not an error - the story is complete and playable.
+        requested = status.get("quiz_size")
+        if status["status"] == "completed" and requested and len(quiz_data) < int(requested):
+            payload["quiz_notice"] = (
+                f"This quiz has {len(quiz_data)} questions instead of the "
+                f"{requested} you asked for - the document didn't have enough "
+                f"distinct material for more."
+            )
+
+        return payload
     
     # Fall back to old job system
     if job_id not in jobs:
@@ -2063,26 +2326,36 @@ async def mark_quiz_complete(
     """Mark quiz as completed for the current user's story"""
     try:
         with get_db_cursor(commit=True) as cursor:
-            # Update quiz_completed status
+            # Ownership is established by an explicit SELECT, never by the
+            # UPDATE's rowcount. MySQL reports CHANGED rows, not matched rows
+            # (the pool does not set CLIENT_FOUND_ROWS), so an idempotent write
+            # returns 0 whenever the value is already correct - marking a quiz
+            # complete a second time (a retake) looked identical to "you do not
+            # own this story" and returned a false 404 to the legitimate owner.
+            cursor.execute("""
+                SELECT 1 AS found
+                FROM user_stories
+                WHERE user_id = %s AND story_id = %s
+            """, (current_user["id"], story_id))
+            if cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Story not found or not owned by user"
+                )
+
             cursor.execute("""
                 UPDATE user_stories
                 SET quiz_completed = TRUE
                 WHERE user_id = %s AND story_id = %s
             """, (current_user["id"], story_id))
-            
-            if cursor.rowcount == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Story not found or not owned by user"
-                )
-            
+
             # Fetch updated story data
             cursor.execute("""
                 SELECT story_id, name, story_data, created_at, quiz_completed
                 FROM user_stories
                 WHERE user_id = %s AND story_id = %s
             """, (current_user["id"], story_id))
-            
+
             story = cursor.fetchone()
             
             return {

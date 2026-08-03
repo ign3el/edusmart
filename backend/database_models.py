@@ -224,6 +224,115 @@ class UserOperations:
             return False
 
     @staticmethod
+    def count_admins() -> int:
+        """How many admin accounts exist. Used to refuse the deletion that would
+        leave nobody able to reach the admin panel."""
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = TRUE")
+            row = cursor.fetchone()
+        return int(row["c"]) if row else 0
+
+    @staticmethod
+    def delete_account(user: User) -> Dict[str, Any]:
+        """Permanently erase a user and everything they own. Not reversible.
+
+        Order is deliberate and must not be rearranged:
+
+          1. Cancel the Stripe subscription. Deleting the row first would leave
+             a live subscription billing a customer who no longer has an account
+             and no stripe_customer_id left to find it by.
+          2. Delete story folders from disk, found via their story_ids.
+          3. Delete the SQLite job_state rows. Those live in a different database
+             from `users` - no foreign key spans the two, so nothing here
+             cascades and skipping this orphans the rows permanently.
+          4. Delete the MySQL users row LAST. Its FKs cascade to user_stories,
+             credit_transactions, promo_redemptions, email_verifications and
+             password_reset_tokens.
+
+        Doing the user row last means a failure at any earlier step leaves the
+        account intact and the whole operation retryable. Doing it first would
+        mean a crash at step 2 loses the only handle on the remaining data.
+
+        Returns a summary of what was removed, for the audit log.
+        """
+        from job_state import job_manager
+        from story_storage import storage_manager
+
+        user_id = user["id"]
+        summary = {"stripe_cancelled": False, "stories_owned": 0, "folders_deleted": 0, "job_rows_deleted": 0}
+
+        # 1. Stripe
+        subscription_id = user.get("stripe_subscription_id")
+        if subscription_id:
+            try:
+                import os as _os
+                import stripe
+                # billing.py sets this at import time, but this module must not
+                # depend on which routers happen to have been imported first.
+                if not stripe.api_key:
+                    stripe.api_key = _os.getenv("STRIPE_SECRET_KEY")
+                # .cancel(), not .delete() - the latter was removed from the
+                # stripe SDK well before the 15.x pinned in requirements.txt.
+                stripe.Subscription.cancel(subscription_id)
+                summary["stripe_cancelled"] = True
+                logger.info(f"Cancelled Stripe subscription {subscription_id} for user {user_id}")
+            except Exception as e:
+                if getattr(e, "code", None) == "resource_missing":
+                    # Already gone on Stripe's side; nothing is billing them, so
+                    # this is not a reason to block the deletion.
+                    logger.warning(f"Stripe subscription {subscription_id} already absent; continuing")
+                else:
+                    # Refuse rather than continue. Erasing the account here would
+                    # destroy the only link back to a subscription that is still
+                    # charging them, and nobody would find out until the next
+                    # statement.
+                    logger.error(f"Stripe cancellation failed for user {user_id}: {e}")
+                    raise RuntimeError(
+                        "Could not cancel your subscription, so nothing has been deleted. "
+                        "Please try again shortly."
+                    )
+
+        # 2. Files on disk
+        # Counted here, before anything is removed. storage_manager.delete_story()
+        # also drops the story's job_state row as a side effect, so asking
+        # afterwards how many stories the user had reports only the stragglers.
+        story_ids = job_manager.get_story_ids_for_user(user_id)
+        summary["stories_owned"] = len(story_ids)
+        for story_id in story_ids:
+            for in_saved in (False, True):
+                try:
+                    if storage_manager.story_exists(story_id, in_saved=in_saved):
+                        storage_manager.delete_story(story_id, in_saved=in_saved)
+                        summary["folders_deleted"] += 1
+                except Exception as e:
+                    # One unreadable folder must not strand the account in a
+                    # half-deleted state; log it and keep going.
+                    logger.error(f"Could not delete story folder {story_id} (saved={in_saved}): {e}")
+
+        # 3. SQLite job state
+        try:
+            summary["job_rows_deleted"] = job_manager.delete_all_for_user(user_id)
+        except Exception as e:
+            logger.error(f"Could not delete job_state rows for user {user_id}: {e}")
+
+        # 4. MySQL user row (cascades)
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            deleted = cursor.rowcount
+
+        if deleted == 0:
+            # Unlike an UPDATE, a DELETE rowcount of 0 genuinely means no such
+            # row - so this is a real failure, not the idempotent-write case.
+            raise RuntimeError("Account could not be deleted; please try again.")
+
+        logger.warning(
+            f"ACCOUNT DELETED: id={user_id} email={user.get('email')} "
+            f"stories={summary['stories_owned']} folders={summary['folders_deleted']} "
+            f"stripe_cancelled={summary['stripe_cancelled']}"
+        )
+        return summary
+
+    @staticmethod
     def create_verification_token(user_id: int) -> str:
         """Creates and stores a new email verification token for a user."""
         token = generate_secure_token()
@@ -266,7 +375,10 @@ class UserOperations:
                 result = cursor.fetchone()
                 
                 if not result:
-                    logger.warning(f"Verification token not found or expired: {token[:20]}...")
+                    # Deliberately does not log the token, not even a prefix: it
+                    # is secret material, and 20 chars is plenty to correlate
+                    # against a leaked log. The failure itself is the signal.
+                    logger.warning("Verification token not found or expired")
                     return None
                     
                 user_id = result['user_id']

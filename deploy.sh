@@ -56,6 +56,21 @@ SERVICES=("${@:-backend frontend}")
 read -ra SERVICES <<< "${SERVICES[*]}"
 STAMP=$(date +%Y%m%d_%H%M%S)
 
+# The backend runs as 1001:1001 (see docker-compose.yml) and writes to every
+# bind mount below. If any of these is missing, Docker creates it as root; if
+# it gets recreated by a tool running as www, it lands 0775 www:www. Either way
+# the container cannot mkdir inside it and EVERY upload 500s with EACCES -
+# which is exactly what happened to generated_stories on 2026-07-26. The app
+# has no way to detect this at startup, so assert it at deploy time instead.
+for d in outputs uploads saved_stories generated_stories; do
+  [ -d "backend/$d" ] || sudo install -d -o 1001 -g 1001 -m 775 "backend/$d"
+  owner=$(stat -c '%u' "backend/$d")
+  if [ "$owner" != "1001" ]; then
+    echo "==> fixing ownership of backend/$d (was uid $owner, container needs 1001)"
+    sudo chown -R 1001:1001 "backend/$d"
+  fi
+done
+
 for svc in "${SERVICES[@]}"; do
   echo "==> building $svc"
   # --no-deps so building one service never silently recreates the other

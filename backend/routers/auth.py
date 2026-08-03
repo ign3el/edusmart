@@ -673,3 +673,82 @@ def update_username(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update username"
         )
+
+
+class DeleteAccountRequest(BaseModel):
+    """Re-authentication for account deletion.
+
+    Password-based accounts send `password`. Social-only accounts have no hash
+    to check, so they confirm by typing their own email address into
+    `confirm_email` instead. One of the two is always required: a bearer token
+    on its own must never be enough to erase an account, because a token can be
+    lifted from a shared or stolen device while a password cannot.
+    """
+    password: Optional[str] = None
+    confirm_email: Optional[str] = None
+
+
+@router.delete("/me", status_code=status.HTTP_200_OK)
+def delete_own_account(
+    request: DeleteAccountRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Permanently delete the authenticated user's account and all their data.
+
+    Irreversible. Required by both app stores for any app that offers account
+    creation, and the only honest answer to "delete my data".
+    """
+    from auth import verify_password
+    from database_models import UserOperations
+    from job_state import job_manager
+
+    user_id = current_user['id']
+
+    # --- Guard 1: re-authenticate -------------------------------------------
+    if current_user.get('password_hash'):
+        if not request.password or not verify_password(request.password, current_user['password_hash']):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password is incorrect."
+            )
+    else:
+        submitted = (request.confirm_email or "").strip().lower()
+        if submitted != (current_user.get('email') or "").lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Type your email address exactly to confirm deletion."
+            )
+
+    # --- Guard 2: never orphan the admin panel ------------------------------
+    if current_user.get('is_admin') and UserOperations.count_admins() <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=("This is the only admin account. Promote another admin before "
+                    "deleting this one, or the admin panel becomes unreachable.")
+        )
+
+    # --- Guard 3: no deleting out from under a running worker ---------------
+    # A generation job holds open paths inside generated_stories/<id>. rmtree-ing
+    # that while it writes gives half-deleted stories and a traceback per
+    # remaining scene, so wait for it rather than race it.
+    if job_manager.has_active_job(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=("A story is still being generated on this account. Please wait "
+                    "for it to finish, then delete your account.")
+        )
+
+    try:
+        summary = UserOperations.delete_account(current_user)
+    except RuntimeError as e:
+        # Raised deliberately by delete_account when it stopped early and left
+        # the account intact - surface its message, it is written for the user.
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    except Exception as e:
+        logger.error(f"Account deletion failed for user {user_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Account deletion failed. Nothing has been changed; please try again."
+        )
+
+    return {"message": "Your account and all of its data have been permanently deleted.", **summary}

@@ -58,7 +58,6 @@ function MainApp() {
   const [selectedAvatar, setSelectedAvatar] = useState(null)
   // New state for Kokoro TTS
   const [voice, setVoice] = useState('af_sarah');
-  const [speed, setSpeed] = useState(1.0);
   const [detectedLanguage, setDetectedLanguage] = useState('en');
   
   const [storyData, setStoryData] = useState(null)
@@ -72,7 +71,18 @@ function MainApp() {
   // lands nowhere and its narration is lost silently.
   const storyFullyReady = totalScenes > 0 && completedSceneCount >= totalScenes
   const [error, setError] = useState(null)
-  const [gradeLevel, setGradeLevel] = useState(3)
+  // Set when the backend reports attempt > 1: the first generation failed for a
+  // retryable reason and a second is running. Without this the extra ~60s reads
+  // as the app having hung.
+  const [isRetrying, setIsRetrying] = useState(false)
+  // A note on a DELIVERED story ("8 questions instead of the 10 you asked for"),
+  // never an error - the story is complete and playable either way.
+  const [quizNotice, setQuizNotice] = useState(null)
+  // Grade id, e.g. "KG1", "KG2", "1".."10" - matches backend
+  // services/grade_bands.py GRADE_BANDS keys exactly. This used to be a bare
+  // int (1-7) sent straight to the LLM prompt as e.g. "3", with no grade
+  // descriptor at all - see grade_bands.py for why that mattered.
+  const [gradeLevel, setGradeLevel] = useState('4')
   const [currentJobId, setCurrentJobId] = useState(null)
   const [showSaveModal, setShowSaveModal] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
@@ -185,10 +195,10 @@ function MainApp() {
     setStep(newStep)
   }
 
-  // Shared by both upload paths (handleFileUpload's real upload, generateStory's
-  // avatar-based flow) so there's a single place that knows how to interpret a
-  // /api/status/{job_id} tick — the two previously had separate, drifting copies
-  // of this logic, which is how one of them ended up with a real bug.
+  // There is now exactly one upload path (startUpload), so this is the single
+  // place that knows how to interpret a /api/status/{job_id} tick. There used to
+  // be two upload implementations with separate, drifting copies of this logic,
+  // which is how one of them ended up with a real bug.
   // Polling control. A fixed 2s setInterval that aborted on the first failed
   // fetch was a bad fit for the target device: a phone that briefly drops to no
   // signal would kill a perfectly healthy 3-minute generation with
@@ -256,6 +266,10 @@ function MainApp() {
       const elapsedSinceStart = Date.now() - generationStartRef.current
       setGeneratingStage(elapsedSinceStart < 8000 ? 0 : elapsedSinceStart < 20000 ? 1 : 2)
 
+      // >1 means the first attempt failed for a retryable reason and the backend
+      // is running a second one. Reported here rather than left as dead air.
+      setIsRetrying((job.attempt ?? 1) > 1)
+
       if (job.status === 'processing') {
         setProgress((prev) => Math.max(prev, job.progress ?? prev))
 
@@ -276,6 +290,8 @@ function MainApp() {
         stopPolling()
         setStoryData(job.result)
         setProgress(100)
+        setIsRetrying(false)
+        setQuizNotice(job.quiz_notice || null)
         if (job.total_scenes > 0) {
           setTotalScenes(job.total_scenes)
           setCompletedSceneCount(job.total_scenes)
@@ -286,8 +302,17 @@ function MainApp() {
         return false
       } else if (job.status === 'failed') {
         stopPolling()
+        setIsRetrying(false)
+        // job.error is now the classified, cause-specific sentence from
+        // services/failure_reasons.py, already carrying the credit-refund line.
+        // The old fallback stays only for a backend older than that change.
         setError(job.error || 'AI Generation failed.')
-        navigateTo('upload')
+        // A retryable failure (busy service, timeout, incomplete story) is not
+        // the file's fault, so keep the file and the voice choice and land the
+        // user one tap from trying again. A verdict-style failure - not
+        // educational, unreadable - needs a DIFFERENT document, so send them
+        // back to pick one.
+        navigateTo(job.can_retry ? 'confirm' : 'upload')
         return false
       }
       return true
@@ -482,6 +507,10 @@ function MainApp() {
   }
 
   const handleFileUpload = async (file) => {
+    // A new attempt starts here, so any error from the previous one is stale.
+    // Nothing on this path used to clear it, which left the banner from a failed
+    // upload sitting above a perfectly healthy retry.
+    setError(null)
     setUploadedFile(file)
     setUploadFileName(file.name)
     setShowUploadProgress(true)
@@ -512,23 +541,52 @@ function MainApp() {
       // Store hash for later use
       fileHashLocal = response.data.file_hash
       setFileHash(fileHashLocal)
-      if (DEBUG) console.log('✅ No duplicate, continuing upload')
+      if (DEBUG) console.log('✅ No duplicate, going to confirm screen')
     } catch (err) {
       if (DEBUG) console.error('❌ Error checking duplicate:', err)
       setShowUploadProgress(false)
       setError('Failed to check for duplicates: ' + err.message)
       return
     }
-    
-    // Real upload with XHR progress tracking
+
+    // Picking a file selects it, it does not submit it. This used to run the
+    // whole upload right here and jump straight to 'generating', which made the
+    // confirm/voice screen reachable ONLY through the duplicate-detection modal
+    // (onCreateNew -> navigateTo('confirm')). Testing with the same file every
+    // time always hit that modal, so the skipped screen stayed invisible until
+    // the first genuinely new file was uploaded.
+    setShowUploadProgress(false)
+    navigateTo('confirm')
+  }
+
+  // The one and only upload implementation. `selectedVoice` is passed in rather
+  // than read from state because the confirm screen calls setVoice() and this in
+  // the same tick - the state update would not have landed yet, and the user's
+  // voice choice would be silently dropped in favour of the previous value.
+  const startUpload = (selectedVoice, selectedQuizSize) => {
+    const file = uploadedFile
+    if (!file) {
+      setError('No file selected. Please pick a file again.')
+      navigateTo('upload')
+      return
+    }
+
+    setError(null)
+    setShowUploadProgress(true)
+    setUploadProgress(0)
+
     if (DEBUG) console.log('📊 Starting real upload with progress tracking')
     const uploadData = new FormData()
     uploadData.append('file', file)
     uploadData.append('grade_level', gradeLevel)
-    uploadData.append('voice', voice)
-    uploadData.append('speed', speed)
-    if (fileHashLocal) {
-      uploadData.append('file_hash', fileHashLocal)
+    uploadData.append('voice', selectedVoice || voice)
+    // Passed in for the same reason as the voice: the confirm screen sets it and
+    // calls this in one tick, so reading it back from state would send the
+    // previous value. The backend re-normalises it, so a junk value degrades to
+    // the default instead of failing the upload.
+    uploadData.append('quiz_size', String(selectedQuizSize || 10))
+    if (fileHash) {
+      uploadData.append('file_hash', fileHash)
     }
     uploadData.append('force_new', (duplicateInfo !== null).toString())
     uploadData.append('user_agent', navigator.userAgent)
@@ -555,7 +613,7 @@ function MainApp() {
             startPolling(jobId)
           } catch (parseErr) {
             setError('Invalid response from server')
-            navigateTo('upload')
+            navigateTo('confirm')
           }
         } else if (xhr.status === 429) {
           // Admission control: the queue is full, or this account already has
@@ -567,7 +625,10 @@ function MainApp() {
           } catch (parseErr) {
             setError('Too many stories are generating right now. Please try again in a few minutes.')
           }
-          navigateTo('upload')
+          // Stay on 'confirm' - the file and the voice choice are still valid,
+          // so the retry is one tap. Going back to 'upload' would make the user
+          // re-pick the file for an error that has nothing to do with the file.
+          navigateTo('confirm')
         } else if (xhr.status === 402) {
           try {
             const result = JSON.parse(xhr.responseText)
@@ -576,17 +637,17 @@ function MainApp() {
             setUpgradeMessage('')
           }
           setShowUpgradeModal(true)
-          navigateTo('upload')
+          navigateTo('confirm')
         } else {
           setError('Upload failed with status: ' + xhr.status)
-          navigateTo('upload')
+          navigateTo('confirm')
         }
       }, 500)
     })
     xhr.addEventListener('error', () => {
       setShowUploadProgress(false)
       setError('Upload failed due to network error')
-      navigateTo('upload')
+      navigateTo('confirm')
     })
     xhr.open('POST', API_URL + '/api/upload')
     xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`)
@@ -613,88 +674,18 @@ function MainApp() {
   }
 
   const handleConfirmFile = async (settings) => {
-    if (settings) {
-      setVoice(settings.voice);
-      setSpeed(settings.speed);
+    const chosenVoice = settings?.voice || voice
+    if (settings?.voice) {
+      setVoice(settings.voice)
     }
-    // Check if this was after a duplicate detection and user wants to force new
-    const forceNew = duplicateInfo !== null
-    await generateStory('Professor Paws', forceNew) // Use default avatar
-    // Clear duplicate info after using it
+    setProgress(0)
+    setIsSaved(false)
+    setIsRetrying(false)
+    setQuizNotice(null)
+    // duplicateInfo being set means the user came through the duplicate modal
+    // and explicitly asked for a fresh generation.
+    startUpload(chosenVoice, settings?.quizSize)
     setDuplicateInfo(null)
-  }
-
-  const handleAvatarSelect = async (avatar) => {
-    setSelectedAvatar(avatar)
-    // Check if this was after a duplicate detection and user wants to force new
-    const forceNew = duplicateInfo !== null
-    await generateStory(avatar, forceNew)
-    // Clear duplicate info after using it
-    if (forceNew) {
-      setDuplicateInfo(null)
-    }
-  }
-
-  const generateStory = async (avatar, forceNew = false) => {
-    try {
-      navigateTo('generating')
-      setError(null)
-      setProgress(0)
-      setIsSaved(false)
-      generationStartRef.current = Date.now()
-      setGeneratingStage(0)
-
-      const formData = new FormData()
-      formData.append('file', uploadedFile)
-      formData.append('grade_level', gradeLevel)
-      formData.append('avatar_type', avatar.id)
-      // Append new Kokoro TTS settings
-      formData.append('voice', voice)
-      formData.append('speed', speed)
-      // Append file hash and force_new flag
-      if (fileHash) {
-        formData.append('file_hash', fileHash)
-      }
-      formData.append('force_new', forceNew.toString())
-      
-      // Append user agent for mobile detection
-      formData.append('user_agent', navigator.userAgent)
-
-      // Use apiClient for automatic auth headers, assuming it's the default export from api.js
-      const response = await fetch(`${API_URL}/api/upload`, { 
-        method: 'POST', 
-        body: formData,
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-        }
-      })
-      
-      if (response.status === 429) {
-        // See the XHR path above - nothing charged, nothing created.
-        const result = await response.json().catch(() => ({}))
-        setError(result?.detail?.message || 'Too many stories are generating right now. Please try again in a few minutes.')
-        navigateTo('upload')
-        return
-      }
-      if (response.status === 402) {
-        const result = await response.json().catch(() => ({}))
-        setUpgradeMessage(result.detail || '')
-        setShowUpgradeModal(true)
-        navigateTo('upload')
-        return
-      }
-      if (!response.ok) throw new Error("Failed to start story generation.")
-      
-      const { job_id } = await response.json()
-      setCurrentJobId(job_id)
-
-      // Polling Loop
-      startPolling(job_id)
-
-    } catch (err) {
-      setError(err.message)
-      navigateTo('upload')
-    }
   }
 
   const handleLogout = () => {
@@ -1000,21 +991,37 @@ function MainApp() {
               {/* Progress ring replaces the flat bar: the number is readable at a
                   glance on a phone, and the conic sweep keeps moving so a long
                   generation never looks frozen. */}
+              {/* Before the first scene exists there is genuinely nothing to
+                  measure, so the backend reports 0 rather than inventing a fake
+                  ramp. Showing a literal "0%" for the first ~30s reads as
+                  broken - spin the ring instead and say what is happening. */}
               <div
-                className="progress-ring"
+                className={`progress-ring${progress === 0 ? ' is-indeterminate' : ''}`}
                 style={{ '--ring-progress': `${progress}%` }}
                 role="progressbar"
-                aria-valuenow={progress}
-                aria-valuemin={0}
-                aria-valuemax={100}
+                {...(progress === 0
+                  ? {}
+                  : { 'aria-valuenow': progress, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
                 aria-label="Story generation progress"
               >
                 <div className="progress-ring-track" />
                 <div className="progress-ring-core">
-                  <span className="progress-ring-value">{progress}<i>%</i></span>
-                  <span className="progress-ring-label">Building</span>
+                  {progress === 0 ? (
+                    <span className="progress-ring-label">Reading</span>
+                  ) : (
+                    <>
+                      <span className="progress-ring-value">{progress}<i>%</i></span>
+                      <span className="progress-ring-label">Building</span>
+                    </>
+                  )}
                 </div>
               </div>
+              {isRetrying && (
+                <p className="retry-notice" role="status">
+                  <RefreshCw size={14} aria-hidden="true" />
+                  <span>The first attempt didn&rsquo;t come through &mdash; trying once more. Your credit is safe.</span>
+                </p>
+              )}
               <div className="generating-mascot">
                 <Mascot mood={generatingStage === 0 ? 'reading' : 'thinking'} size={104} />
               </div>
@@ -1057,6 +1064,19 @@ function MainApp() {
 
           {step === 'playing' && storyData && (
             <motion.div key="playing" className="player-container">
+              {/* A short quiz is a note on a finished story, not a failure - it
+                  must never use the error banner, which offers "Try Again" for
+                  something that already succeeded. */}
+              {quizNotice && (
+                <div className="quiz-notice" role="status">
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <span>{quizNotice}</span>
+                  <button
+                    onClick={() => setQuizNotice(null)}
+                    aria-label="Dismiss notice"
+                  >&times;</button>
+                </div>
+              )}
               <StoryPlayer
                 ref={storyPlayerRef}
                 storyData={storyData} 
@@ -1199,71 +1219,6 @@ function MainApp() {
             />
           )}
 
-          {/* Update notification */}
-          {showUpdateNotification && (
-            <motion.div
-              initial={{ opacity: 0, y: -50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -50 }}
-              style={{
-                position: 'fixed',
-                top: '20px',
-                right: '20px',
-                zIndex: 10000,
-                background: 'linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%)',
-                padding: '1rem 1.5rem',
-                borderRadius: '12px',
-                boxShadow: '0 8px 32px rgba(139, 92, 246, 0.35)',
-                color: 'white',
-                maxWidth: '400px',
-                border: '1px solid rgba(255, 255, 255, 0.2)'
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '0.75rem' }}>
-                <RefreshCw size={22} aria-hidden="true" />
-                <div>
-                  <h4 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>Update Available</h4>
-                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', opacity: 0.9 }}>
-                    A new version is ready to install
-                  </p>
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button
-                  onClick={handleUpdateApp}
-                  style={{
-                    flex: 1,
-                    padding: '0.65rem 1.2rem',
-                    background: 'white',
-                    color: '#8b5cf6',
-                    border: 'none',
-                    borderRadius: '8px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    fontSize: '0.95rem'
-                  }}
-                >
-                  Update Now
-                </button>
-                <button
-                  onClick={dismissUpdate}
-                  style={{
-                    padding: '0.65rem 1.2rem',
-                    background: 'rgba(255, 255, 255, 0.15)',
-                    color: 'white',
-                    border: '1px solid rgba(255, 255, 255, 0.3)',
-                    borderRadius: '8px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    fontSize: '0.95rem'
-                  }}
-                >
-                  Later
-                </button>
-              </div>
-            </motion.div>
-          )}
-
           {/* Hidden file input for re-upload */}
           <input
             ref={fileInputRef}
@@ -1276,6 +1231,76 @@ function MainApp() {
           />
         </div>
       </main>
+
+      {/* Update notification - lives OUTSIDE <main> on purpose. .app-main sets
+          position:relative + z-index:1, which traps everything inside it in a
+          stacking context below the z-index:100 sticky header, so no z-index
+          value here (however large) could ever lift it above the header. */}
+      {showUpdateNotification && (
+        <motion.div
+          initial={{ opacity: 0, y: -50 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -50 }}
+          style={{
+            position: 'fixed',
+            top: 'calc(var(--app-header-h, 68px) + 12px)',
+            left: '16px',
+            right: '16px',
+            marginLeft: 'auto',
+            zIndex: 10000,
+            background: 'linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%)',
+            padding: '1rem 1.5rem',
+            borderRadius: '12px',
+            boxShadow: '0 8px 32px rgba(139, 92, 246, 0.35)',
+            color: 'white',
+            maxWidth: '400px',
+            border: '1px solid rgba(255, 255, 255, 0.2)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '0.75rem' }}>
+            <RefreshCw size={22} aria-hidden="true" />
+            <div>
+              <h4 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>Update Available</h4>
+              <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', opacity: 0.9 }}>
+                A new version is ready to install
+              </p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              onClick={handleUpdateApp}
+              style={{
+                flex: 1,
+                padding: '0.65rem 1.2rem',
+                background: 'white',
+                color: '#8b5cf6',
+                border: 'none',
+                borderRadius: '8px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontSize: '0.95rem'
+              }}
+            >
+              Update Now
+            </button>
+            <button
+              onClick={dismissUpdate}
+              style={{
+                padding: '0.65rem 1.2rem',
+                background: 'rgba(255, 255, 255, 0.15)',
+                color: 'white',
+                border: '1px solid rgba(255, 255, 255, 0.3)',
+                borderRadius: '8px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontSize: '0.95rem'
+              }}
+            >
+              Later
+            </button>
+          </div>
+        </motion.div>
+      )}
     </div>
     </ErrorBoundary>
   )

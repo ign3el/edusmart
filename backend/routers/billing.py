@@ -15,6 +15,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
+import mysql.connector
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -222,11 +223,34 @@ def refund_credit(user_id: int, story_id: Optional[str] = None) -> None:
         if row and row.get('is_admin'):
             return
 
+        # Ledger row FIRST, balance second. The unique index on
+        # (story_id, reason) makes the insert the thing that decides whether
+        # this refund is allowed to happen, so a duplicate refund fails here
+        # BEFORE any credit is granted. Doing it the other way round (check,
+        # then update, then insert) leaves a window where two concurrent
+        # refunds both pass the check and both credit the balance.
+        #
+        # story_id is optional on this function's signature; a refund with no
+        # story_id cannot be deduplicated (MySQL allows unlimited NULLs in a
+        # unique index), which is correct - there is no identity to key on.
+        if story_id is not None:
+            try:
+                cursor.execute(
+                    "INSERT INTO credit_transactions (user_id, delta, reason, story_id) "
+                    "VALUES (%s, 1, 'generation_failed_refund', %s)",
+                    (user_id, story_id)
+                )
+            except mysql.connector.IntegrityError:
+                logger.info(f"Refund for story {story_id} already recorded; skipping duplicate credit.")
+                return
+        else:
+            cursor.execute(
+                "INSERT INTO credit_transactions (user_id, delta, reason, story_id) "
+                "VALUES (%s, 1, 'generation_failed_refund', NULL)",
+                (user_id,)
+            )
+
         cursor.execute("UPDATE users SET credits_balance = credits_balance + 1 WHERE id = %s", (user_id,))
-        cursor.execute(
-            "INSERT INTO credit_transactions (user_id, delta, reason, story_id) VALUES (%s, 1, 'generation_failed_refund', %s)",
-            (user_id, story_id)
-        )
 
 
 # --- Public endpoints ---

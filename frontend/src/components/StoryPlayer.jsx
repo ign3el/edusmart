@@ -92,6 +92,11 @@ const StoryPlayer = forwardRef(({
   const pointerTiltRef = useRef({ x: 0, y: 0 })
   const playGlowRef = useRef(null)
   const pendingAdvanceRef = useRef(false)
+  // Which scene the reset block last ran for, and which audio url is currently
+  // loaded into the element. Both exist because the scene-change effect now
+  // also fires when assets arrive mid-scene; see the effect for why.
+  const resetForSceneRef = useRef(-1)
+  const appliedAudioUrlRef = useRef(null)
   const prefetchedUrlsRef = useRef(new Set())
   const playbackRateRef = useRef(1)
   const [playbackRate, setPlaybackRate] = useState(1)
@@ -104,11 +109,40 @@ const StoryPlayer = forwardRef(({
   const actualTotal = Math.max(totalScenes, scenes.length)
   const scene = scenes[currentScene]
 
+  // "Published" no longer means "playable". A scene reaches the player as soon
+  // as its TEXT exists, so scenes.length reaches actualTotal a second or two
+  // after the LLM finishes while every picture and narration track is still
+  // being made. Readiness therefore has to count ASSETS, not array entries -
+  // counting entries is exactly what made the "N/M ready" chip stop appearing
+  // once the player started opening early.
+  const readyCount = scenes.filter(s => s.image_url && s.audio_url).length
+  const allScenesReady = scenes.length >= actualTotal && readyCount >= actualTotal
+  // Generation is over when the backend says every scene is done - and App.jsx
+  // forces this true the moment polling stops, INCLUDING for a story that
+  // finished with a scene whose audio never got made. That distinction is
+  // load-bearing: Next is gated on narration below, and a permanently-null
+  // audio_url must never strand a child mid-story behind a dead button.
+  const generationDone = totalScenes > 0 && completedSceneCount >= totalScenes
+  const nextScene = scenes[currentScene + 1]
+  const nextNotReady = !generationDone && !!nextScene && !nextScene.audio_url
+  // The 'ended' listener is registered per scene but runs much later, by which
+  // point more assets have landed - so it must not trust its captured `scenes`.
+  const scenesRef = useRef(scenes)
+  scenesRef.current = scenes
+
   // URLs
   const fullImageUrl = buildFullUrl(scene?.image_url)
   const fullAudioUrl = buildFullUrl(scene?.audio_url)
 
-  const show3D = supports3D && !imageError
+  // A scene now reaches the player as soon as its TEXT exists; the picture and
+  // the narration land afterwards and arrive through polling as url changes on
+  // this same object (see /api/status in backend/main.py). Null means "not made
+  // yet", which is a waiting state - never an error, and never something to
+  // hand to <img>, <audio> or the 3D layer.
+  const imagePending = !fullImageUrl
+  const audioPending = !fullAudioUrl
+
+  const show3D = supports3D && !imageError && !imagePending
 
   // Expose download trigger
   useImperativeHandle(ref, () => ({
@@ -117,22 +151,39 @@ const StoryPlayer = forwardRef(({
     // No-op for backward compat
   }))
 
-  // Reset on scene change
+  // Reset on scene change.
+  //
+  // This effect also has to re-run when image_url/audio_url arrive mid-scene,
+  // because a scene now reaches the player with text only and its assets are
+  // filled in later by polling. That makes the distinction below load-bearing:
+  // everything that represents the USER'S intent (paused, already auto-played,
+  // pending advance) must survive an asset arriving, or the story resumes
+  // itself the moment the picture lands - the same "pause doesn't work" bug
+  // that oncanplaythrough used to cause, arriving by a new route.
   useEffect(() => {
-    prevImageUrlRef.current = lastImageUrlRef.current
-    lastImageUrlRef.current = fullImageUrl
+    const isNewScene = resetForSceneRef.current !== currentScene
+    resetForSceneRef.current = currentScene
 
-    setProgress(0)
-    setCurrentTime(0)
-    setDuration(0)
-    savedTimeRef.current = 0
-    setImageLoaded(false)
-    setImageError(false)
-    setAudioError(false)
-    setGeneratingMessage('')  // Clear "Preparing next scene..." when new scene loads
-    userPausedRef.current = false
-    autoPlayedRef.current = false
-    pendingAdvanceRef.current = false
+    if (isNewScene) {
+      // Only a genuine page turn feeds the 3D transition its previous image;
+      // an asset arriving for the CURRENT scene is not a page turn.
+      prevImageUrlRef.current = lastImageUrlRef.current
+      lastImageUrlRef.current = fullImageUrl
+
+      setProgress(0)
+      setCurrentTime(0)
+      setDuration(0)
+      savedTimeRef.current = 0
+      setImageLoaded(false)
+      setImageError(false)
+      setAudioError(false)
+      setGeneratingMessage('')  // Clear "Preparing next scene..." when new scene loads
+      userPausedRef.current = false
+      autoPlayedRef.current = false
+      pendingAdvanceRef.current = false
+    } else {
+      lastImageUrlRef.current = fullImageUrl
+    }
 
     // Preload image
     if (fullImageUrl) {
@@ -142,11 +193,25 @@ const StoryPlayer = forwardRef(({
       img.src = fullImageUrl
     }
 
-    // Reset audio and auto-play when ready
-    if (audioRef.current) {
+    // Reset audio and auto-play when ready. Narration for this scene may not
+    // exist yet - assigning src="" and calling load() fires a media error and
+    // leaves the element permanently unusable for this scene, so leave it alone
+    // entirely until a url arrives. fullAudioUrl is in this effect's deps, so
+    // the moment polling fills it in this runs again and playback starts.
+    //
+    // Guarded on the url having actually CHANGED: this effect re-runs when the
+    // image lands too, and re-running the block below on live narration would
+    // pause it and rewind it to 0 mid-sentence.
+    const audioUrlChanged = appliedAudioUrlRef.current !== fullAudioUrl
+    appliedAudioUrlRef.current = fullAudioUrl
+
+    if (audioRef.current && !fullAudioUrl) {
+      audioRef.current.pause()
+      audioRef.current.removeAttribute('src')
+    } else if (audioRef.current && audioUrlChanged) {
       audioRef.current.pause()
       audioRef.current.currentTime = 0
-      audioRef.current.src = fullAudioUrl || ''
+      audioRef.current.src = fullAudioUrl
       audioRef.current.load()
       audioRef.current.oncanplaythrough = () => {
         setGeneratingMessage('') // Clear waiting message once audio loads
@@ -254,11 +319,22 @@ const StoryPlayer = forwardRef(({
       userPausedRef.current = false
       setIsPlaying(false)
 
-      // Use scenes.length (what we actually have) not actualTotal (what backend promised)
-      if (currentScene < scenes.length - 1) {
+      // Read the CURRENT scene list, not the one captured when this listener was
+      // registered - urls keep landing while a scene plays, so the closure is
+      // always stale by the time narration ends.
+      const live = scenesRef.current
+      const next = live[currentScene + 1]
+      if (next && next.audio_url) {
         setGeneratingMessage('Preparing next scene...')
         setCurrentScene(s => s + 1)
-      } else if (scenes.length < actualTotal) {
+      } else if (next) {
+        // The page exists but has no narration yet. Turning to it would leave a
+        // silent scene with a disabled play button and nothing to end, which
+        // reads as the story having simply stopped. Wait here instead; the
+        // effect below moves us the instant the audio url arrives.
+        pendingAdvanceRef.current = true
+        setGeneratingMessage('Ollie is still recording the next page...')
+      } else if (live.length < actualTotal) {
         // Next scene isn't generated yet. Don't guess with a fixed-delay timer -
         // it used to check `scenes.length` 5s later from a closure captured right
         // now, which never saw scenes that arrived via polling in the meantime, so
@@ -267,7 +343,7 @@ const StoryPlayer = forwardRef(({
         // waiting; the effect below watches storyData/scenes.length directly and
         // advances the instant a real new scene shows up, however long that takes.
         pendingAdvanceRef.current = true
-        setGeneratingMessage(`Waiting for remaining scenes... (${scenes.length}/${actualTotal} ready)`)
+        setGeneratingMessage(`Waiting for remaining scenes... (${live.length}/${actualTotal} ready)`)
       } else {
         setGeneratingMessage('')
         setShowQuiz(true)
@@ -293,23 +369,30 @@ const StoryPlayer = forwardRef(({
     }
   }, [currentScene, actualTotal])
 
-  // Fires whenever a fresh scene actually lands (storyData/scenes.length changes,
-  // driven by App.jsx's polling), not on a fixed timer - so playback picks the
-  // next scene up the moment it's real, whether that's 2 seconds or 2 minutes
-  // after we started waiting, and reliably catches up once the full story
-  // finishes even if we'd already been sitting on the "waiting" screen a while.
+  // Fires whenever the scene list changes (driven by App.jsx's polling), not on
+  // a fixed timer - so playback picks the next page up the moment it's real,
+  // whether that's 2 seconds or 2 minutes after we started waiting, and reliably
+  // catches up once the full story finishes even if we'd already been sitting on
+  // the "waiting" message a while.
+  //
+  // The trigger is the next scene's AUDIO, not its existence: since the player
+  // opens on text, the next scene is usually already in the array with null urls
+  // long before there is anything to narrate. `scenes` is a fresh array on every
+  // poll, which is what makes this re-check as assets trickle in; the ref guard
+  // above keeps that to an early return in the normal case.
   useEffect(() => {
     if (!pendingAdvanceRef.current) return
-    if (scenes.length > currentScene + 1) {
+    const next = scenes[currentScene + 1]
+    if (next && next.audio_url) {
       pendingAdvanceRef.current = false
       setGeneratingMessage('Preparing next scene...')
       setCurrentScene(s => s + 1)
-    } else if (scenes.length >= actualTotal) {
+    } else if (!next && allScenesReady) {
       pendingAdvanceRef.current = false
       setGeneratingMessage('')
       setShowQuiz(true)
     }
-  }, [scenes.length, actualTotal, currentScene])
+  }, [scenes, allScenesReady, currentScene])
 
   // A detached <audio> can keep playing in Chrome, so leaving the player
   // mid-story used to narrate over whatever screen you navigated to.
@@ -533,10 +616,10 @@ const StoryPlayer = forwardRef(({
           <h1 className="story-title">{storyData?.title || 'Untitled Story'}</h1>
           <span className="scene-badge">
             Scene {currentScene + 1} of {actualTotal}
-            {scenes.length < actualTotal && (
-              <span className="scenes-ready-chip">
+            {!allScenesReady && (
+              <span className="scenes-ready-chip" aria-live="polite">
                 <Loader2 size={11} className="scenes-ready-spinner" aria-hidden="true" />
-                {scenes.length}/{actualTotal} ready
+                {readyCount}/{actualTotal} ready
               </span>
             )}
           </span>
@@ -574,7 +657,10 @@ const StoryPlayer = forwardRef(({
           {!imageLoaded && !imageError && (
             <div className="image-skeleton">
               <div className="skeleton-pulse" />
-              <span><BookOpen size={18} aria-hidden="true" /> Scene {currentScene + 1}</span>
+              <span>
+                <BookOpen size={18} aria-hidden="true" />
+                {imagePending ? ' Ollie is painting this picture…' : ` Scene ${currentScene + 1}`}
+              </span>
             </div>
           )}
           {imageError && (
@@ -663,11 +749,23 @@ const StoryPlayer = forwardRef(({
           <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={currentScene === 0} aria-label="Previous scene">
             <SkipBack size={22} />
           </button>
-          <button className={`ctrl-btn play-btn ${isPlaying ? 'is-playing' : ''}`} onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play story'}>
+          <button
+            className={`ctrl-btn play-btn ${isPlaying ? 'is-playing' : ''} ${audioPending ? 'is-waiting' : ''}`}
+            onClick={togglePlay}
+            disabled={audioPending}
+            aria-label={audioPending ? 'Narration is still being recorded' : (isPlaying ? 'Pause' : 'Play story')}
+            title={audioPending ? 'Narration is still being recorded' : undefined}
+          >
             <span ref={playGlowRef} className="play-btn-glow" aria-hidden="true" />
             {isPlaying ? <Pause size={26} /> : <Play size={26} />}
           </button>
-          <button className="ctrl-btn" onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))} disabled={currentScene >= scenes.length - 1 && scenes.length >= actualTotal} aria-label="Next scene">
+          <button
+            className={`ctrl-btn ${nextNotReady ? 'is-waiting' : ''}`}
+            onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))}
+            disabled={(currentScene >= scenes.length - 1 && scenes.length >= actualTotal) || nextNotReady}
+            aria-label={nextNotReady ? 'The next page is still being recorded' : 'Next scene'}
+            title={nextNotReady ? 'The next page is still being recorded' : undefined}
+          >
             <SkipForward size={22} />
           </button>
           <button className="ctrl-btn speed-btn" onClick={cyclePlaybackRate} aria-label={`Playback speed ${playbackRate}x, tap to change`}>
@@ -690,7 +788,7 @@ const StoryPlayer = forwardRef(({
               storyId={savedStoryId || currentJobId}
               onClose={() => setShowQuiz(false)}
               onBackToStory={() => setShowQuiz(false)}
-              onComplete={onRestart}
+              onComplete={() => { setShowQuiz(false); onRestart?.() }}
             />
           </motion.div>
         )}

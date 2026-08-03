@@ -2,6 +2,8 @@ import asyncio
 import logging
 import io
 import httpx
+from typing import Optional
+
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from config import Config
 from fastapi.responses import Response
@@ -12,6 +14,7 @@ import docx
 
 from .auth import get_current_user
 from database_models import User
+from services.story_service import estimate_question_capacity
 
 TTS_PREVIEW_MAX_CHARS = 1000
 
@@ -30,6 +33,12 @@ class TextExtractionResponse(BaseModel):
     text: str
     language_code: str
     suggested_engine: str
+    # How many distinct quiz questions this document can plausibly support, or
+    # None when there is too little native text to have an opinion (a scanned
+    # PDF reads as empty here but is vision-read during generation). The confirm
+    # screen uses this to warn BEFORE a credit is spent; see
+    # story_service.estimate_question_capacity.
+    estimated_questions: Optional[int] = None
 
 class TTSPreviewRequest(BaseModel):
     text: str = Field(..., max_length=TTS_PREVIEW_MAX_CHARS)
@@ -98,7 +107,12 @@ async def extract_text_from_file(
         else:
             suggested_engine = "kokoro" # Prioritize Kokoro for En/Hi/Others
 
-        return {"text": text, "language_code": lang_code, "suggested_engine": suggested_engine}
+        return {
+            "text": text,
+            "language_code": lang_code,
+            "suggested_engine": suggested_engine,
+            "estimated_questions": estimate_question_capacity(text),
+        }
 
     except Exception as e:
         if isinstance(e, HTTPException):

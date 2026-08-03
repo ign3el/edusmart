@@ -46,15 +46,20 @@ function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading })
         <select
           id="grade"
           value={gradeLevel}
-          onChange={(e) => onGradeLevelChange(parseInt(e.target.value))}
+          onChange={(e) => onGradeLevelChange(e.target.value)}
         >
-          <option value={1}>KG-1 / Grade 1</option>
-          <option value={2}>Grade 2</option>
-          <option value={3}>Grade 3</option>
-          <option value={4}>Grade 4</option>
-          <option value={5}>Grade 5</option>
-          <option value={6}>Grade 6</option>
-          <option value={7}>Grade 7</option>
+          <option value="KG1">KG-1</option>
+          <option value="KG2">KG-2</option>
+          <option value="1">Grade 1</option>
+          <option value="2">Grade 2</option>
+          <option value="3">Grade 3</option>
+          <option value="4">Grade 4</option>
+          <option value="5">Grade 5</option>
+          <option value="6">Grade 6</option>
+          <option value="7">Grade 7</option>
+          <option value="8">Grade 8</option>
+          <option value="9">Grade 9</option>
+          <option value="10">Grade 10</option>
         </select>
       </div>
 

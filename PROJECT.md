@@ -8,13 +8,97 @@ AI-powered educational storybook platform. A user (teacher/parent/student) uploa
 |---|---|
 | Frontend | React 18 + Vite, react-router-dom v7, framer-motion, react-three-fiber/drei (background only), axios |
 | Backend | Python FastAPI (single `uvicorn main:app`, no multi-worker). Story generation runs through a durable SQLite-backed queue with a fixed worker pool - see Concurrency & Scaling |
-| Story generation | Groq (`llama-3.3-70b-versatile`) — **not** Gemini, despite `google-genai` being installed and referenced in some dead code paths |
+| Story generation | **Gemini `gemini-3.5-flash-lite`** (primary), Groq `openai/gpt-oss-120b` (fallback on Gemini 503). See *LLM model split* below — this choice is load-bearing, not incidental |
+| Page/image reading (vision) | **Gemini `gemini-3.1-flash-lite`** — deliberately a *different* model from story generation |
 | Images | RunPod ComfyUI (FLUX.1-dev), with a monthly AED spend cap |
 | TTS (English) | Self-hosted Kokoro-82M (`kokoro-tts:8880` container), reached via two parallel client wrappers |
 | TTS (Arabic) | A hosted Piper-compatible endpoint (`TTS_API_URL`) — **only reachable from the admin TTS-test tool and the voice-preview endpoint, not from the actual story-generation pipeline** (see Known Issues) |
 | Main DB | MySQL — users, saved stories |
 | Job-tracking DB | SQLite (`db_data/job_state.db`, Docker named volume) — in-progress/generated story state |
 | Mobile | PWA (service worker, install prompt, offline story storage via IndexedDB/localStorage) |
+
+## User-chosen quiz size + capacity check (2026-08-03, `20260803_205230`)
+
+Quiz length is a **user choice** (5/10/15/20, default 10), not a hardcoded rule,
+and a short quiz is **never** a fatal validation error — the 2026-08-03 failure was
+a complete, correct story destroyed because its quiz had 7 questions instead of 10.
+
+- `QUIZ_SIZE_OPTIONS` / `DEFAULT_QUIZ_SIZE` / `normalize_quiz_size()` in
+  `services/story_service.py`; the frontend list in `FileConfirmation.jsx` must
+  match. `normalize_quiz_size` never raises — junk snaps to the nearest offered
+  size, so a bad form field can't fail an upload whose file already crossed the wire.
+- `MIN_VIABLE_QUIZ = 3` is the only fatal floor. Below it the *generation* went
+  wrong; above it the *document* was thin, which is a notice, not an error.
+- **Quiz size must never drive scene count.** The prompt says so explicitly and
+  `tests/test_quiz_sizing.py` asserts the line is still there — the model
+  otherwise aligns the two counts on its own.
+
+### Capacity check (`estimate_question_capacity`)
+
+Runs on the confirm screen over the text `/api/upload/extract-text` already
+extracts for language detection. **Deliberately a free heuristic, not a model
+call**: no quota, no latency, cannot itself fail. It only decides whether to *ask*
+the user before a credit is spent; the model is still told to produce the exact
+requested count, and a real shortfall comes back afterwards as `quiz_notice` on a
+delivered story.
+
+Returns `None` — meaning *no opinion*, and the UI must stay silent — when native
+text is under `_CAPACITY_MIN_CHARS` (800). **This is the case that matters:** the
+check reads pypdf/docx output while the generator *also* vision-reads the pages,
+so a scanned PDF looks empty here and full to the model. Warning "this can only
+make 3 questions" on a document that comfortably makes 20 is worse than saying
+nothing. Bounded by characters *and* sentence count — padding must not buy
+capacity. Measured: the chem chapter → 18, a 1.3k-char handout → 3.
+
+## LLM model split (2026-08-03) — read before changing any model name
+
+Two Gemini models, two jobs, on purpose. **Gemini's free tier meters RPM/RPD per
+model**, so putting both jobs on one model makes them share a single
+500-requests-a-day pool; splitting them gives each its own.
+
+| Job | Model | Free-tier limits | Volume |
+|---|---|---|---|
+| Story + quiz | `gemini-3.5-flash-lite` | 15 RPM / 500 RPD / 250K TPM | ~1.5 calls per story |
+| Page reading | `gemini-3.1-flash-lite` | 15 RPM / 500 RPD / 250K TPM | 2-6 calls per document |
+
+Vision is the tighter constraint (~125 stories/day vs ~333), which is why it gets
+a pool to itself. `_STORY_MODEL` and `_VISION_MODEL` in `services/story_service.py`
+**must stay different models** — there is a test asserting this
+(`tests/test_story_model_split.py`).
+
+### Why story generation moved off Groq
+
+Groq's free `on_demand` tier caps this account at **8000 tokens per minute**, and
+Groq charges *prompt tokens + requested `max_tokens`* against that one budget.
+That forced the document to be truncated to 6500 characters before the model saw
+it — not for quality reasons, purely to fit the ceiling.
+
+Measured on a real NCERT Class 10 chemistry chapter (13,614 chars extracted), the
+cut silently discarded:
+
+| Topic | Char position |
+|---|---|
+| washing soda | 6,573 |
+| bleaching powder | 6,590 |
+| chlor-alkali process | 6,769 |
+| Plaster of Paris | 9,025 |
+
+Every story from that document covered half the chapter and nothing reported it.
+How close to the edge this was: adding ~60 tokens of prompt produced a 413 reading
+`Limit 8000, Requested 8004` — **four tokens over**.
+
+Gemini 3.5-flash-lite accepts ~1M input tokens against 250K/min. Same document,
+untruncated: 13.7s, 8 scenes, 10 questions, including a chlor-alkali question the
+Groq path could not physically have produced. Also faster than the 12.2s Groq run
+(and 34.2s end-to-end including one grade-calibration regeneration).
+
+**Groq remains the fallback** for Gemini 503 `UNAVAILABLE` ("experiencing high
+demand"), which is observed in practice and is Google-side, not ours. The fallback
+path still truncates to `_GROQ_MAX_DOC_CHARS` because its TPM ceiling has not
+moved — a fallback story is therefore *less complete* than a primary one.
+
+If TPM ever needs raising rather than routing around: Groq Dev Tier (paid) is the
+lever. Do not shave `_GROQ_MAX_DOC_CHARS` further; there is almost nothing left.
 
 ## Deploy
 Docker Compose (`docker-compose.yml` at repo root, one file for both `backend` and `frontend` services),
@@ -73,7 +157,7 @@ home ─▶ upload ─▶ confirm ─▶ generating ─▶ playing
 ```
 
 1. **home** — three entry points: Create New Story / Load Online Story / Offline Manager.
-2. **upload** (`FileUpload.jsx`) — drag-drop PDF/DOCX/DOC + grade level (1-7). On file select, `App.jsx`'s `handleFileUpload`:
+2. **upload** (`FileUpload.jsx`) — drag-drop PDF/DOCX/DOC + grade level (KG-1, KG-2, Grade 1-10 — id sent to the backend is `"KG1"`/`"KG2"`/`"1"`..`"10"`, matching `backend/services/grade_bands.py` exactly). On file select, `App.jsx`'s `handleFileUpload`:
    - POSTs the file to `/api/check-duplicate` (SHA-256 hash-based dedup via `hash_service.py`) — if a duplicate is found, shows `DuplicateStoryModal` (load existing vs. force new).
    - Otherwise uploads via raw `XMLHttpRequest` (for progress events) to `/api/upload`, gets back a `job_id`, and starts polling `/api/status/{job_id}` every 2s.
 3. **confirm** (`FileConfirmation.jsx`) — calls `/api/upload/extract-text` to detect document language, auto-picks a voice (`ar_teacher` for Arabic, `af_sarah` otherwise) via `TeacherCard.jsx`, lets the user set narration speed. Confirming calls `generateStory()`, which re-POSTs to `/api/upload` with `voice`/`speed`/`grade_level` and starts the same polling loop.
@@ -97,10 +181,11 @@ Auth screens (`Login`/`Signup`/`ForgotPassword`/`ResetPassword`/`VerifyEmail`) g
 | `routers/upload.py` | `/api/upload` | text extraction (PDF/DOCX/TXT + language detection), TTS preview proxy |
 
 **Story generation pipeline** (`services/story_service.py`, `StoryService` class, singleton `gemini` in main.py despite the name):
-- `process_file_to_story()` — the real generation call. Extracts text from the uploaded file, sends a structured prompt to **Groq** (`response_format=json_object`), validates the JSON (`_validate_story_json`), tops up to ≥10 quiz questions if needed. Prompt is capped to 5-10 scenes, document text truncated to 15k chars, includes an injection-defense clause and a content-safety refusal path (`{"error": "content_unsuitable"}`) — added 2026-07-19.
-- `generate_image()` / `generate_images_parallel()` — RunPod ComfyUI FLUX calls, up to 4 concurrent, with a monthly AED spend cap enforced via an `asyncio.Lock`-protected reserve-before-spend check against `services/runpod_usage.json`.
-- `generate_progressive_tts()` / `_generate_and_cache_tts()` — batched TTS generation (batch_size=2) for scenes 1-N, caches audio to `outputs/audio_cache/`, writes progress to `outputs/status/{story_id}.json`.
-- **Dead code inside this class** (harmless but never executes): `_ensure_minimum_questions()` and `generate_scene_priority()` both call `self.client.models.generate_content(...)` — `self.client`/`self.text_model` are never initialized anywhere (leftover from a pre-Groq Gemini implementation). `_ensure_minimum_questions` is unreachable in practice because it's only called after validation already guarantees ≥10 questions; `generate_scene_priority` is never called at all.
+- `process_file_to_story()` — the real generation call. Extracts text from the uploaded file, sends a structured prompt to **Groq** (`response_format=json_object`), validates the JSON (`_validate_story_json`), tops up to ≥10 quiz questions if needed via `_ensure_minimum_questions()` (a real, live Groq call through `self.groq_client` — an earlier version of this note called it dead code left over from a pre-Groq Gemini implementation; that's no longer true, it fires whenever the model under-delivers on the first pass). Prompt is capped to 5-10 scenes, document text truncated to 15k chars, includes an injection-defense clause and a content-safety refusal path (`{"error": "content_unsuitable"}`) — added 2026-07-19.
+- **Grade-band calibration (2026-07-26, `services/grade_bands.py`)** — single source of truth for what "age-appropriate" means at each grade, read by every prompt-building site below instead of each hardcoding its own logic. `grade_level` sent from the frontend is now one of `"KG1"`, `"KG2"`, `"1"`..`"10"` (was previously a bare int like `"3"` with zero grade-tuning behind it beyond the literal digit landing in the LLM prompt). Grades are grouped into 4 tiers (`early`/`lower`/`middle`/`upper`) each with a vocabulary constraint, sentence-length target, narrative length, quiz Bloom's-level ceiling, image illustration-complexity style, and TTS narration speed. `resolve_grade_spec(grade_level)` falls back to the Grade-4/`lower` spec for any unrecognized value rather than raising. Wired into: `process_file_to_story`'s `unified_prompt` (story text + quiz), `_ensure_minimum_questions`'s top-up prompt, `_generate_image_unbounded`'s `style_guide` (previously only varied by `is_mobile`, never by grade), and `_generate_and_cache_tts`'s narration `speed` (previously hardcoded `1.0` regardless of grade). `routers/admin.py`'s story retry endpoint looks up the original story's `grade_level` from `job_state` so a repaired scene matches the original grade's style/pace instead of silently falling back to default.
+- `generate_image()` / `generate_images_parallel()` — RunPod ComfyUI FLUX calls, up to 4 concurrent, with a monthly AED spend cap enforced via an `asyncio.Lock`-protected reserve-before-spend check against `services/runpod_usage.json`. Now grade-aware (see above) via an added `grade_level` param threaded through from `main.py`.
+- `generate_progressive_tts()` / `_generate_and_cache_tts()` — batched TTS generation (batch_size=2) for scenes 1-N, caches audio to `outputs/audio_cache/`, writes progress to `outputs/status/{story_id}.json`. Narration speed is now grade-derived (see above); `services/chatterbox_client.py`'s `generate_audio()` also gained a `speed` param (default `0.9`, unchanged from before) for the same reason on the Scene-0 fast path.
+- **Dead code inside this class** (harmless but never executes): `generate_scene_priority()` calls `self.client.models.generate_content(...)` — `self.client`/`self.text_model` are never initialized anywhere (leftover from a pre-Groq Gemini implementation) and the method is never called at all.
 
 **TTS clients** (naming is legacy and confusing — all of these ultimately talk to the same self-hosted Kokoro container except Piper):
 - `services/tts_service.py` (`kokoro_tts`, async class) — used for desktop narration.
@@ -713,6 +798,418 @@ construction attempt per interval instead of a connection storm.
   from `generate_remaining_tts()`, which goes through the TTS governor.
 
 ---
+
+## Grade-band content calibration (2026-07-26, backend `20260726_220159` / frontend same)
+
+Extended the grade selector from 7 options (`KG-1/Grade 1` combined .. `Grade 7`)
+to 12 distinct grades: KG-1, KG-2, Grade 1 through Grade 10
+(`FileUpload.jsx`, `FileConfirmation.jsx`). See the grade-band note under
+"Story generation pipeline" above for what actually reads the new
+`grade_level` id (`"KG1"`/`"KG2"`/`"1"`..`"10"`) and what changed in the
+story/image/quiz/TTS prompts.
+
+**Known, deliberately out of scope:** `FileConfirmation.jsx` still has a
+"Narration Speed" slider (0.5x-2.0x) that gets captured into `speed` and sent
+to `/api/upload`, and is stored in the story folder metadata - but nothing in
+the generation pipeline ever reads it back out. TTS speed is now fully
+grade-derived (see above) instead of the old hardcoded `1.0`, so the slider
+was already inert before this change and remains inert after it - this pass
+didn't touch that wiring. If the user-facing slider is meant to layer on top
+of (or override) the grade default, that needs a product decision on how the
+two should combine, then wiring `speed` through `run_ai_workflow_progressive_mobile`
+into `generate_progressive_tts`/`_generate_and_cache_tts`/`chatterbox.generate_audio`
+the same way `grade_level` was just wired through.
+
+---
+
+## Incident: every upload 500s on `generated_stories` EACCES (2026-07-26, frontend `20260726_230120`)
+
+### Symptom
+`POST /api/upload` returned 500 for every file. Looked file-specific (reported against
+one chemistry PDF at Grade 10) but was total — the logs showed exactly one `/api/upload`
+in 90 minutes and it failed. Retrying with a known-good PDF *looked* like it worked
+because `check-duplicate`, `extract-text` and `tts-preview` all still returned 200; only
+the final upload was broken.
+
+### Root cause
+```
+File "/app/main.py", line 1083, in upload_story
+  temp_dir = storage_manager.create_story_folder(...)
+File "/app/story_storage.py", line 51, in create_story_folder
+  os.makedirs(story_dir, exist_ok=True)
+PermissionError: [Errno 13] Permission denied: 'generated_stories/<uuid>'
+```
+The backend container runs as `1001:1001`. `backend/generated_stories/` on the host was
+`www:www` mode `0775` — uid 1001 is neither owner nor in gid 1002, so it had `r-x` only.
+
+The other three bind mounts (`outputs`, `uploads`, `saved_stories`) were *also* owned by
+`www`, and only worked because they happened to be mode `0777`. So the docker-compose
+comment claiming `user: "1001:1001"` "matches ownership of all bind mounts above" was
+false — the whole thing was standing on a world-writable-directory accident. The first
+data dir that got recreated with sane permissions took production down.
+
+### Fix
+1. `chown 1001:1001` on all four bind mounts, so the compose comment is now actually true.
+2. `deploy.sh` asserts it on every deploy: creates any missing data dir as `1001:1001 0775`
+   and re-chowns any that drifted, printing what it fixed. The app cannot self-detect this
+   (it only fails at request time, per-request), so the check belongs at deploy time.
+
+### Verified
+- `os.makedirs` inside the container on `generated_stories/` — the exact failing call — now succeeds.
+- The reported PDF extracts fine (6 pages, 9,348 chars), so it was never the file.
+
+### Do not
+- Do not "fix" a future EACCES here by `chmod 777`. That is what hid this for weeks.
+- Do not assume a bind mount is writable because the app has been up for days — nothing
+  writes to a fresh story folder until someone uploads.
+
+### Related frontend bug fixed in the same pass
+`handleFileUpload()` never called `setError(null)`. Only `generateStory()` and `resetApp()`
+cleared it, so a failed upload's red banner stayed pinned above the upload form through
+every subsequent attempt — making a recovered system still look broken. Error state is now
+cleared at the start of each new attempt.
+
+---
+
+## Upload flow: one path, confirm screen always reachable (2026-07-26, frontend `20260726_231756`)
+
+### What was wrong
+`FileUpload.jsx` fires `onUpload` the instant a file is dropped, and `App.jsx` wired that
+straight to `handleFileUpload`, which ran the *entire* upload and called
+`navigateTo('generating')`. The confirm/voice screen was fully built and rendered for
+`step === 'confirm'`, but the only thing that ever routed there was the duplicate-detection
+modal's `onCreateNew`. Testing repeatedly with the same file always tripped duplicate
+detection, so the screen appeared every time and the bug stayed invisible until the first
+genuinely new file was uploaded — which skipped voice selection entirely and generated with
+whatever `voice` happened to be in state.
+
+There were also **two complete upload implementations**: `handleFileUpload` (XHR, progress
+bar, 429/402 handling) and `generateStory` (fetch, no progress, its own 429/402 handling,
+and an `avatar_type` form field the backend does not even accept). `handleAvatarSelect` was
+dead code with no caller. Two copies is precisely how one path silently lost a screen.
+
+### Shape now
+- `handleFileUpload(file)` — selects the file, runs `/api/check-duplicate`, then stops at
+  `confirm`. **Picking a file selects it; it does not submit it.**
+- `startUpload(selectedVoice)` — the single upload implementation.
+- `handleConfirmFile(settings)` — the only caller of `startUpload`.
+- `generateStory` and `handleAvatarSelect` deleted.
+
+### Do not
+- Do not read `voice` from state inside `startUpload`. The confirm screen calls `setVoice()`
+  and `startUpload()` in the same tick, so the state update has not landed — the user's
+  choice would be silently replaced by the previous value. That is why the voice is a
+  parameter, not a state read.
+- Do not send upload failures back to `step === 'upload'`. The file and voice are still
+  valid; `confirm` makes the retry one tap instead of re-picking the file.
+
+### Generation timing (measured, story `ad6170b5`, RunPod GPU)
+| Event | Δ from upload |
+|---|---|
+| `POST /api/upload` accepted | 0s |
+| Scene 0 image saved, player can render | **+34s** |
+| Fully generated (9 scenes) | **82.8s** |
+
+Per-scene TTS is **2.9-5.5s** — the GPU is not the bottleneck. The 34s before the second
+screen is LLM story generation plus the first image, which are sequential and block the
+first render. Anyone "optimising TTS" to fix perceived slowness is optimising the wrong
+thing; the fix is rendering story text before the first image is ready.
+**Done 2026-07-26** - see "Player opens on text, not on assets" below. The 26.5s scene 0
+TTS in this table was also the CPU path, not the GPU; see "Scene 0 narration never used
+the GPU".
+
+## Profile storage card: counted a database that does not exist (2026-07-26)
+
+`UserProfile.jsx` hand-rolled `indexedDB.open('EduSmartOfflineDB', 1)`. The app writes to
+`'EduSmartDB'` (`utils/storyStorage.js`). The store lookup therefore always failed, the
+count sat at 0 permanently, and — because `indexedDB.open()` creates a database that does
+not exist — every visit to the profile page silently spawned an empty junk DB in the
+browser.
+
+Fixed by going through `storyStorage.listStories()` so one module owns the DB name, and by
+splitting the misleading single "Saved Stories" number into two honest rows: **Offline on
+This Device** (IndexedDB + localStorage) and **Saved to Your Account** (`/api/list-stories`,
+de-duplicated by `story_id` the same way `LoadStory` does, so it matches the library count).
+
+---
+
+## Account deletion: `DELETE /api/auth/me` (2026-07-26, backend `20260726_235513`)
+
+Both app stores reject an app that lets you create an account but not delete one. The
+endpoint erases the user and everything they own, and is not reversible.
+
+**A user's data lives in four places, and only one of them cascades.**
+
+| Where | Cleaned up by |
+|---|---|
+| MySQL `users` | `DELETE` — FKs cascade to `user_stories`, `credit_transactions`, `promo_redemptions`, `email_verifications`, `password_reset_tokens` |
+| **SQLite `job_state.db`** (`stories`, `scenes`, `generation_queue`) | `job_manager.delete_all_for_user()` — **explicit**, no FK spans MySQL→SQLite |
+| Disk (`generated_stories/`, `saved_stories/`) | `storage_manager.delete_story()` per story_id |
+| Stripe | `stripe.Subscription.cancel()` |
+
+**Order is load-bearing** (`UserOperations.delete_account`): Stripe → files → SQLite →
+**MySQL user row last**. A failure at any earlier step then leaves the account intact and
+the whole thing retryable. Delete the user row first and a crash at step 2 destroys the
+only handle on the remaining data — the story_ids are reachable only via `user_id`.
+
+**Three guards, all of them load-bearing:**
+1. **Re-authentication.** Password in the request body; social-only accounts type their
+   own email instead. A bearer token alone must never be enough — a token can be lifted
+   from a shared device, a password cannot.
+2. **Last admin → 403.** Otherwise the admin panel becomes permanently unreachable.
+3. **Live generation job → 409.** A worker mid-generation holds open paths under
+   `generated_stories/<id>`; `rmtree` under it gives half-written stories and a traceback
+   per remaining scene. Same rule as save/rename.
+
+### Do not
+- **Do not make guard 3 status-only.** `has_active_job()` also checks staleness against
+  `GENERATION_TIMEOUT_SECONDS` — the same env var the queue uses, so they cannot drift.
+  The first version didn't, and a story left `processing` by a dead worker would have
+  blocked its owner from ever deleting their account. Caught by the probe, not by review.
+- **Do not swallow a Stripe failure.** It raises, and nothing is deleted. Erasing the row
+  while a subscription still bills is a charge nobody can trace or refund.
+- **Do not use `stripe.Subscription.delete()`** — removed from the SDK long before the
+  15.3.1 pinned in `requirements.txt`. It is `.cancel()`.
+- **Do not count stories after deleting folders.** `storage_manager.delete_story()` drops
+  the job_state row as a side effect, so a count taken afterwards only sees stragglers.
+
+### Verified
+`scratchpad/probe_delete_account.py`, run against **the public domain** so nginx and
+Cloudflare are in the path (a `DELETE` with a request body is the part most likely to be
+stripped in transit — it isn't). Creates a throwaway user directly in MySQL, never via
+`/signup`, because that endpoint sends a real verification email.
+
+All 7 checks pass: wrong password → 400 and account intact · live job → 409 · stale job
+ignored · deletion → 200 · MySQL/SQLite/disk all empty afterwards · deleted user's token
+→ 401.
+
+## Scene 0 narration never used the GPU (2026-07-26)
+
+`TTS_BACKEND=runpod` routed scenes 1..N to the RunPod Kokoro endpoint (**2.9–5.7s each**)
+while **scene 0 — the only one blocking the player — ran on the CPU container at 26.5s**.
+
+There are two TTS clients. `services/kokoro_client.py` is the dispatcher that reads
+`Config.TTS_BACKEND`. `services/chatterbox_client.py` posts straight at `CHATTERBOX_URL`
+and **has never consulted `TTS_BACKEND` at all**. `main.py` called the latter for scene 0.
+Flipping the backend to GPU therefore silently skipped the one scene the user waits on.
+
+Scene 0 now goes through `kokoro_client` like every other narration path, keeping its
+`tts_governor` slot and its grade-derived speed, with the `ar_teacher` → Piper branch
+mirrored from `story_service`. `main.py` no longer references `chatterbox` at all.
+
+**The `~22.4s` in `✓ TTS generated via Kokoro: 367148 bytes (~22.4s)` was never a timing.**
+It is `len(audio_bytes) / (16 * 1024)` — an estimated *playback duration* from the byte
+count, printed in a format indistinguishable from elapsed time. The real elapsed figure is
+`main.py`'s own `✓ Scene 0 TTS generated in 26.54s`. Do not diagnose against that log line.
+
+## Player opens on text, not on assets (2026-07-26, `20260726_235040`)
+
+Measured, 10-scene story: **LLM finishes at +7.6s**, scene 0 image at +26.7s, player
+opened at **+34s**. The story text sat in SQLite for 26 seconds while the user watched a
+spinner.
+
+Cause was one filter in `/api/status/{job_id}`: a scene was only published once its image
+**and** audio were both `completed`, and `App.jsx` only opens the player once it sees one
+scene. `/api/status` now publishes every scene that has **text**, with `image_url` /
+`audio_url` `null` until each asset lands.
+
+### Do not
+- **Do not let a text-only scene count as progress.** `completed_scene_count` and
+  `progress` still mean *both assets present*. The client's stall detector watches that
+  number for forward motion — count text and it would see a finished story the instant the
+  LLM returns, then nothing for a minute, and fire a false "this story is stuck".
+- **Do not treat a null url as an error in `StoryPlayer`.** Null means *not made yet*.
+  Assigning `src=""` and calling `load()` fires a media error and leaves the audio element
+  unusable for that scene.
+- **Do not reset play state when an asset arrives.** The scene-change effect now re-runs
+  mid-scene as urls fill in. Anything representing user intent (`userPausedRef`,
+  `autoPlayedRef`, `pendingAdvanceRef`) is reset only on a genuine scene change, and the
+  audio element is only re-`load()`ed when the audio url itself changed — otherwise the
+  picture landing would rewind live narration to 0, or resume a story the user paused.
+
+Play is disabled with "narration is still being recorded" until audio exists; the image
+slot shows "Ollie is painting this picture…".
+
+**Not measured end-to-end.** Verifying the new numbers needs a real authenticated upload,
+which costs GPU credits. Expected: player at ~8s instead of 34s, narration a few seconds
+later instead of 34s.
+
+## Follow-up: "published" is not "playable" (2026-07-27, frontend `20260727_080546`)
+
+Beta report: *"Scene x of y which was earlier didn't show again."* Correct — and the cause
+was the change above, not a separate fault.
+
+`StoryPlayer` decided readiness by counting array entries: `scenes.length < actualTotal`.
+That was a valid proxy only while the backend published a scene *after* both its assets
+existed. Now all N scenes' text is published within a second or two of the LLM returning,
+so `scenes.length === actualTotal` almost immediately, the player concludes there is
+nothing left to wait for, and the `N/M ready` chip in the header never renders. At the same
+time the generating screen — which owns the dots and "X of Y pages ready" — is now on
+screen for ~8s instead of ~34s. The progress feedback moved off screen exactly when it
+started being needed.
+
+Fixed by counting **assets, not entries**:
+
+```js
+const readyCount = scenes.filter(s => s.image_url && s.audio_url).length
+const allScenesReady = scenes.length >= actualTotal && readyCount >= actualTotal
+```
+
+Second symptom, same root cause: when playback catches up with generation, `handleEnded`
+used to advance on *"does the next scene exist"*. It now exists immediately with null urls,
+so the player turned the page to a silent scene with a disabled play button and no message
+— indistinguishable from the story having stopped. Advance now waits on the next scene's
+`audio_url`, showing "Ollie is still recording the next page…" meanwhile; the watcher
+effect moves on the moment narration lands. (Playback never actually deadlocked —
+`autoPlayedRef` is false on a new scene, so audio auto-starts when its url arrives — but
+there was no feedback during the gap.)
+
+### Do not
+- **Do not use `scenes.length` as a readiness signal anywhere in the player.** It now means
+  "how many scenes has the LLM written", which is a fixed number reached almost at once.
+  Anything the user waits for must be derived from `image_url` / `audio_url`.
+- **Do not read `scenes` from the `ended` listener's closure.** That listener is registered
+  per scene and fires minutes later, by which time more urls have landed. It reads
+  `scenesRef.current`. The old closure is why the pre-2026-07-20 fixed-delay retry got
+  stuck re-checking a stale count forever.
+- **Do not "fix" the scene dots' `pending` state to mean not-fully-rendered.** `i >=
+  scenes.length` there gates *navigation*, and jumping to a still-rendering scene is now
+  legitimate — you get the text and a skeleton. It is obsolete, not wrong.
+
+Unchanged and still correct: `storyFullyReady` in `App.jsx` gates Save / Download-offline on
+the backend's `completed_scene_count`, which has always meant both assets present.
+
+### Next button gated on narration (frontend `20260727_081207`)
+
+Next is now disabled while the following scene has no `audio_url`, with the tooltip "The
+next page is still being recorded" — better than letting a child tap forward onto a silent
+page and conclude the app broke.
+
+The gate is **released the moment generation ends**, and that is the whole design:
+
+```js
+const generationDone = totalScenes > 0 && completedSceneCount >= totalScenes
+const nextNotReady   = !generationDone && !!nextScene && !nextScene.audio_url
+```
+
+- **Do not gate this on `allScenesReady` or on `readyCount`.** Both are derived from the
+  urls in the payload, so a story that finishes with one scene's audio permanently null
+  would leave Next disabled *forever* — a child stranded mid-story with no way out and no
+  explanation. `completedSceneCount` is the safe input precisely because `App.jsx` forces it
+  to `total_scenes` when polling stops, whatever the story actually ended up containing.
+- **Do not extend the same gate to Previous or to the scene dots.** Backwards and jumping
+  are always safe; only forward motion can outrun generation.
+
+## Quiz duplicates & image grade calibration (2026-07-27, backend `20260727_094936`)
+
+Two beta reports, two separate root causes, both in `services/story_service.py`.
+
+### Repeated quiz questions
+
+Real example, story `61f8ccd6` (grade 10, "Designing a Balanced Diet"):
+
+```
+1  What is the main purpose of a balanced diet?
+5  What is the main purpose of a balanced meal plan for a child?
+7  What is the main takeaway from our discussion about balanced diets and meal planning?
+10 What is the final takeaway from our discussion about balanced diets and meal planning?
+```
+
+**They are not byte-identical** — exact-string uniqueness was 10/10 across four sampled
+stories. Any dedupe based on string equality finds nothing here.
+
+Cause: the quiz is written in the same pass as the scenes and immediately after them in the
+JSON, so the model produces roughly one question per scene. Recap scenes therefore produce
+recap questions. Nothing in the prompt required questions to cover *distinct* concepts, and
+nothing forbade questions about the narration rather than the document.
+
+Fixes: the prompt now requires one question per distinct concept, bans one-question-per-scene,
+and bans meta questions outright. `_drop_near_duplicate_questions()` is a safety net that
+removes meta questions by phrase match and restatements by token overlap.
+
+### Do not
+- **Do not move the near-duplicate threshold (0.7) without re-measuring these cases.** A
+  shared sentence frame is not duplication:
+
+  | overlap | pair | correct action |
+  |---|---|---|
+  | 0.75 | "…main takeaway from our discussion…" vs "…final takeaway from our discussion…" | drop |
+  | 0.60 | "role of **proteins** in a balanced diet" vs "role of **carbohydrates**…" | **keep** |
+  | 0.43 | "main purpose of a balanced diet" vs "main purpose of a balanced meal plan for a child" | drop, but unreachable |
+
+  It shipped at 0.6 and the first Groq-only regeneration immediately deleted two perfectly
+  good nutrient questions, because "What is the role of X in a balanced diet?" repeats.
+  Raised to 0.7 the same day. The 0.43 row is the other end: semantic duplicates below the
+  frame-similarity floor cannot be reached by token overlap at any safe threshold, and are
+  the prompt's job, not the filter's.
+- **Do not let de-duplication fail a generation.** The validator hard-requires 10 questions.
+  If the top-up call errors or comes back short, `process_file_to_story` pads the weakest
+  questions back in. A repeated question is a blemish; a failed story costs the user a credit.
+- **Do not `quiz.extend()` the top-up batch.** It now merges through the same filter and
+  truncates — the model regularly returns more than the exact count it was asked for, and the
+  extras are the weakest. The top-up path fires precisely when the document was too thin to
+  yield 10 questions, which is when restating an earlier question is most tempting.
+- The top-up JSON template was also missing `why_correct`, which `_validate_story_json`
+  lists as required. Added.
+
+### Grade-10 images looked grade 4-5
+
+`grade_spec["image_style"]` existed and *was* applied — but the story LLM that authors each
+`image_prompt` never saw it. The GRADE-LEVEL TARGET block passed vocabulary, sentence style
+and quiz cognitive level only, while the output schema hardcoded, for every grade:
+
+```
+"image_prompt": "Detailed 3D animated educational scene suitable for visual storytelling"
+```
+
+So FLUX received an abstract "editorial style" clause followed by
+`MAIN VISUAL: <a 3D animated cartoon scene>`. The concrete, last-positioned instruction won.
+A grade-10 story was literally asking for a cartoon.
+
+Fixes: `image_style` is now in the GRADE-LEVEL TARGET block as "Visual register", the schema
+line no longer hardcodes a look, and `enhanced_prompt` repeats the style guide *after*
+`MAIN VISUAL` so it is the last thing read rather than the first thing forgotten.
+
+- **Do not reintroduce a fixed art-style string in the story prompt.** Style belongs in
+  `grade_bands.TIER_SPECS` only. Two prompts describing the look is what caused this, and the
+  more specific one always wins.
+
+### Verification: Groq-only regeneration (backend `20260727_100654`)
+
+Text-only reruns of the *same source PDF* that produced the bad quiz, one Groq call per
+grade, no images and no TTS. Script: `groq_quiz_test.py` (scratch, not committed) calling
+`process_file_to_story()` directly.
+
+| | before (`61f8ccd6`) | grade 10 rerun | grade 5 rerun |
+|---|---|---|---|
+| meta questions | 3 | 0 | 0 |
+| duplicate pairs | 2 | 0 | 0 |
+| highest pairwise overlap | 0.75 | 0.33 | 0.45 |
+| `why_correct` missing | — | none | none |
+| filter had to intervene | — | no | no |
+
+The filter firing **zero** times on both reruns is the result that matters: the prompt is now
+doing the work, and the heuristic is idle backup rather than load-bearing.
+
+Visual register differentiates as intended — grade 10: *"…in a mature and editorial style"*;
+grade 5: *"A colorful illustration of a plate…"*, *"a child playing football, with a thought
+bubble…"*. No "3D animated" in either.
+
+**Still imperfect, honestly:** grade 10 keeps producing some bare-recall questions ("What is
+the primary function of proteins in our body?") alongside the good analytical ones ("What is
+the most likely reason a child who eats enough food daily still feels weak and gets sick
+often?"). The cognitive floor is raised, not enforced. These are also single samples — LLM
+output varies run to run. Image *rendering* remains unverified; that needs a real upload.
+
+### TTS: Chatterbox is not deployed and never has been
+
+`docker-compose.yml`: `CHATTERBOX_URL=http://kokoro-tts:8880`. `chatterbox_client.py` is a
+legacy name pointing at the local **Kokoro** CPU container — that is the whole explanation for
+the old 26.5s scene 0 (same model, CPU instead of GPU). No Resemble-AI Chatterbox model has
+ever run in this project. If it is ever adopted, add it as a third `TTS_BACKEND` value with
+its own RunPod endpoint and measure GPU-seconds against `RUNPOD_MONTHLY_CAP_AED` first —
+Kokoro is 82M params, Chatterbox is 0.5B, and scene 0 latency is what gates the player
+opening at ~8s.
 
 ## Notes
 - API keys/secrets live in root `.env` (docker-compose reads from here, not `backend/.env`).

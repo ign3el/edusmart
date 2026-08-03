@@ -226,7 +226,7 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
                     })}
                   </div>
                 </div>
-                {answer.document_section && (
+                {answer.source === 'extracted' && answer.document_section && (
                   <div className="document-section">
                     <strong><MapPin size={14} aria-hidden="true" /> Section:</strong> {answer.document_section}
                   </div>
@@ -306,7 +306,7 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
           className="question-card"
         >
           <h3>{questionText}</h3>
-          {q.document_section && (
+          {q.source === 'extracted' && q.document_section && (
             <div className="document-section-info">
               <MapPin size={14} aria-hidden="true" /> From: {q.document_section}
             </div>

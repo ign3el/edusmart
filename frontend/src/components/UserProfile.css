@@ -373,3 +373,134 @@
     flex-direction: column;
   }
 }
+
+/* --- Delete account -------------------------------------------------------
+   Deliberately not styled like the other buttons. The destructive action must
+   not sit flush against Logout looking like a peer of it. */
+.delete-account-block {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgba(255, 59, 48, 0.2);
+}
+
+.delete-account-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.85rem 1.25rem;
+  margin-top: 0.75rem;
+  background: transparent;
+  border: 1px solid rgba(255, 59, 48, 0.45);
+  border-radius: 12px;
+  color: #ff6b60;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.delete-account-button:hover {
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.delete-account-button.confirm {
+  background: #ff3b30;
+  border-color: #ff3b30;
+  color: #fff;
+  margin-top: 0;
+}
+
+.delete-account-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.delete-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.delete-modal {
+  width: 100%;
+  max-width: 440px;
+  /* Small phones in landscape have less height than this modal needs. */
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 1.5rem;
+  border-radius: 18px;
+  background: #14121c;
+  border: 1px solid rgba(255, 59, 48, 0.35);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.delete-modal h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  font-size: 1.25rem;
+  color: #ff6b60;
+}
+
+.delete-modal-list {
+  margin: 0 0 1rem;
+  padding-left: 1.15rem;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.delete-modal-warning {
+  margin: 0 0 1.25rem;
+  font-weight: 700;
+  color: #ff6b60;
+  font-size: 0.95rem;
+}
+
+.delete-modal-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.delete-modal input {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 1rem;
+}
+
+.delete-modal-error {
+  margin: 0.75rem 0 0;
+  color: #ff6b60;
+  font-size: 0.9rem;
+}
+
+.delete-modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.delete-modal-actions > button {
+  flex: 1;
+}
+
+@media (max-width: 480px) {
+  .delete-modal-actions {
+    flex-direction: column;
+  }
+}

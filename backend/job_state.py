@@ -71,7 +71,10 @@ class JobStateManager:
                     file_hash TEXT,
                     user_id INTEGER,
                     username TEXT,
-                    quiz TEXT
+                    quiz TEXT,
+                    error TEXT,
+                    quiz_size INTEGER,
+                    attempt INTEGER DEFAULT 1
                 )
             """)
             
@@ -89,6 +92,28 @@ class JobStateManager:
                     conn.execute("ALTER TABLE stories ADD COLUMN username TEXT")
                 if 'quiz' not in columns:
                     conn.execute("ALTER TABLE stories ADD COLUMN quiz TEXT")
+                if 'error' not in columns:
+                    # mark_story_failed() writes here. Before this column existed
+                    # the error message it was given was silently discarded (the
+                    # UPDATE targeted a column that didn't exist) - every failure
+                    # reason (content_unsuitable, extraction failure, etc.) was
+                    # lost, and the frontend always fell back to its generic
+                    # "AI Generation failed." message regardless of cause.
+                    conn.execute("ALTER TABLE stories ADD COLUMN error TEXT")
+                if 'quiz_size' not in columns:
+                    # How many quiz questions the user asked for at upload. Needed
+                    # AFTER generation too: the status endpoint compares it against
+                    # what was actually produced to tell the user their quiz came
+                    # up short, instead of silently handing over fewer questions.
+                    conn.execute("ALTER TABLE stories ADD COLUMN quiz_size INTEGER")
+                if 'attempt' not in columns:
+                    # Which generation attempt is currently running. Surfaced by
+                    # /api/status so the client can say "trying once more" instead
+                    # of showing ~60s of unexplained dead air during the retry.
+                    # Deliberately NOT a new `status` value: the client switches on
+                    # status, and inventing one there would break every existing
+                    # branch that expects initializing/processing/completed/failed.
+                    conn.execute("ALTER TABLE stories ADD COLUMN attempt INTEGER DEFAULT 1")
             except Exception as e:
                 # If migration fails, log it but continue (table might be new)
                 print(f"Migration info: {e}")
@@ -157,13 +182,13 @@ class JobStateManager:
             except Exception as e:
                 print(f"Index creation skipped: {e}")
     
-    def initialize_story(self, story_id: str, grade_level: str, file_hash: Optional[str] = None, user_id: Optional[int] = None, username: Optional[str] = None):
+    def initialize_story(self, story_id: str, grade_level: str, file_hash: Optional[str] = None, user_id: Optional[int] = None, username: Optional[str] = None, quiz_size: Optional[int] = None):
         """Create a preliminary story job record."""
         with self._get_conn() as conn:
             conn.execute("""
-                INSERT INTO stories (story_id, status, title, grade_level, total_scenes, completed_scenes, file_hash, user_id, username)
-                VALUES (?, 'initializing', 'Initializing story...', ?, 0, 0, ?, ?, ?)
-            """, (story_id, grade_level, file_hash, user_id, username))
+                INSERT INTO stories (story_id, status, title, grade_level, total_scenes, completed_scenes, file_hash, user_id, username, quiz_size)
+                VALUES (?, 'initializing', 'Initializing story...', ?, 0, 0, ?, ?, ?, ?)
+            """, (story_id, grade_level, file_hash, user_id, username, quiz_size))
 
     def update_story_metadata(self, story_id: str, title: str, total_scenes: int, quiz: Optional[List[Dict]] = None):
         """Update story metadata after initial AI processing."""
@@ -262,6 +287,73 @@ class JobStateManager:
             # and fail on a missing folder, burning a slot for nothing.
             conn.execute("DELETE FROM generation_queue WHERE story_id = ?", (story_id,))
 
+    def get_story_ids_for_user(self, user_id: int) -> List[str]:
+        """Every story_id this user owns, in progress or finished.
+
+        Account deletion needs this because story assets live on disk under
+        their story_id and there is no other way to find them once the user
+        row is gone.
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT story_id FROM stories WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        return [r["story_id"] for r in rows]
+
+    def has_active_job(self, user_id: int) -> bool:
+        """True while any of this user's stories is queued or being generated.
+
+        A worker mid-generation holds open paths under generated_stories/<id>.
+        Deleting that tree out from under it produces half-written scenes and a
+        traceback per remaining scene, so callers that destroy data must refuse
+        while this is true rather than race it.
+
+        Staleness matters as much as status. A story left 'processing' by a
+        worker that died is indistinguishable by status alone from one being
+        written to right now - and if that counted as active forever, a single
+        dead job would permanently block the owner from deleting their account.
+        Anything untouched for longer than the generation timeout cannot still
+        be running: the queue's own watchdog would have reclaimed it. The window
+        is read from the same env var the queue uses (services/job_queue.py) so
+        the two cannot drift apart.
+        """
+        timeout_s = float(os.getenv("GENERATION_TIMEOUT_SECONDS", "1800"))
+        cutoff = f"-{timeout_s} seconds"
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT COUNT(*) AS c FROM stories
+                WHERE user_id = ?
+                  AND status IN ('initializing', 'processing')
+                  AND updated_at > datetime('now', ?)
+            """, (user_id, cutoff)).fetchone()
+            if row["c"]:
+                return True
+            row = conn.execute("""
+                SELECT COUNT(*) AS c FROM generation_queue
+                WHERE user_id = ?
+                  AND (
+                        state = 'queued'
+                     OR (state = 'running' AND started_at > datetime('now', ?))
+                  )
+            """, (user_id, cutoff)).fetchone()
+            return bool(row["c"])
+
+    def delete_all_for_user(self, user_id: int) -> int:
+        """Delete every story, scene and queue row belonging to a user.
+
+        Returns the number of story rows removed. These live in SQLite while
+        the users table lives in MySQL - there is no foreign key between the
+        two databases, so nothing cascades here and this must be called
+        explicitly or the rows orphan forever.
+        """
+        story_ids = self.get_story_ids_for_user(user_id)
+        with self._get_conn() as conn:
+            for story_id in story_ids:
+                conn.execute("DELETE FROM scenes WHERE story_id = ?", (story_id,))
+            conn.execute("DELETE FROM generation_queue WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM stories WHERE user_id = ?", (user_id,))
+        return len(story_ids)
+
     def get_story_status(self, story_id: str) -> Optional[Dict]:
         """Get overall story status."""
         with self._get_conn() as conn:
@@ -302,9 +394,21 @@ class JobStateManager:
         with self._get_conn() as conn:
             conn.execute("""
                 UPDATE stories
-                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed', updated_at = CURRENT_TIMESTAMP, error = ?
                 WHERE story_id = ?
-            """, (story_id,))
+            """, (error, story_id))
+
+    def mark_story_retrying(self, story_id: str, attempt: int = 2):
+        """Record that generation is on its second attempt.
+
+        Status is intentionally left alone - see the `attempt` column migration.
+        """
+        with self._get_conn() as conn:
+            conn.execute("""
+                UPDATE stories
+                SET attempt = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE story_id = ?
+            """, (attempt, story_id))
 
     def reconcile_orphaned_jobs(self) -> List[Dict]:
         """Fail any story left 'processing' from before this process started.

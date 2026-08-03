@@ -51,8 +51,12 @@
 }
 
 .grade-selector select option {
-  background: #ffffff;
-  color: #000000;
+  /* The options popup is one of the few native form controls where Chrome
+     (the user's actual test browser, OnePlus 15) honors background/color -
+     this was hardcoded white/black, which broke the dark theme every time
+     the dropdown opened even though the closed <select> looked correct. */
+  background: var(--bg-panel-solid);
+  color: var(--fg-primary);
   padding: 0.5rem;
 }
 

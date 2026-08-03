@@ -17,6 +17,7 @@ from database import get_db_cursor
 from auth import get_password_hash
 import mysql.connector
 from services.kokoro_client import generate_tts
+from services.grade_bands import resolve_grade_spec
 from routers.billing import refund_credit
 
 # Setup logging
@@ -427,6 +428,14 @@ async def update_user(user_id: int, update: UserUpdateRequest):
 
         try:
             with get_db_cursor(commit=True) as cursor:
+                # Existence is checked explicitly, not inferred from the UPDATE's
+                # rowcount below: MySQL counts CHANGED rows, so resubmitting the
+                # form with unmodified values returns 0 and used to surface as a
+                # false "User not found" 404 for a user who very much exists.
+                cursor.execute("SELECT 1 AS found FROM users WHERE id = %s", (user_id,))
+                if cursor.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="User not found")
+
                 if update.is_admin is False:
                     cursor.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
                     target = cursor.fetchone()
@@ -439,9 +448,6 @@ async def update_user(user_id: int, update: UserUpdateRequest):
                             )
 
                 cursor.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = %s", values)
-
-                if cursor.rowcount == 0:
-                    raise HTTPException(status_code=404, detail="User not found")
         except mysql.connector.IntegrityError:
             raise HTTPException(status_code=409, detail="That username or email is already taken.")
 
@@ -769,13 +775,19 @@ async def _run_retry(story_id: str, scenes: list) -> None:
     seed = int(os.getenv("RUNPOD_SEED", "20240601"))
     repaired = 0
 
+    # Retry regenerates assets in place, so it must match the original story's
+    # grade-level style/pacing rather than silently falling back to the
+    # default - a repaired KG-1 image shouldn't suddenly render Grade-10 style.
+    story_status = job_manager.get_story_status(story_id)
+    grade_level = story_status.get("grade_level") if story_status else None
+
     for scene in scenes:
         idx = scene["scene_index"]
 
         if scene.get("needs_image"):
             try:
                 img = await service.generate_image(
-                    scene["character_prompt"], story_seed=seed, scene_num=idx
+                    scene["character_prompt"], story_seed=seed, scene_num=idx, grade_level=grade_level
                 )
                 if img:
                     url = storage_manager.save_file(story_id, f"scene_{idx}.png", img, in_saved=False)
@@ -789,7 +801,9 @@ async def _run_retry(story_id: str, scenes: list) -> None:
 
         if scene.get("needs_audio"):
             try:
-                audio = await asyncio.to_thread(generate_tts, scene["text"])
+                audio = await asyncio.to_thread(
+                    generate_tts, scene["text"], "af_sarah", resolve_grade_spec(grade_level)["tts_speed"]
+                )
                 if audio:
                     url = storage_manager.save_file(story_id, f"scene_{idx}.mp3", audio, in_saved=False)
                     job_manager.update_scene_audio(scene["scene_id"], "completed", url)

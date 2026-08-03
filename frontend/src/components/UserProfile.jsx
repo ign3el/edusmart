@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { ChevronLeft, Pencil, Check, X, Lock, LogOut, Sparkles, CreditCard, ExternalLink } from 'lucide-react';
-import apiClient, { getBillingBalance, createBillingPortalSession } from '../services/api';
+import { ChevronLeft, Pencil, Check, X, Lock, LogOut, Sparkles, CreditCard, ExternalLink, Trash2, AlertTriangle } from 'lucide-react';
+import apiClient, { getBillingBalance, createBillingPortalSession, deleteAccount } from '../services/api';
+import { listStories as listOfflineStories } from '../utils/storyStorage';
 import './UserProfile.css';
 
 function UserProfile({ user, onBack, onLogout, onViewPlans }) {
@@ -12,16 +13,26 @@ function UserProfile({ user, onBack, onLogout, onViewPlans }) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [storageUsage, setStorageUsage] = useState({ used: 0, total: 0, percentage: 0 });
-  const [savedStoriesCount, setSavedStoriesCount] = useState(0);
+  const [offlineCount, setOfflineCount] = useState(0);
+  const [accountCount, setAccountCount] = useState(null);
   const [message, setMessage] = useState({ text: '', type: '' });
   const [loading, setLoading] = useState(false);
   const [billing, setBilling] = useState(null);
   const [billingLoading, setBillingLoading] = useState(true);
   const [portalLoading, setPortalLoading] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  // A social account has no password to re-enter, so it confirms by typing its
+  // own email instead. The backend enforces whichever applies; this only picks
+  // the matching input.
+  const isSocialOnly = !!user?.auth_provider && user.auth_provider !== 'local';
 
   useEffect(() => {
     calculateStorageUsage();
-    countSavedStories();
+    countStories();
     loadBilling();
   }, []);
 
@@ -70,24 +81,31 @@ function UserProfile({ user, onBack, onLogout, onViewPlans }) {
     }
   };
 
-  const countSavedStories = () => {
+  // Two different things that both used to be called "Saved Stories":
+  //  - offline: downloaded to THIS device (IndexedDB + localStorage)
+  //  - account: saved server-side, available on any device
+  // This used to hand-roll indexedDB.open('EduSmartOfflineDB'), a database that
+  // does not exist - the app writes to 'EduSmartDB' (see utils/storyStorage.js).
+  // The store lookup therefore always failed, the count sat at 0 forever, and
+  // opening a non-existent DB name silently CREATED an empty one on every visit.
+  // Going through storyStorage means there is one owner of the DB name.
+  const countStories = async () => {
     try {
-      const request = indexedDB.open('EduSmartOfflineDB', 1);
-      request.onsuccess = (event) => {
-        const db = event.target.result;
-        if (db.objectStoreNames.contains('stories')) {
-          const transaction = db.transaction(['stories'], 'readonly');
-          const store = transaction.objectStore('stories');
-          const countRequest = store.count();
-
-          countRequest.onsuccess = () => {
-            setSavedStoriesCount(countRequest.result);
-          };
-        }
-        db.close();
-      };
+      const offline = await listOfflineStories();
+      setOfflineCount(offline.length);
     } catch (error) {
-      console.error('Error counting stories:', error);
+      console.error('Error counting offline stories:', error);
+    }
+
+    try {
+      const { data } = await apiClient.get('/api/list-stories');
+      // De-duplicate by story_id the same way LoadStory does, so the number here
+      // matches the number of cards the user actually sees in their library.
+      const rows = Array.isArray(data) ? data : (data?.stories ?? []);
+      setAccountCount(new Set(rows.map((s) => s.story_id)).size);
+    } catch (error) {
+      console.error('Error counting account stories:', error);
+      setAccountCount(null);
     }
   };
 
@@ -146,6 +164,22 @@ function UserProfile({ user, onBack, onLogout, onViewPlans }) {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setDeleteError('');
+    setDeleting(true);
+    try {
+      await deleteAccount(
+        isSocialOnly ? { confirmEmail: deleteConfirmText } : { password: deleteConfirmText }
+      );
+      // The token now points at a user that no longer exists. Go straight out
+      // through the normal logout path so nothing is left holding stale state.
+      onLogout();
+    } catch (error) {
+      setDeleteError(error.response?.data?.detail || 'Could not delete your account. Please try again.');
+      setDeleting(false);
     }
   };
 
@@ -348,18 +382,23 @@ function UserProfile({ user, onBack, onLogout, onViewPlans }) {
 
           <div className="storage-stats">
             <div className="stat-item">
-              <span className="stat-label">IndexedDB Usage</span>
+              <span className="stat-label">Device Storage Used</span>
               <span className="stat-value">{formatBytes(storageUsage.used)}</span>
             </div>
 
             <div className="stat-item">
-              <span className="stat-label">Total Available</span>
+              <span className="stat-label">Device Storage Available</span>
               <span className="stat-value">{formatBytes(storageUsage.total)}</span>
             </div>
 
             <div className="stat-item">
-              <span className="stat-label">Saved Stories</span>
-              <span className="stat-value">{savedStoriesCount}</span>
+              <span className="stat-label">Offline on This Device</span>
+              <span className="stat-value">{offlineCount}</span>
+            </div>
+
+            <div className="stat-item">
+              <span className="stat-label">Saved to Your Account</span>
+              <span className="stat-value">{accountCount === null ? '—' : accountCount}</span>
             </div>
           </div>
 
@@ -383,8 +422,80 @@ function UserProfile({ user, onBack, onLogout, onViewPlans }) {
           <button onClick={onLogout} className="logout-button">
             <LogOut size={16} /> Logout
           </button>
+
+          <div className="delete-account-block">
+            <p className="field-hint">
+              Deleting your account permanently erases your stories, credits and
+              subscription. This cannot be undone.
+            </p>
+            <button
+              onClick={() => { setDeleteConfirmText(''); setDeleteError(''); setShowDeleteModal(true); }}
+              className="delete-account-button"
+            >
+              <Trash2 size={16} /> Delete Account
+            </button>
+          </div>
         </motion.div>
       </div>
+
+      {showDeleteModal && (
+        <div className="delete-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+          <motion.div
+            className="delete-modal"
+            initial={{ opacity: 0, scale: 0.94, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <h3 id="delete-modal-title">
+              <AlertTriangle size={20} aria-hidden="true" /> Delete your account?
+            </h3>
+
+            {/* Spelled out rather than summarised. Someone about to lose all of
+                this is entitled to read exactly what "all of this" means. */}
+            <ul className="delete-modal-list">
+              <li>Every story you have saved, on every device</li>
+              <li>Any remaining story credits — these are not refunded</li>
+              <li>Your subscription, which is cancelled immediately</li>
+              <li>Your email, username and sign-in details</li>
+            </ul>
+            <p className="delete-modal-warning">This is permanent. It cannot be undone.</p>
+
+            <label className="delete-modal-label" htmlFor="delete-confirm-input">
+              {isSocialOnly
+                ? <>Type <strong>{user?.email}</strong> to confirm</>
+                : 'Enter your password to confirm'}
+            </label>
+            <input
+              id="delete-confirm-input"
+              type={isSocialOnly ? 'text' : 'password'}
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder={isSocialOnly ? user?.email : 'Your password'}
+              autoComplete={isSocialOnly ? 'off' : 'current-password'}
+              disabled={deleting}
+            />
+
+            {deleteError && <p className="delete-modal-error">{deleteError}</p>}
+
+            <div className="delete-modal-actions">
+              <button
+                className="cancel-button"
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleting}
+              >
+                Keep My Account
+              </button>
+              <button
+                className="delete-account-button confirm"
+                onClick={handleDeleteAccount}
+                disabled={deleting || !deleteConfirmText.trim()}
+              >
+                {deleting ? 'Deleting...' : 'Delete Forever'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

@@ -545,6 +545,102 @@
   color: var(--accent-3, #94a3b8);
 }
 
+/* Indeterminate state: text extraction and story writing happen before any
+   scene exists, so there is no fraction to report for the first ~30 seconds.
+   A rotating arc says "working, duration unknown" honestly; a literal 0%
+   parked on screen says "stuck". */
+.progress-ring.is-indeterminate .progress-ring-track {
+  background: conic-gradient(
+    from 0deg,
+    rgba(148, 163, 184, 0.10) 0deg,
+    #a855f7 60deg,
+    #ec4899 110deg,
+    #22d3ee 150deg,
+    rgba(148, 163, 184, 0.10) 200deg,
+    rgba(148, 163, 184, 0.10) 360deg
+  );
+  transition: none;
+  animation: ring-indeterminate 1.5s linear infinite;
+}
+
+@keyframes ring-indeterminate {
+  to { transform: rotate(360deg); }
+}
+
+.progress-ring.is-indeterminate .progress-ring-label {
+  font-size: 0.78rem;
+  color: var(--ink-1, #e2e8f0);
+}
+
+/* ---- Retry + quiz notices -------------------------------------------------- */
+.retry-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  max-width: 34ch;
+  margin: 0.9rem auto 0;
+  padding: 0.55rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--warning, #f59e0b);
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.retry-notice svg {
+  flex-shrink: 0;
+  animation: retry-spin 2s linear infinite;
+}
+
+@keyframes retry-spin {
+  to { transform: rotate(360deg); }
+}
+
+.quiz-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0 auto 0.9rem;
+  max-width: 640px;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-md, 14px);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--ink-1, #e2e8f0);
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.28);
+}
+
+.quiz-notice svg {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+  color: var(--accent-2, #22d3ee);
+}
+
+.quiz-notice button {
+  margin-left: auto;
+  /* Small glyph, but the tap area still has to clear the 44px minimum. */
+  min-width: 44px;
+  min-height: 44px;
+  margin: -0.6rem -0.5rem -0.6rem 0;
+  background: none;
+  border: none;
+  color: var(--ink-2, #94a3b8);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-ring.is-indeterminate .progress-ring-track,
+  .retry-notice svg {
+    animation: none;
+  }
+}
+
 /* ---- Per-scene readiness dots --------------------------------------------- */
 .scene-dots {
   display: flex;

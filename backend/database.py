@@ -402,6 +402,39 @@ def initialize_database():
                 cursor.execute("ALTER TABLE user_stories ADD INDEX idx_is_public (is_public)")
                 logger.info("✓ Successfully added 'is_public' column to 'user_stories' table.")
 
+            # --- Schema Migration: enforce refund idempotency ---
+            # A double refund mints a credit the user never paid for. Until now
+            # nothing but careful call ORDERING prevented it (see the comment in
+            # main.py's startup: queue recovery must refund before the orphaned-
+            # story reconciler runs, or the same credit is refunded twice). That
+            # reasoning is correct but it is a convention, and conventions do not
+            # survive refactors. This makes the database enforce the invariant.
+            #
+            # Safe to scope to (story_id, reason): only 'generation_failed_refund'
+            # rows carry a story_id at all - 'story_generated', 'promo_redeemed'
+            # and 'admin_grant' all leave it NULL, and MySQL permits unlimited
+            # NULLs in a UNIQUE index, so those are unaffected.
+            cursor.execute("""
+                SELECT COUNT(*) AS count
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                AND table_name = 'credit_transactions'
+                AND index_name = 'uq_refund_per_story'
+            """)
+            if cursor.fetchone()['count'] == 0:
+                logger.warning("! 'uq_refund_per_story' index missing on credit_transactions. Adding it now...")
+                try:
+                    cursor.execute(
+                        "ALTER TABLE credit_transactions "
+                        "ADD UNIQUE INDEX uq_refund_per_story (story_id, reason)"
+                    )
+                    logger.info("✓ Added 'uq_refund_per_story' unique index.")
+                except mysql.connector.Error as idx_err:
+                    # Pre-existing duplicates would make this fail. Log loudly and
+                    # continue - refund_credit's application-level guard still
+                    # holds, and taking the whole app down over an index is worse.
+                    logger.error(f"Could not add uq_refund_per_story index: {idx_err}")
+
             # --- Schema Migration: Add billing columns to 'users' ---
             billing_columns = {
                 "stripe_customer_id": "VARCHAR(255) NULL",

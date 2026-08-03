@@ -108,4 +108,14 @@ export const createBillingPortalSession = async () => {
   return response.data;
 };
 
+// Permanently deletes the signed-in account. Irreversible.
+// The credential goes in the request BODY, not the query string - a password in
+// a URL ends up in nginx access logs and browser history.
+export const deleteAccount = async ({ password, confirmEmail }) => {
+  const response = await apiClient.delete('/api/auth/me', {
+    data: { password: password || null, confirm_email: confirmEmail || null },
+  });
+  return response.data;
+};
+
 export default apiClient;

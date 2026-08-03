@@ -18,5 +18,6 @@ fastapi-mail>=1.6.1
 email-validator>=2.0.0
 langdetect>=1.0.9
 pypdf>=4.0.0
+pymupdf>=1.24.0
 aiohttp>=3.9.0
 stripe==15.3.1

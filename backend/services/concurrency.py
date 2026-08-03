@@ -65,6 +65,18 @@ MAX_CONCURRENT_LLM = _limit("MAX_CONCURRENT_LLM", 8)
 # the users queued behind it.
 MAX_IMAGES_PER_STORY = _limit("MAX_IMAGES_PER_STORY", 4)
 
+# Hard ceiling on how many pages/images of ONE document get vision-read.
+#
+# This is a availability and cost control, not a tuning knob. Without it, page
+# count is bounded only by the 20MB upload limit: a text-dense PDF at ~4KB/page
+# reaches ~5000 pages, which at the measured 983KB per rendered page is ~4.8GB
+# of pixmaps held at once (OOM, killing every in-flight generation in the
+# process) and 5000 vision calls - enough to exhaust the entire shared daily
+# API quota from a single upload. 30 pages is ~29MB of pixmaps and comfortably
+# covers a normal lesson document; anything beyond it is truncated with a
+# visible marker in the extracted text rather than silently dropped.
+VISION_MAX_PAGES = _limit("VISION_MAX_PAGES", 30)
+
 
 class Governor:
     """A named semaphore that also reports how contended it is.

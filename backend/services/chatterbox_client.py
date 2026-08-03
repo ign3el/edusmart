@@ -28,26 +28,29 @@ class ChatterboxClient:
         
         return default_voice
     
-    async def generate_audio(self, text: str, voice: str = "en-US-JennyNeural") -> Optional[bytes]:
+    async def generate_audio(self, text: str, voice: str = "en-US-JennyNeural", speed: float = 0.9) -> Optional[bytes]:
         """
         Generate TTS audio via Chatterbox HTTP API.
-        
+
         Args:
             text: Text to synthesize
             voice: Voice identifier (compatible with Edge TTS names)
-        
+            speed: Narration speed passed straight to Kokoro. Default 0.9 matches
+                the pre-existing hardcoded value; callers pass a grade-derived
+                speed (see services/grade_bands.py) for grade-aware pacing.
+
         Returns:
             Audio bytes (MP3) or None on failure
         """
         try:
             # Auto-detect language
             selected_voice = self._detect_language_and_voice(text, voice)
-            
+
             # Prepare headers
             headers = {"Content-Type": "application/json"}
             if self.api_key:
                 headers["X-API-Key"] = self.api_key
-            
+
             # Direct container access uses full API path (proxy is for external access only)
             response = await asyncio.to_thread(
                 requests.post,
@@ -57,7 +60,7 @@ class ChatterboxClient:
                     "input": text,
                     "voice": selected_voice,
                     "response_format": "mp3",
-                    "speed": 0.9
+                    "speed": speed
                 },
                 headers=headers,
                 timeout=self.timeout

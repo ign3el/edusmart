@@ -5,6 +5,32 @@ Manages application settings, now consolidated for Gemini services.
 
 import os
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer setting, tolerating a trailing inline comment.
+
+    `docker run --env-file` passes a line like `CACHE_TTL=86400  # 24 hours`
+    through VERBATIM - unlike docker-compose, it does not strip inline
+    comments. The value then arrives as the string "86400  # 24 hours" and
+    int() raises at import time, taking the whole app down before it serves a
+    request. Production never hit this only because compose passes an explicit
+    environment list that happens to omit these keys; anything else reading the
+    same .env (a test runner, a one-off `docker run`, a migration script) hits
+    it immediately.
+
+    A malformed value falls back to the default rather than raising: a wrong
+    cache TTL is a bad setting, a crash at import is an outage.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    cleaned = raw.split("#", 1)[0].strip()
+    try:
+        return int(cleaned)
+    except ValueError:
+        return default
+
+
 class Config:
     """Application configuration"""
 
@@ -17,10 +43,10 @@ class Config:
     # Caching
     USE_CACHE = os.getenv("USE_CACHE", "true").lower() == "true"
     REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    CACHE_TTL = int(os.getenv("CACHE_TTL", 86400))  # 24 hours
+    CACHE_TTL = _env_int("CACHE_TTL", 86400)  # 24 hours
 
     # File handling
-    MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", 10485760))  # 10MB
+    MAX_UPLOAD_SIZE = _env_int("MAX_UPLOAD_SIZE", 10485760)  # 10MB
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "outputs")
 
