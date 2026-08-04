@@ -30,12 +30,19 @@ fi
 # --network: join the same network as the running backend so MySQL resolves
 # exactly as it does in production. --env-file: the same configuration the real
 # container receives.
+# Backend deploys blue/green now (see PROJECT.md - "Zero-downtime deploys") -
+# there is no longer a single "edusmart-backend" container, so try both color
+# names and use whichever is actually running.
 # The backend is attached to more than one network (its own compose network and
 # the shared ai-services one), so emit newline-separated names and take the
 # first. Without the separator the names concatenate into one invalid string.
-NETWORK="$(docker inspect edusmart-backend \
-  --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null \
-  | grep -v '^$' | head -1)"
+NETWORK=""
+for BACKEND_CONTAINER in edusmart-backend-blue edusmart-backend-green; do
+  NETWORK="$(docker inspect "$BACKEND_CONTAINER" \
+    --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null \
+    | grep -v '^$' | head -1)" || true
+  [ -n "$NETWORK" ] && break
+done
 NETWORK="${NETWORK:-bridge}"
 
 echo "==> running tests in a throwaway container (image=$IMAGE, network=$NETWORK)"

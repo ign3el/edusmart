@@ -36,9 +36,27 @@ class Config:
 
     # Gemini API Configuration
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-pro")
-    GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-pro-vision") # Hypothetical model
-    GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-pro-tts") # Hypothetical model
+
+    # Model names for the two Gemini jobs (see services/story_service.py for
+    # why they're kept distinct - separate per-model RPD quotas). Env-driven
+    # so a model swap is a config change, not a redeploy.
+    LLM_STORY_MODEL = os.getenv("LLM_STORY_MODEL", "gemini-3.5-flash-lite")
+    LLM_VISION_MODEL = os.getenv("LLM_VISION_MODEL", "gemini-3.1-flash-lite")
+
+    # Groq is the fallback/alternate text provider (see LLM_BACKEND below).
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+    # "gemini" (default) or "groq" - which provider is tried FIRST for story
+    # generation. The other still runs as the fallback either way, so this
+    # never removes the safety net, only changes which one is primary.
+    #
+    # WARNING: Groq's free on_demand tier caps this account at 8000
+    # tokens/minute total (prompt + completion), which silently truncates
+    # large documents before the model ever sees them - measured to discard
+    # the back half of a real NCERT chemistry chapter (see the 2026-08-03
+    # comment above _STORY_MODEL in story_service.py). Only set this to
+    # "groq" if your documents are short or you've moved to a paid Groq tier.
+    LLM_BACKEND = os.getenv("LLM_BACKEND", "gemini").lower()
 
     # Caching
     USE_CACHE = os.getenv("USE_CACHE", "true").lower() == "true"
@@ -79,20 +97,34 @@ class Config:
     # e.g. while actively debugging the RunPod path.
     TTS_RUNPOD_FALLBACK_TO_CPU = os.getenv("TTS_RUNPOD_FALLBACK_TO_CPU", "true").lower() == "true"
 
+    # "flux-dev" (default, RUNPOD_ENDPOINT_ID_FLUX, 20/15 steps) or
+    # "flux-schnell" (RUNPOD_ENDPOINT_ID_FLUX_SCHNELL, 4 steps, ~4-5x cheaper
+    # per image - measured 2026-08-04). Different endpoint AND different
+    # ComfyUI node graph (UNETLoader/DualCLIPLoader/VAELoader instead of
+    # CheckpointLoaderSimple, since the two checkpoints ship in different
+    # formats on the public runpod/worker-comfyui images). Flip only after
+    # visually comparing output on real story prompts - schnell's own
+    # img2img/reference-image behavior at low step counts is unverified.
+    IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", "flux-dev").lower()
+
 
     @classmethod
     def get_info(cls) -> dict:
-        """Get current configuration info"""
+        """Get current configuration info. Reflects the ACTUAL active provider
+        per subsystem, not a fixed "Gemini does everything" assumption - each
+        one is independently switchable, see LLM_BACKEND/IMAGE_BACKEND/TTS_BACKEND."""
         return {
-            "ai_provider": "Google Gemini",
             "text_generation": {
-                "model": cls.GEMINI_TEXT_MODEL,
+                "backend": cls.LLM_BACKEND,
+                "story_model": cls.LLM_STORY_MODEL,
+                "vision_model": cls.LLM_VISION_MODEL,
+                "groq_model": cls.GROQ_MODEL,
             },
             "image_generation": {
-                "model": cls.GEMINI_IMAGE_MODEL,
+                "backend": cls.IMAGE_BACKEND,
             },
             "voice_generation": {
-                "model": cls.GEMINI_TTS_MODEL,
+                "backend": cls.TTS_BACKEND,
             },
             "caching": {
                 "enabled": cls.USE_CACHE,

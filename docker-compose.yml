@@ -4,186 +4,261 @@ networks:
   ai-services:
     external: true
 
-services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: edusmart-backend
-    ports:
-      # Bound to localhost only - nginx (aaPanel, runs on the host) reverse-proxies
-      # to this port and reaches it fine over 127.0.0.1. Previously bound to
-      # 0.0.0.0, which made the raw backend directly reachable from the public
-      # internet, bypassing Cloudflare and nginx entirely (confirmed exploitable
-      # 2026-07-20 - already being probed by internet scanners in the access logs).
-      - "127.0.0.1:8000:8000"
-    environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - HF_TOKEN=${HF_TOKEN:-}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      # Concurrency limits. These bound simultaneous I/O, not CPU work, so
-      # they scale with expected in-flight requests rather than core count.
-      # MYSQL_POOL_SIZE is capped at 32 in code (mysql-connector's own
-      # CNX_POOL_MAXSIZE); the MySQL server allows 151 connections total.
-      # Raise these on bigger hardware - no rebuild required, just a restart.
-      - MYSQL_POOL_SIZE=${MYSQL_POOL_SIZE:-32}
-      - THREAD_POOL_WORKERS=${THREAD_POOL_WORKERS:-128}
-      - SQLITE_BUSY_TIMEOUT_MS=${SQLITE_BUSY_TIMEOUT_MS:-30000}
-      # Wire format requested from Kokoro. mp3 is ~66% smaller than wav for the
-      # same input and Kokoro encodes it itself, so it costs us no local CPU.
-      # Set to wav only to debug audio quality - it triples egress per scene.
-      - TTS_AUDIO_FORMAT=${TTS_AUDIO_FORMAT:-mp3}
-      # "cpu" (self-hosted Kokoro container) or "runpod" (RunPod Flash GPU
-      # endpoint). See RUNPOD_ENDPOINT_ID_KOKORO below.
-      - TTS_BACKEND=${TTS_BACKEND:-cpu}
-      - TTS_RUNPOD_FALLBACK_TO_CPU=${TTS_RUNPOD_FALLBACK_TO_CPU:-true}
-      - RUNPOD_TTS_TIMEOUT_S=${RUNPOD_TTS_TIMEOUT_S:-180}
-      # --- Generation queue (services/job_queue.py) ---
-      # GENERATION_WORKERS is the headline dial: how many stories generate at
-      # once, process-wide. It is what decides throughput, NOT how many users
-      # press upload at the same time - the rest wait in a durable queue.
-      # 4 suits 3 vCPUs with CPU-bound Kokoro. Raise it after the GPU move.
-      - GENERATION_WORKERS=${GENERATION_WORKERS:-4}
-      - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-200}
-      - MAX_JOBS_PER_USER=${MAX_JOBS_PER_USER:-3}
-      - QUEUE_POLL_SECONDS=${QUEUE_POLL_SECONDS:-2.0}
-      - QUEUE_RETENTION_HOURS=${QUEUE_RETENTION_HOURS:-48}
-      # Hard ceiling on one story. A fixed worker pool turns any hang into a
-      # permanent loss of capacity, so a wedged job is reclaimed rather than
-      # holding its worker until the next deploy.
-      - GENERATION_TIMEOUT_SECONDS=${GENERATION_TIMEOUT_SECONDS:-1800}
-      # --- Concurrency governors (services/concurrency.py) ---
-      # Process-wide ceilings on external calls, replacing the old per-story
-      # semaphores. MAX_CONCURRENT_TTS is the one to raise once Kokoro is on
-      # the GPU pod; MAX_CONCURRENT_IMAGES tracks the RunPod endpoint's own
-      # max-worker count.
-      - MAX_CONCURRENT_IMAGES=${MAX_CONCURRENT_IMAGES:-6}
-      - MAX_CONCURRENT_TTS=${MAX_CONCURRENT_TTS:-4}
-      - MAX_CONCURRENT_LLM=${MAX_CONCURRENT_LLM:-8}
-      - MAX_IMAGES_PER_STORY=${MAX_IMAGES_PER_STORY:-4}
-      - RUNPOD_ENDPOINT_ID_FLUX=${RUNPOD_ENDPOINT_ID_FLUX:-}
-      - RUNPOD_ENDPOINT_ID_A1111=${RUNPOD_ENDPOINT_ID_A1111:-}
-      - RUNPOD_KEY=${RUNPOD_KEY:-}
-      - RUNPOD_SEED=${RUNPOD_SEED:-20240601}
-      - RUNPOD_MONTHLY_CAP_AED=${RUNPOD_MONTHLY_CAP_AED:-25}
-      - RUNPOD_COST_AED_PER_IMAGE=${RUNPOD_COST_AED_PER_IMAGE:-0.02}
-      - RUNPOD_ENDPOINT_ID_KOKORO=${RUNPOD_ENDPOINT_ID_KOKORO:-}
-      # TTS Configuration
-      - CHATTERBOX_URL=http://kokoro-tts:8880
-      - KOKORO_URL=http://kokoro-tts:8880
-      - TTS_API_KEY=${TTS_API_KEY:-}
-      - TTS_API_URL=${TTS_API_URL:-https://tts.ign3el.com/v1/audio/speech}
-      - PIPER_URL=http://piper-tts:5000
-      # Database Configuration
-      - MYSQL_HOST=${MYSQL_HOST:-10.0.0.147}
-      - MYSQL_PORT=${MYSQL_PORT:-3306}
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-edusmart_db}
-      # JWT Configuration
-      - JWT_SECRET=${JWT_SECRET}
-      # Email Configuration
-      # Outbound mail abuse controls. /signup, /forgot-password and
-      # /resend-verification each make this server's SMTP account mail an
-      # address the caller chose, so they are budgeted per visitor IP.
-      # Signup is looser because a school or household shares one public IP.
-      # Under `uvicorn --workers N` the counters are per worker: divide by N.
-      - SIGNUP_RATE_MAX_ATTEMPTS=${SIGNUP_RATE_MAX_ATTEMPTS:-10}
-      - MAIL_RATE_MAX_ATTEMPTS=${MAIL_RATE_MAX_ATTEMPTS:-5}
-      - MAIL_RATE_WINDOW_SECONDS=${MAIL_RATE_WINDOW_SECONDS:-3600}
-      # Signup refuses these outright (null MX = the bounce lands in our inbox).
-      - BLOCKED_EMAIL_DOMAINS=${BLOCKED_EMAIL_DOMAINS:-example.com,example.net,example.org,example.edu,test.com,localhost}
-      # Addresses here are logged instead of sent - the safe target for probes.
-      - MAIL_SUPPRESS_DOMAINS=${MAIL_SUPPRESS_DOMAINS:-probe.edusmart.internal}
-      - EMAIL_BACKEND=${EMAIL_BACKEND:-smtp}
-      - MAIL_USERNAME=${MAIL_USERNAME}
-      - MAIL_PASSWORD=${MAIL_PASSWORD}
-      - MAIL_FROM=${MAIL_FROM}
-      - MAIL_PORT=${MAIL_PORT:-587}
-      - MAIL_SERVER=${MAIL_SERVER:-smtp.gmail.com}
-      - MAIL_STARTTLS=${MAIL_STARTTLS:-True}
-      - MAIL_SSL_TLS=${MAIL_SSL_TLS:-False}
-      - APP_URL=${APP_URL:-https://edusmart.ign3el.com}
-      # billing.py reads FRONTEND_URL for Stripe success/cancel/portal redirects.
-      # It was never passed - the code only worked because its hardcoded default
-      # happened to match production. Any domain change would have broken
-      # checkout redirects silently. Left empty by default on purpose: billing.py
-      # then falls back to APP_URL above, so there is one source of truth.
-      - FRONTEND_URL=${FRONTEND_URL:-}
-      # Stripe (Payment Layer) - credentials only, pricing lives in the DB
-      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
-      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
-      # Social sign-in. Empty by default: oauth_service reports the provider as
-      # unavailable and the UI hides its button, rather than the container
-      # failing to start. GOOGLE_CLIENT_ID must be the SAME value the frontend
-      # was built with - it is the audience the ID token is checked against, so
-      # a mismatch rejects every legitimate login.
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
-      - FACEBOOK_APP_ID=${FACEBOOK_APP_ID:-}
-      - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET:-}
-    volumes:
-      # NOTE: ./backend:/app is deliberately absent. It used to shadow the image's
-      # own `COPY . .` entirely, which meant production ran off the working
-      # directory rather than a built artifact: no rollback, no guarantee the
-      # image matched what was running, and 18 stray .bak files visible inside
-      # the container. Code now comes from the image; only data is mounted.
-      # Deploy with ./deploy.sh so each build is tagged and rollback works.
-      - ./backend/outputs:/app/outputs
-      - ./backend/uploads:/app/uploads
-      - ./backend/saved_stories:/app/saved_stories
-      - ./backend/generated_stories:/app/generated_stories
-      - backend_db:/app/db_data
-    # Runs as the host ubuntu user's UID (matches ownership of all bind
-    # mounts above) instead of root - was root only because nothing had
-    # ever fixed the ownership of the backend_db named volume.
-    user: "1001:1001"
-    restart: unless-stopped
-    # `restart: unless-stopped` only reacts to a dead process. This catches the
-    # more common production failure: uvicorn still running but wedged on an
-    # exhausted MySQL pool or a full disk. /api/health probes both.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status == 200 else 1)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    networks:
-      - web_network
-      - ai-services
+# Shared backend config for blue/green deploys (see PROJECT.md - "Zero-downtime
+# deploys"). Two copies of the SAME service, differing only in container_name
+# and the debug host port, so a deploy can bring the inactive color up,
+# health-check it, and only then retire the old one - the app is never fully
+# down for the length of a rebuild. Both colors mount the SAME backend_db
+# volume and bind mounts (shared state, not a copy each) - confirmed safe for
+# concurrent access: job_state.py's claim_next_job() uses BEGIN IMMEDIATE
+# specifically for multi-process safety, and the RunPod spend / vision budget
+# counters are flock-protected across processes (services/story_service.py,
+# services/vision_budget.py) for the same reason.
+x-backend-common: &backend-common
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  # Explicit and SHARED across both colors - without this, compose derives
+  # per-service image names (edusmart-backend-blue / -green), which would
+  # double every build for identical source and break deploy.sh's existing
+  # edusmart-backend:TIMESTAMP tag/rollback scheme.
+  image: edusmart-backend:latest
+  environment:
+    - GEMINI_API_KEY=${GEMINI_API_KEY}
+    - GROQ_API_KEY=${GROQ_API_KEY:-}
+    - HF_TOKEN=${HF_TOKEN:-}
+    - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Concurrency limits. These bound simultaneous I/O, not CPU work, so
+    # they scale with expected in-flight requests rather than core count.
+    # MYSQL_POOL_SIZE is capped at 32 in code (mysql-connector's own
+    # CNX_POOL_MAXSIZE); the MySQL server allows 151 connections total.
+    # Raise these on bigger hardware - no rebuild required, just a restart.
+    # NOTE two colors can run at once during a deploy: each pool is sized for
+    # this cap independently, so a brief overlap can transiently use up to 2x
+    # MYSQL_POOL_SIZE connections against the server's 151 limit. Keep this
+    # comfortably under half of the server cap if raising it.
+    - MYSQL_POOL_SIZE=${MYSQL_POOL_SIZE:-32}
+    - THREAD_POOL_WORKERS=${THREAD_POOL_WORKERS:-128}
+    - SQLITE_BUSY_TIMEOUT_MS=${SQLITE_BUSY_TIMEOUT_MS:-30000}
+    # Wire format requested from Kokoro. mp3 is ~66% smaller than wav for the
+    # same input and Kokoro encodes it itself, so it costs us no local CPU.
+    # Set to wav only to debug audio quality - it triples egress per scene.
+    - TTS_AUDIO_FORMAT=${TTS_AUDIO_FORMAT:-mp3}
+    # "cpu" (self-hosted Kokoro container) or "runpod" (RunPod Flash GPU
+    # endpoint). See RUNPOD_ENDPOINT_ID_KOKORO below.
+    - TTS_BACKEND=${TTS_BACKEND:-cpu}
+    - TTS_RUNPOD_FALLBACK_TO_CPU=${TTS_RUNPOD_FALLBACK_TO_CPU:-true}
+    - RUNPOD_TTS_TIMEOUT_S=${RUNPOD_TTS_TIMEOUT_S:-180}
+    # --- Generation queue (services/job_queue.py) ---
+    # GENERATION_WORKERS is the headline dial: how many stories generate at
+    # once, process-wide. It is what decides throughput, NOT how many users
+    # press upload at the same time - the rest wait in a durable queue.
+    # 4 suits 3 vCPUs with CPU-bound Kokoro. Raise it after the GPU move.
+    - GENERATION_WORKERS=${GENERATION_WORKERS:-4}
+    - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-200}
+    - MAX_JOBS_PER_USER=${MAX_JOBS_PER_USER:-3}
+    - QUEUE_POLL_SECONDS=${QUEUE_POLL_SECONDS:-2.0}
+    - QUEUE_RETENTION_HOURS=${QUEUE_RETENTION_HOURS:-48}
+    # Hard ceiling on one story. A fixed worker pool turns any hang into a
+    # permanent loss of capacity, so a wedged job is reclaimed rather than
+    # holding its worker until the next deploy.
+    - GENERATION_TIMEOUT_SECONDS=${GENERATION_TIMEOUT_SECONDS:-1800}
+    # --- Concurrency governors (services/concurrency.py) ---
+    # Process-wide ceilings on external calls, replacing the old per-story
+    # semaphores. MAX_CONCURRENT_TTS is the one to raise once Kokoro is on
+    # the GPU pod; MAX_CONCURRENT_IMAGES tracks the RunPod endpoint's own
+    # max-worker count. Same overlap note as MYSQL_POOL_SIZE above - two
+    # colors briefly running means up to 2x these ceilings hit RunPod at
+    # once during a deploy; RunPod's own per-endpoint workersMax absorbs it.
+    - MAX_CONCURRENT_IMAGES=${MAX_CONCURRENT_IMAGES:-6}
+    - MAX_CONCURRENT_TTS=${MAX_CONCURRENT_TTS:-4}
+    - MAX_CONCURRENT_LLM=${MAX_CONCURRENT_LLM:-8}
+    - MAX_IMAGES_PER_STORY=${MAX_IMAGES_PER_STORY:-4}
+    - RUNPOD_ENDPOINT_ID_FLUX=${RUNPOD_ENDPOINT_ID_FLUX:-}
+    # schnell alternate image endpoint (see IMAGE_BACKEND below) - added
+    # 2026-08-04, was never actually wired through to the container despite
+    # config.py/story_service.py reading it: this list is the ONLY thing that
+    # puts a host env var inside the container, and it was missing here.
+    - RUNPOD_ENDPOINT_ID_FLUX_SCHNELL=${RUNPOD_ENDPOINT_ID_FLUX_SCHNELL:-}
+    - RUNPOD_ENDPOINT_ID_A1111=${RUNPOD_ENDPOINT_ID_A1111:-}
+    - RUNPOD_KEY=${RUNPOD_KEY:-}
+    - RUNPOD_SEED=${RUNPOD_SEED:-20240601}
+    - RUNPOD_MONTHLY_CAP_AED=${RUNPOD_MONTHLY_CAP_AED:-25}
+    - RUNPOD_COST_AED_PER_IMAGE=${RUNPOD_COST_AED_PER_IMAGE:-0.02}
+    - RUNPOD_ENDPOINT_ID_KOKORO=${RUNPOD_ENDPOINT_ID_KOKORO:-}
+    # "flux-dev" (default) or "flux-schnell" - see config.py IMAGE_BACKEND.
+    - IMAGE_BACKEND=${IMAGE_BACKEND:-flux-dev}
+    # Text-generation provider/model switches - see config.py LLM_BACKEND.
+    - LLM_BACKEND=${LLM_BACKEND:-gemini}
+    - LLM_STORY_MODEL=${LLM_STORY_MODEL:-gemini-3.5-flash-lite}
+    - LLM_VISION_MODEL=${LLM_VISION_MODEL:-gemini-3.1-flash-lite}
+    - GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
+    # TTS Configuration
+    - CHATTERBOX_URL=http://kokoro-tts:8880
+    - KOKORO_URL=http://kokoro-tts:8880
+    - TTS_API_KEY=${TTS_API_KEY:-}
+    - TTS_API_URL=${TTS_API_URL:-https://tts.ign3el.com/v1/audio/speech}
+    - PIPER_URL=http://piper-tts:5000
+    # Database Configuration
+    - MYSQL_HOST=${MYSQL_HOST:-10.0.0.147}
+    - MYSQL_PORT=${MYSQL_PORT:-3306}
+    - MYSQL_USER=${MYSQL_USER}
+    - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    - MYSQL_DATABASE=${MYSQL_DATABASE:-edusmart_db}
+    # JWT Configuration
+    - JWT_SECRET=${JWT_SECRET}
+    # Email Configuration
+    # Outbound mail abuse controls. /signup, /forgot-password and
+    # /resend-verification each make this server's SMTP account mail an
+    # address the caller chose, so they are budgeted per visitor IP.
+    # Signup is looser because a school or household shares one public IP.
+    # Under `uvicorn --workers N` the counters are per worker: divide by N.
+    # NOTE two colors briefly running is the same "per worker" situation -
+    # rate limits are per-process, so a deploy overlap transiently doubles
+    # the effective budget for its duration. Not security-critical (abuse
+    # throttling, not access control) - noted for completeness.
+    - SIGNUP_RATE_MAX_ATTEMPTS=${SIGNUP_RATE_MAX_ATTEMPTS:-10}
+    - MAIL_RATE_MAX_ATTEMPTS=${MAIL_RATE_MAX_ATTEMPTS:-5}
+    - MAIL_RATE_WINDOW_SECONDS=${MAIL_RATE_WINDOW_SECONDS:-3600}
+    # Signup refuses these outright (null MX = the bounce lands in our inbox).
+    - BLOCKED_EMAIL_DOMAINS=${BLOCKED_EMAIL_DOMAINS:-example.com,example.net,example.org,example.edu,test.com,localhost}
+    # Addresses here are logged instead of sent - the safe target for probes.
+    - MAIL_SUPPRESS_DOMAINS=${MAIL_SUPPRESS_DOMAINS:-probe.edusmart.internal}
+    - EMAIL_BACKEND=${EMAIL_BACKEND:-smtp}
+    - MAIL_USERNAME=${MAIL_USERNAME}
+    - MAIL_PASSWORD=${MAIL_PASSWORD}
+    - MAIL_FROM=${MAIL_FROM}
+    - MAIL_PORT=${MAIL_PORT:-587}
+    - MAIL_SERVER=${MAIL_SERVER:-smtp.gmail.com}
+    - MAIL_STARTTLS=${MAIL_STARTTLS:-True}
+    - MAIL_SSL_TLS=${MAIL_SSL_TLS:-False}
+    - APP_URL=${APP_URL:-https://edusmart.ign3el.com}
+    # billing.py reads FRONTEND_URL for Stripe success/cancel/portal redirects.
+    # It was never passed - the code only worked because its hardcoded default
+    # happened to match production. Any domain change would have broken
+    # checkout redirects silently. Left empty by default on purpose: billing.py
+    # then falls back to APP_URL above, so there is one source of truth.
+    - FRONTEND_URL=${FRONTEND_URL:-}
+    # Stripe (Payment Layer) - credentials only, pricing lives in the DB
+    - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+    - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+    # Social sign-in. Empty by default: oauth_service reports the provider as
+    # unavailable and the UI hides its button, rather than the container
+    # failing to start. GOOGLE_CLIENT_ID must be the SAME value the frontend
+    # was built with - it is the audience the ID token is checked against, so
+    # a mismatch rejects every legitimate login.
+    - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+    - FACEBOOK_APP_ID=${FACEBOOK_APP_ID:-}
+    - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET:-}
+  volumes:
+    # NOTE: ./backend:/app is deliberately absent. It used to shadow the image's
+    # own `COPY . .` entirely, which meant production ran off the working
+    # directory rather than a built artifact: no rollback, no guarantee the
+    # image matched what was running, and 18 stray .bak files visible inside
+    # the container. Code now comes from the image; only data is mounted.
+    # Deploy with ./deploy.sh so each build is tagged and rollback works.
+    #
+    # SHARED across both colors on purpose - both need to see the same job
+    # queue, spend counters, and story files, not a copy each.
+    - ./backend/outputs:/app/outputs
+    - ./backend/uploads:/app/uploads
+    - ./backend/saved_stories:/app/saved_stories
+    - ./backend/generated_stories:/app/generated_stories
+    - backend_db:/app/db_data
+  # Runs as the host ubuntu user's UID (matches ownership of all bind
+  # mounts above) instead of root - was root only because nothing had
+  # ever fixed the ownership of the backend_db named volume.
+  user: "1001:1001"
+  restart: unless-stopped
+  # `restart: unless-stopped` only reacts to a dead process. This catches the
+  # more common production failure: uvicorn still running but wedged on an
+  # exhausted MySQL pool or a full disk. /api/health probes both.
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status == 200 else 1)"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 60s
+  networks:
+    - web_network
+    - ai-services
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      # Build-time config, sourced from the SAME .env as the backend so there
-      # is one file to manage. These three are public by design - Vite inlines
-      # them into a bundle anyone can read, and build args are recorded in
-      # `docker history`. Never add a secret here; MYSQL_PASSWORD, JWT_SECRET,
-      # MAIL_PASSWORD, STRIPE_SECRET_KEY and FACEBOOK_APP_SECRET stay backend
-      # runtime env vars and must never enter the build context.
-      #
-      # VITE_API_URL derives from APP_URL so the domain has a single source of
-      # truth; GOOGLE_CLIENT_ID feeds both the frontend build and the backend
-      # env, because a mismatch between those two rejects every valid login.
-      args:
-        VITE_API_URL: ${APP_URL:-https://edusmart.ign3el.com}
-        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-        VITE_FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
-    container_name: edusmart-frontend
+# Shared frontend config for blue/green deploys - same rationale as the
+# backend anchor above. Frontend is stateless (static assets baked into the
+# image, no volumes), so unlike backend there is no shared-state concurrency
+# concern here - the two colors don't need to coordinate anything.
+x-frontend-common: &frontend-common
+  build:
+    context: ./frontend
+    dockerfile: Dockerfile
+    # Build-time config, sourced from the SAME .env as the backend so there
+    # is one file to manage. These three are public by design - Vite inlines
+    # them into a bundle anyone can read, and build args are recorded in
+    # `docker history`. Never add a secret here; MYSQL_PASSWORD, JWT_SECRET,
+    # MAIL_PASSWORD, STRIPE_SECRET_KEY and FACEBOOK_APP_SECRET stay backend
+    # runtime env vars and must never enter the build context.
+    #
+    # VITE_API_URL derives from APP_URL so the domain has a single source of
+    # truth; GOOGLE_CLIENT_ID feeds both the frontend build and the backend
+    # env, because a mismatch between those two rejects every valid login.
+    args:
+      VITE_API_URL: ${APP_URL:-https://edusmart.ign3el.com}
+      VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      VITE_FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+  # Explicit and SHARED across both colors, same reasoning as backend's image:
+  # one build regardless of which color deploy.sh targets, and it keeps
+  # deploy.sh's edusmart-frontend:TIMESTAMP tag/rollback scheme working.
+  image: edusmart-frontend:latest
+  # depends_on removed deliberately (was `depends_on: [backend]`, a name
+  # that no longer exists now that backend is blue/green). It was also a
+  # standing footgun: depends_on's default condition just orders startup,
+  # but `docker compose up -d --build frontend` treats a config-hash change
+  # on a dependency as a reason to silently recreate it too - which is
+  # exactly what wiped backend's logs on 2026-07-20 (see deploy.sh). nginx's
+  # /api routing (frontend/nginx.conf) already tolerates a backend color
+  # being down via its resolver+fallback setup, so frontend doesn't need to
+  # wait on either one at container-start time.
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+  networks:
+    - web_network
+
+services:
+  backend-blue:
+    <<: *backend-common
+    container_name: edusmart-backend-blue
+    ports:
+      # Bound to localhost only, for direct host-level debugging/health
+      # checks during a deploy (nginx does NOT use this - it reaches both
+      # colors via Docker DNS, see frontend/nginx.conf's upstream block).
+      - "127.0.0.1:8000:8000"
+
+  backend-green:
+    <<: *backend-common
+    container_name: edusmart-backend-green
+    ports:
+      - "127.0.0.1:8001:8000"
+
+  frontend-blue:
+    <<: *frontend-common
+    container_name: edusmart-frontend-blue
     ports:
       - "3004:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    networks:
-      - web_network
+
+  frontend-green:
+    <<: *frontend-common
+    container_name: edusmart-frontend-green
+    ports:
+      # NOT 3005 - that's taken by an unrelated project on this shared VPS
+      # (ai-kids-quiz-frontend-1, confirmed running independently). Verified
+      # 3009 free across both `ss -tlnp` and every other container's
+      # published ports before picking it.
+      - "3009:80"
 
 volumes:
   uploads:

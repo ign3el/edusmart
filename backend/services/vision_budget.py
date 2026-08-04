@@ -28,6 +28,8 @@ Design notes
   save failed silently and the cap enforced nothing for five days. Do not
   repeat that: this path must be writable and persistent.
 """
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -39,8 +41,32 @@ logger = logging.getLogger(__name__)
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _USAGE_FILE = os.path.join(_APP_ROOT, "db_data", "vision_usage.json")
+_LOCK_FILE = _USAGE_FILE + ".lock"
 
 _lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _cross_process_lock():
+    """Exclusive lock over db_data/vision_usage.json.lock, held via flock.
+
+    threading.Lock only serializes callers inside ONE Python process. Blue/green
+    deploys briefly run two backend containers that both mount the same
+    db_data named volume, so two separate processes can race the same
+    load-modify-save cycle in reserve() below - each reading the same stale
+    total, both granting, one write clobbering the other's. flock is a kernel
+    lock tied to the underlying inode, so it serializes correctly across
+    containers sharing that volume (plain local Docker volume, not NFS).
+    A dedicated lock file, not the data file itself, so replacing the data
+    file via os.replace() never invalidates a lock someone else is holding.
+    """
+    os.makedirs(os.path.dirname(_LOCK_FILE), exist_ok=True)
+    with open(_LOCK_FILE, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _limit(name: str, default: int) -> int:
@@ -105,7 +131,7 @@ def reserve(n: int, user_id=None) -> Tuple[int, str]:
     if n <= 0:
         return 0, ""
 
-    with _lock:
+    with _lock, _cross_process_lock():
         data = _load()
         uid = str(user_id) if user_id is not None else "_anonymous"
 

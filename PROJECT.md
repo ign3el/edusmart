@@ -104,11 +104,94 @@ lever. Do not shave `_GROQ_MAX_DOC_CHARS` further; there is almost nothing left.
 Docker Compose (`docker-compose.yml` at repo root, one file for both `backend` and `frontend` services),
 aaPanel nginx reverse proxy in front. Deploys go through `./deploy.sh` (tagged images + rollback) —
 see Quick Commands. Rollback verified end-to-end 2026-07-25: `/api/health`'s `version` field flipped
-to the older build and back, healthy both ways.
+to the older build and back, healthy both ways. As of 2026-08-04 both services deploy blue/green -
+see "Zero-downtime deploys" below.
+
+## Zero-downtime deploys (blue/green) (2026-08-04, backend `20260804_165255` / frontend `20260804_170702`)
+
+**The problem this replaces:** every deploy used to destroy-then-create a single named container
+(`docker compose up -d --no-deps <svc>` on a service that only ever had ONE instance). Backend
+rebuilds 502'd every `/api` call for the ~30s the new container took to boot (frontend's nginx
+resolves `backend` by Docker DNS, and that name pointed at nothing during the gap); frontend
+rebuilds took the whole site down, not just the API, since aaPanel's host nginx proxies straight
+to one fixed port. Any story mid-generation during a deploy was also just killed.
+
+**The fix:** each service is now TWO containers, `-blue` and `-green`, sharing one image, one
+build, and (for backend) one data volume. Normally only one color is live; a deploy builds the
+image, brings up whichever color is NOT currently running, health-checks THAT color directly
+(bypassing nginx entirely), and only stops the old color once the new one is proven healthy. If
+the new color fails its health check, the old one was never touched - no outage, just a failed
+deploy to investigate. **Verified live, twice, with a continuous request-polling harness against
+the real public domain through an actual production deploy: 0 dropped requests, steady ~0.5-0.9s
+response times straight through the exact moment the old color stopped** (both backend and
+frontend, 2026-08-04).
+
+**Backend** (`backend-blue`/`backend-green`, container ports 8000/8001, Docker-DNS-routed):
+- `frontend/nginx.conf`'s `/api` location does NOT use a plain nginx `upstream {}` block for
+  this - that resolves server names ONCE at nginx startup/reload and **hard-fails the whole
+  frontend container** if either color isn't currently running (confirmed locally: `nginx -t`
+  errors "host not found in upstream"), which is routine under this scheme, not an edge case.
+  Instead it uses `proxy_pass` to an nginx *variable* (`set $api_backend "http://backend-blue:8000";
+  proxy_pass $api_backend;`) plus a `resolver 127.0.0.11` directive (Docker's embedded DNS) so
+  resolution happens per-request, not at startup, and `error_page 502 503 504 = @api_fallback`
+  retries `backend-green` transparently within the same client request. Verified all three states
+  live: both up (blue serves), blue absent from boot (green serves, nginx still starts fine), blue
+  stopped mid-operation (falls through to green with zero client-visible error).
+- **Shared state across the two containers, verified safe for concurrent access:**
+  - `job_state.db` (SQLite, `backend_db` volume) - `job_state.py`'s `claim_next_job()` already used
+    `BEGIN IMMEDIATE` before this work, specifically so two processes can't both claim the same
+    queued job. Not something this change had to add - it was already built for this.
+  - RunPod spend counter (`runpod_usage.json`) and vision daily budget (`vision_usage.json`) -
+    these WERE only protected by in-process locks (`asyncio.Lock` / `threading.Lock`), which do
+    nothing across two separate containers. Added `fcntl.flock`-based cross-process locking
+    (`services/story_service.py`'s `_cross_process_file_lock`, `services/vision_budget.py`'s
+    `_cross_process_lock`) on a dedicated `.lock` file next to each counter. Proved the race was
+    real first: an unlocked control script running two processes against the same counter lost
+    updates and even corrupted the file outright (partial-write JSONDecodeError) under concurrent
+    access; the flock'd version held at 1000/1000 increments across two real concurrent processes.
+  - Per-color RAM/connection budgets (`MYSQL_POOL_SIZE`, `MAX_CONCURRENT_*`) are NOT shared - each
+    color enforces its own ceiling independently, so a deploy overlap can transiently run up to 2x
+    those numbers (e.g. up to 64 MySQL connections against the server's 151 cap). Comfortable
+    today; re-check before raising these numbers on bigger hardware.
+- Draining: before stopping the outgoing color, `deploy.sh` polls its `/api/health` `queue.running`
+  count for up to 180s so an in-flight generation isn't killed by a routine deploy. On timeout it
+  stops anyway - `job_queue.py`'s existing `CancelledError` handler marks the job failed rather
+  than leaving it stuck, and the startup orphan-reconciler refunds the credit.
+
+**Frontend** (`frontend-blue`/`frontend-green`, host ports 3004/3009): stateless, so no draining
+and no shared-state concerns - a plain host-level `upstream {}` in a standalone nginx conf file is
+safe here, since the members are literal `127.0.0.1:port` targets, not hostnames needing
+resolution. Routed at the aaPanel host-nginx layer, NOT inside a container - see below.
+
+**⚠️ aaPanel fragility (durable, but re-check after any panel UI edit to this site):** the upstream
+pool definition lives in `/www/server/panel/vhost/nginx/edusmart-frontend-upstream.conf`, a
+standalone file (not one aaPanel generates), picked up by the panel's own wildcard
+`include /www/server/panel/vhost/nginx/*.conf;` - safe from being deleted by panel edits. The
+vhost's `proxy_pass` target, however, lives inside aaPanel's UI-managed files
+(`/www/server/panel/vhost/nginx/edusmart.ign3el.com.conf` AND the JSON it's regenerated from,
+`/www/server/proxy_project/sites/edusmart.ign3el.com/edusmart.ign3el.com.json` - both were updated
+to `http://edusmart_frontend_pool` so a panel-triggered regeneration stays correct too). If the
+site's reverse-proxy settings are ever edited again through the aaPanel UI, **check that
+`proxy_pass` still reads `http://edusmart_frontend_pool` afterward** - the panel can silently
+revert it back to a literal `http://127.0.0.1:3004` depending on what triggers regeneration.
+Reapply: `sudo sed -i 's|proxy_pass http://127.0.0.1:3004;|proxy_pass http://edusmart_frontend_pool;|'
+/www/server/panel/vhost/nginx/edusmart.ign3el.com.conf && sudo nginx -t -c /www/server/nginx/conf/nginx.conf
+&& sudo systemctl reload nginx` (test before reload, always).
+
+**Ports on this shared VPS**: 3005 looked free but is `ai-kids-quiz-frontend-1`, an unrelated
+project - frontend-green uses 3009 instead. `deploy.sh --status` shows which color is live on
+which port for both services without needing `docker ps`.
+
+**One-time migration cost, already paid**: cutting over from the old single-container scheme to
+this one needed a real (~30-60s) gap on 2026-08-04, because the legacy `edusmart-backend`/
+`edusmart-frontend` containers held the exact host ports the new `-blue` containers needed. Every
+deploy from here on is zero-gap; that transition cost doesn't recur.
 
 ## Domain & Port
 - Domain: edusmart.ign3el.com (Cloudflare proxy)
-- Containers: `edusmart-backend` (port 8000), `edusmart-frontend` (port 3004→80)
+- Containers: `edusmart-backend-blue`/`edusmart-backend-green` (ports 8000/8001, only one normally
+  running), `edusmart-frontend-blue`/`edusmart-frontend-green` (ports 3004/3009, same). See
+  "Zero-downtime deploys" above.
 - Backend runs as **non-root** (`user: "1001:1001"`, matching the host `ubuntu` UID) as of 2026-07-19
 
 ## Quick Commands
@@ -122,11 +205,12 @@ to the older build and back, healthy both ways.
 |---|---|
 | Deploy both services | `./deploy.sh` |
 | Deploy one service | `./deploy.sh backend` / `./deploy.sh frontend` |
+| Which color is live? | `./deploy.sh --status` |
 | List rollback points | `./deploy.sh --list` |
 | Roll back | `./deploy.sh --rollback backend 20260725_201915` |
 | Which build is live? | `curl -s https://edusmart.ign3el.com/api/health` → `"version"` field |
-| Logs | `docker logs edusmart-backend --tail 50` |
-| Job-state DB (live) | `docker exec edusmart-backend sqlite3 /app/db_data/job_state.db` |
+| Logs | `./deploy.sh --status` first, then `docker logs edusmart-backend-<color> --tail 50` |
+| Job-state DB (live) | `docker exec edusmart-backend-<color> sqlite3 /app/db_data/job_state.db` (either color - it's the same shared volume) |
 
 **Backend code changes now REQUIRE a rebuild.** There is no `./backend:/app` mount any more —
 editing a `.py` file on the host does nothing until you `./deploy.sh backend`. Data directories
@@ -139,7 +223,14 @@ else inside `/app` now lands in the container's ephemeral layer and is destroyed
 deploy — silently. `hash_service.py` was doing exactly that (`backend/hash_cache.json`, which
 only survived via the old mount, hence the odd `backend/backend/` directory); moved 2026-07-25.
 
-**Always use `--no-deps` when deploying just one service.** `frontend` has `depends_on: backend` in `docker-compose.yml`, so a plain `docker compose up -d --build frontend` silently recreates `backend` too (config-hash check on the dependency) even though nothing backend-related changed - wiping its container logs in the process (confirmed 2026-07-20, cost us two rounds of backend-timing diagnosis on a live perf complaint). `--no-deps` restricts the up to only the named service.
+**Always use `--no-deps`.** Originally because `frontend` had `depends_on: backend`, so a plain
+`docker compose up -d --build frontend` silently recreated `backend` too (config-hash check on the
+dependency) even though nothing backend-related changed - wiping its container logs in the process
+(confirmed 2026-07-20, cost us two rounds of backend-timing diagnosis on a live perf complaint).
+That specific `depends_on` was removed 2026-08-04 as part of the blue/green work (see "Zero-downtime
+deploys") - nginx already tolerates either color being down, so frontend no longer needs to wait on
+backend at container-start time. `--no-deps` is kept anyway: `deploy.sh` already passes it
+everywhere, and it's the right default the moment any service gains a new dependency later.
 
 ---
 
