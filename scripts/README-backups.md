@@ -27,15 +27,43 @@ or from Claude's memory.
 2. **R2** → **Manage API tokens** → **Create API token** → permission
    **Object Read & Write**, scoped to the `edusmart-backups` bucket only
    (not account-wide).
-3. Copy the three values it shows you **once**: Access Key ID, Secret Access
-   Key, and the S3 endpoint URL (`https://<account_id>.r2.cloudflarestorage.com`).
-4. On the VPS, run `rclone config` and create a remote named exactly `r2`:
-   - Storage type: `s3`
-   - Provider: `Cloudflare`
-   - Access Key ID / Secret Access Key: from step 3
-   - Endpoint: from step 3
-   - Leave region blank, ACL: `private`
-5. Verify: `rclone lsd r2:` should list `edusmart-backups` without error.
+3. Copy the two values it shows you **once**: Access Key ID and Secret Access
+   Key. Use the **S3 API** endpoint from the bucket's General page
+   (`https://<account_id>.r2.cloudflarestorage.com` — the account-level one,
+   NOT with `/edusmart-backups` appended, and NOT a jurisdiction-specific
+   `.eu.`/etc. variant even if the bucket's Location shows a specific region
+   like "Eastern Europe" - the plain account endpoint is correct regardless).
+4. On the VPS, create the remote non-interactively (cleaner than the
+   interactive wizard - real values only, no leftover fields):
+   ```bash
+   rclone config create r2 s3 \
+     provider=Cloudflare \
+     access_key_id=YOUR_ACCESS_KEY_ID \
+     secret_access_key=YOUR_SECRET_ACCESS_KEY \
+     endpoint=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com \
+     region=auto \
+     no_check_bucket=true
+   ```
+   **`no_check_bucket=true` is required, not optional.** Without it every
+   write 403s (AccessDenied) even with fully correct, confirmed-correct
+   credentials - discovered and root-caused 2026-08-04 after ruling out
+   bucket lock rules, billing status, jurisdiction endpoints, and a clean
+   config recreate. Cause: rclone's S3 backend does a bucket-level
+   HeadBucket-style check before every write by default, and a token
+   correctly scoped to Object Read & Write (not bucket-level admin) can't
+   pass that check - so the check itself gets denied and rclone aborts
+   before ever attempting the actual object PUT. `no_check_bucket=true`
+   skips that check, which is safe here since the bucket already exists.
+5. Verify with a real write, not just a listing - `rclone lsd r2:` (no
+   bucket) 403s even when everything is correctly configured, because a
+   bucket-scoped token can't list the whole account. Use:
+   ```bash
+   echo test > /tmp/r2test.txt && rclone copyto /tmp/r2test.txt r2:edusmart-backups/r2test.txt \
+     && rclone delete r2:edusmart-backups/r2test.txt && rm /tmp/r2test.txt
+   ```
+   **A `501 Not Implemented` on the first attempt, then "Attempt 2/3
+   succeeded," is normal** - rclone retries with a different method and it
+   works. Only a final failure after all 3 attempts is a real problem.
 6. Run `./scripts/backup.sh` again — it will now upload automatically.
 
 ## Restore
@@ -51,9 +79,11 @@ Docker volume, or `saved_stories/` on its own. The script prints the exact
 commands to do that manually; review the extracted contents first.
 
 **Test the restore path periodically** (e.g. quarterly) — an unrestored
-backup is a guess, not a backup. Last verified: 2026-08-04, local decrypt +
-extract confirmed against a real backup (dump, volume archive, and
-saved_stories all intact).
+backup is a guess, not a backup. Last verified: 2026-08-04 — full pipeline
+including the real R2 upload: `./scripts/backup.sh` produced a 46MB encrypted
+archive, confirmed present in `r2:edusmart-backups/` at the exact matching
+byte size, and separately, local decrypt + extract confirmed the dump, volume
+archive, and saved_stories were all intact inside it.
 
 ## Cron
 
