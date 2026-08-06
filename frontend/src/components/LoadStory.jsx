@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama, Users, Lock } from 'lucide-react'
 import apiClient from '../services/api'
@@ -185,15 +186,30 @@ function LoadStory({ onLoad, onBack }) {
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
   }
 
-  return (
-    <div className="load-story-modal-overlay">
+  // Portaled to <body> for the same reason the quiz overlay is: this modal
+  // renders inside .app-main, which sets `position: relative; z-index: 1` and
+  // therefore opens a stacking context. Inside it the overlay's z-index 1000
+  // is only ever compared against its siblings - against the rest of the page
+  // the whole subtree counts as "1", so .app-header (z-index 100) painted over
+  // the top of the card and clipped "Your Saved Stories". Raising 1000 higher
+  // would have changed nothing; escaping the context is the only fix.
+  return createPortal(
+    <div
+      className="load-story-modal-overlay"
+      onClick={(e) => { if (e.target === e.currentTarget) onBack() }}
+    >
       <motion.div
         className="load-story-container"
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.2 }}
       >
-        <h2><BookOpen size={24} /> Your Saved Stories</h2>
+        <div className="load-story-header">
+          <h2><BookOpen size={24} /> Your Saved Stories</h2>
+          <button className="load-story-close" onClick={onBack} title="Back to Home" aria-label="Back to Home">
+            <X size={20} />
+          </button>
+        </div>
 
       {!isOnline && (
         <div className="offline-warning">
@@ -401,7 +417,8 @@ function LoadStory({ onLoad, onBack }) {
         </div>
       )}
       </motion.div>
-    </div>
+    </div>,
+    document.body
   )
 }
 

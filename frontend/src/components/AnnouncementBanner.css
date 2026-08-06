@@ -1,0 +1,51 @@
+.announcement-banner {
+  position: sticky;
+  top: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  font-size: 0.85rem;
+  color: #150d33;
+  font-weight: 600;
+}
+
+.announcement-banner.severity-info {
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
+}
+
+.announcement-banner.severity-warning {
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+}
+
+.announcement-banner.severity-critical {
+  background: linear-gradient(135deg, #ef4444, #f97316);
+  color: #fff;
+}
+
+.announcement-icon {
+  flex-shrink: 0;
+}
+
+.announcement-message {
+  flex: 1;
+  min-width: 0;
+}
+
+.announcement-dismiss {
+  background: rgba(0, 0, 0, 0.12);
+  border: none;
+  border-radius: 999px;
+  padding: 0.3rem;
+  display: flex;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .announcement-banner {
+    font-size: 0.78rem;
+    padding: 0.5rem 0.75rem;
+  }
+}

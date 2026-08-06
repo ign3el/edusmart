@@ -12,7 +12,7 @@ from langdetect import detect, LangDetectException
 from pypdf import PdfReader
 import docx
 
-from .auth import get_current_user
+from .auth import get_current_user, _rate_limiter
 from database_models import User
 from services.story_service import estimate_question_capacity
 
@@ -55,6 +55,11 @@ async def extract_text_from_file(
     Supports .txt, .pdf, and .docx files.
     Requires authentication and enforces MAX_UPLOAD_SIZE to prevent abuse.
     """
+    # Free (no credit spent), so it's throttled per-user rather than gated by
+    # the billing system - a handful of documents per hour is normal usage.
+    if not _rate_limiter.check(f"extract-text:{current_user['id']}", max_attempts=30, window_seconds=3600):
+        raise HTTPException(status_code=429, detail="Too many upload previews. Please wait before trying again.")
+
     try:
         # Read file content
         content = await file.read()
@@ -131,6 +136,12 @@ async def tts_preview(
     Routes to appropriate TTS service based on voice.
     Requires authentication; text length capped to prevent API cost abuse.
     """
+    # Free (no credit spent) and hits the same Kokoro/Piper backends the real
+    # generation pipeline depends on - throttle per-user so voice-browsing
+    # can't turn into an unbounded compute drain.
+    if not _rate_limiter.check(f"tts-preview:{current_user['id']}", max_attempts=20, window_seconds=3600):
+        raise HTTPException(status_code=429, detail="Too many preview requests. Please wait before trying again.")
+
     try:
         # Determine endpoint based on voice
         if request.voice.startswith('ar_'):

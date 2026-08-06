@@ -27,7 +27,7 @@ function BrandMark({ className = '' }) {
 
   return (
     <h1 ref={glowRef} className={`brand-mark ${className}`}>
-      EduSmart
+      LearnTale
     </h1>
   )
 }

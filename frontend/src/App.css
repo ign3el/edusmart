@@ -55,7 +55,15 @@
    APP LAYOUT
 ================================ */
 .app {
+  /* dvh, not vh. On mobile Chrome 100vh is the LARGE viewport - the height the
+     page would have if the address bar were hidden - so with the toolbar shown
+     this box is ~113px taller than the screen. StoryPlayer sizes itself from
+     100dvh (the actual visible height), so that surplus was pure empty
+     background below the Take Quiz button, plus a phantom scroll: the sticky
+     app header stayed put while the player's own title bar scrolled away.
+     Reported 2026-08-06 as "wasted space below player control". */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   background: 
@@ -76,6 +84,16 @@
    play/pause/next below the fold and made the player scroll. */
 .app.is-playing {
   --app-header-h: 52px;
+  /* A DEFINITE height, not the min-height above. min-height leaves the box
+     content-sized as far as layout is concerned, so every percentage and every
+     grid `1fr` below it falls back to max-content - which is how a 5-line
+     narration could inflate the whole chain and push Take Quiz off a 300px-tall
+     landscape phone, and where the 14-21px scroll on landscape laptops came
+     from. The player is a deliberate one-screen view (overflow:hidden), so
+     pinning it to exactly one screen is what it wanted all along. Only the
+     playing screen: every other screen still grows with its content. */
+  height: 100vh;
+  height: 100dvh;
 }
 
 .app.is-playing .app-header {
@@ -86,6 +104,19 @@
 .app.is-playing .brand-mark { font-size: 1.15rem; }
 .app.is-playing .app-main { padding: 0; }
 .app.is-playing .content-shell { max-width: none; }
+
+/* Hand the leftover height down to the player instead of letting it guess.
+   .story-player's own rule is height: calc(100dvh - var(--app-header-h)), and
+   --app-header-h is a declared 52px while the header actually renders 55-68px
+   depending on breakpoint and content - so the player was always a little
+   taller than the space it had, which is the residual scroll left over after
+   the vh->dvh fix above. Stretching it through the flex chain removes the
+   magic number entirely: whatever the header ends up being, the player gets
+   exactly the rest. The share route (/s/:token) has no .app wrapper and keeps
+   using the dvh calc unchanged. */
+.app.is-playing .content-shell { min-height: 0; }
+.app.is-playing .player-container { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.app.is-playing .story-player { height: auto; flex: 1; min-height: 0; }
 
 .app::before {
   content: '';

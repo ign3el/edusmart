@@ -248,10 +248,13 @@ TABLES['user_stories'] = """
         name VARCHAR(255) NOT NULL,
         story_data JSON NOT NULL,
         is_public BOOLEAN NOT NULL DEFAULT FALSE,
+        share_token VARCHAR(64) NULL,
+        share_created_at DATETIME NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        INDEX idx_is_public (is_public)
+        INDEX idx_is_public (is_public),
+        UNIQUE INDEX idx_share_token (share_token)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -321,6 +324,62 @@ TABLES['promo_redemptions'] = """
         INDEX idx_code_user (code, user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
+
+TABLES['admin_audit_log'] = """
+    CREATE TABLE IF NOT EXISTS admin_audit_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        actor_user_id INT NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        target_type VARCHAR(50) NULL,
+        target_id VARCHAR(255) NULL,
+        details JSON NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_actor (actor_user_id),
+        INDEX idx_action (action),
+        INDEX idx_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+# Generic live-editable settings, same "DB not code" pattern as
+# subscription_plans below. Kept deliberately small (a handful of real
+# toggles) rather than a migration of every env var - see PROJECT.md.
+TABLES['app_config'] = """
+    CREATE TABLE IF NOT EXISTS app_config (
+        config_key VARCHAR(100) PRIMARY KEY,
+        config_value VARCHAR(500) NOT NULL,
+        description VARCHAR(255) NULL,
+        updated_by INT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+TABLES['announcements'] = """
+    CREATE TABLE IF NOT EXISTS announcements (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        message VARCHAR(500) NOT NULL,
+        severity ENUM('info', 'warning', 'critical') NOT NULL DEFAULT 'info',
+        is_active BOOLEAN NOT NULL DEFAULT FALSE,
+        starts_at TIMESTAMP NULL,
+        ends_at TIMESTAMP NULL,
+        created_by INT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        INDEX idx_is_active (is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+# Default feature flags, seeded on first run only (see initialize_database).
+# Real values after this point are live-editable in the DB, not in code.
+DEFAULT_APP_CONFIG = [
+    ("image_generation_enabled", "true",
+     "Global kill switch for scene image generation. When false, stories "
+     "generate text-only rather than failing the whole story."),
+    ("groq_fallback_enabled", "true",
+     "Whether Groq is allowed as the automatic fallback text provider when "
+     "the primary LLM_BACKEND call fails."),
+]
 
 # Default subscription tiers, seeded on first run only (see initialize_database).
 # All pricing after this point is live-editable in the DB, not in code.
@@ -402,6 +461,31 @@ def initialize_database():
                 cursor.execute("ALTER TABLE user_stories ADD INDEX idx_is_public (is_public)")
                 logger.info("✓ Successfully added 'is_public' column to 'user_stories' table.")
 
+            # --- Schema Migration: Add share-link columns to user_stories ---
+            # A share token is a *separate* consent from is_public. is_public
+            # means "other signed-in users may find this"; a share token means
+            # "anyone holding this URL may read this, signed in or not". Reusing
+            # is_public for both would retroactively publish every story whose
+            # owner only ever agreed to the first thing.
+            #
+            # The index is UNIQUE so a token collision fails loudly at INSERT
+            # rather than silently handing one story's link to another. NULLs
+            # are exempt from UNIQUE in MySQL, so the overwhelming majority of
+            # rows (never shared) coexist happily.
+            cursor.execute("""
+                SELECT COUNT(*) AS count
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                AND table_name = 'user_stories'
+                AND column_name = 'share_token'
+            """)
+            if cursor.fetchone()['count'] == 0:
+                logger.warning("! 'share_token' column not found in 'user_stories' table. Adding it now...")
+                cursor.execute("ALTER TABLE user_stories ADD COLUMN share_token VARCHAR(64) NULL")
+                cursor.execute("ALTER TABLE user_stories ADD COLUMN share_created_at DATETIME NULL")
+                cursor.execute("ALTER TABLE user_stories ADD UNIQUE INDEX idx_share_token (share_token)")
+                logger.info("✓ Successfully added share-link columns to 'user_stories' table.")
+
             # --- Schema Migration: enforce refund idempotency ---
             # A double refund mints a credit the user never paid for. Until now
             # nothing but careful call ORDERING prevented it (see the comment in
@@ -458,6 +542,29 @@ def initialize_database():
                     logger.info(f"✓ Successfully added '{column_name}' column to 'users' table.")
             logger.info("✓ 'users' billing columns are up to date.")
 
+            # --- Schema Migration: Add auth columns to 'users' ---
+            # token_version is bumped every time password_hash changes (reset,
+            # change-password, admin edit). Each issued JWT embeds the value it
+            # was minted against; get_current_user rejects a token whose value
+            # no longer matches the row, so a stolen token stops working the
+            # moment the password does instead of riding out its 7-day expiry.
+            auth_columns = {
+                "token_version": "INT DEFAULT 0",
+            }
+            for column_name, column_def in auth_columns.items():
+                cursor.execute("""
+                    SELECT COUNT(*) AS count
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                    AND table_name = 'users'
+                    AND column_name = %s
+                """, (column_name,))
+                if cursor.fetchone()['count'] == 0:
+                    logger.warning(f"! '{column_name}' column not found in 'users' table. Adding it now...")
+                    cursor.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_def}")
+                    logger.info(f"✓ Successfully added '{column_name}' column to 'users' table.")
+            logger.info("✓ 'users' auth columns are up to date.")
+
             # --- Schema Migration: Add plan copy/badge columns to 'subscription_plans' ---
             plan_columns = {
                 "description": "VARCHAR(255) NULL",
@@ -492,6 +599,15 @@ def initialize_database():
                     (description, features, is_recommended, tier_key)
                 )
             logger.info("✓ Default subscription plans seeded/backfilled (existing pricing left untouched).")
+
+            # --- Seed default feature flags (idempotent, first-run only) ---
+            for config_key, config_value, description in DEFAULT_APP_CONFIG:
+                cursor.execute(
+                    """INSERT IGNORE INTO app_config (config_key, config_value, description)
+                       VALUES (%s, %s, %s)""",
+                    (config_key, config_value, description)
+                )
+            logger.info("✓ Default feature flags seeded (existing values left untouched).")
 
     except (mysql.connector.Error, ConnectionError) as err:
         logger.error(f"⚠ Could not initialize database: {err}")

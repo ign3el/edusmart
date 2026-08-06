@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, memo } from 'react'
 import './Mascot.css'
 
 /**
- * Ollie - the EduSmart owl.
+ * Ollie - the LearnTale owl.
  *
  * Pure inline SVG on purpose: no image request, no sprite sheet, scales from a
  * 32px nav chip to a 260px hero without a second asset, and recolours straight

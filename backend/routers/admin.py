@@ -18,7 +18,10 @@ from auth import get_password_hash
 import mysql.connector
 from services.kokoro_client import generate_tts
 from services.grade_bands import resolve_grade_spec
+from services import api_usage
 from routers.billing import refund_credit
+from services import audit_log
+from job_state import job_manager
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -395,8 +398,8 @@ async def get_user_details(user_id: int):
         logger.error(f"Get user details failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/users/{user_id}", dependencies=[Depends(get_admin_user)])
-async def update_user(user_id: int, update: UserUpdateRequest):
+@router.put("/users/{user_id}")
+async def update_user(user_id: int, update: UserUpdateRequest, current_user: dict = Depends(get_admin_user)):
     """Update user fields: status flags, username/email, or password."""
     try:
         updates = []
@@ -420,6 +423,9 @@ async def update_user(user_id: int, update: UserUpdateRequest):
         if update.password is not None:
             updates.append("password_hash = %s")
             values.append(get_password_hash(update.password))
+            # Invalidate every token issued before this change - see
+            # get_current_user's tv-claim check in routers/auth.py.
+            updates.append("token_version = token_version + 1")
 
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -451,6 +457,11 @@ async def update_user(user_id: int, update: UserUpdateRequest):
         except mysql.connector.IntegrityError:
             raise HTTPException(status_code=409, detail="That username or email is already taken.")
 
+        audit_log.record(
+            actor_user_id=current_user["id"], action="update_user",
+            target_type="user", target_id=user_id,
+            details=update.dict(exclude_unset=True, exclude={"password"}),
+        )
         return {"success": True, "message": "User updated"}
     except HTTPException:
         raise
@@ -496,8 +507,8 @@ async def create_user(payload: UserCreateRequest):
         logger.error(f"Create user failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/users/{user_id}", dependencies=[Depends(get_admin_user)])
-async def delete_user(user_id: int):
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: int, current_user: dict = Depends(get_admin_user)):
     """Delete user and all their stories"""
     try:
         with get_db_cursor(commit=True) as cursor:
@@ -533,7 +544,12 @@ async def delete_user(user_id: int):
                 import shutil
                 shutil.rmtree(story_path)
                 deleted_files += 1
-        
+
+        audit_log.record(
+            actor_user_id=current_user["id"], action="delete_user",
+            target_type="user", target_id=user_id,
+            details={"stories_deleted": deleted_files},
+        )
         return {
             "success": True,
             "message": f"User and {deleted_files} stories deleted"
@@ -543,6 +559,21 @@ async def delete_user(user_id: int):
     except Exception as e:
         logger.error(f"Delete user failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/usage/rpd", dependencies=[Depends(get_admin_user)])
+async def api_usage_rpd(days: int = 3):
+    """Requests-per-day per model per key.
+
+    Exists because Gemini's free tier meters RPD per model *per Cloud project*,
+    and this app runs two keys from two projects with sticky one-way rotation.
+    Without a per-key view there is no way to see the active key approaching its
+    ceiling - the first symptom is generation simply failing.
+
+    Returns key LABELS only ("gemini-primary"/"gemini-fallback"). The key values
+    never leave the backend, in any form.
+    """
+    return {"success": True, **api_usage.rpd_snapshot(days=max(1, min(days, 30)))}
+
 
 @router.get("/stories/all", dependencies=[Depends(get_admin_user)])
 async def list_all_stories():
@@ -613,11 +644,26 @@ async def list_all_stories():
         
         # Combine both
         all_stories = saved_stories + generated_stories
-        
+
+        # Admin-only quality-pipeline scores (see StoryService.process_file_to_story
+        # and job_manager.get_quality_scores) - one batch lookup for the whole
+        # list rather than N+1 queries. Absent (None) for stories generated
+        # before this feature existed or where scoring never ran.
+        scores_by_story = job_manager.get_quality_scores(
+            [s["story_id"] for s in all_stories]
+        )
+        # Same batch-not-N+1 treatment for the API-call counters.
+        usage_by_story = api_usage.story_totals([s["story_id"] for s in all_stories])
+        for s in all_stories:
+            s["quality_scores"] = scores_by_story.get(s["story_id"])
+            # None (not 0) for stories generated before counting existed, so the
+            # UI can say "not recorded" instead of claiming they cost nothing.
+            s["api_usage"] = usage_by_story.get(s["story_id"])
+
         # Sort by created_at descending. MySQL returns datetime objects, SQLite
         # returns strings for the same column - normalize to str for a safe compare.
         all_stories.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
-        
+
         return {
             "success": True,
             "total": len(all_stories),
@@ -629,8 +675,8 @@ async def list_all_stories():
         logger.error(f"List all stories failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/stories/{story_id}", dependencies=[Depends(get_admin_user)])
-async def delete_story(story_id: str):
+@router.delete("/stories/{story_id}")
+async def delete_story(story_id: str, current_user: dict = Depends(get_admin_user)):
     """Delete a story (saved or generated)"""
     try:
         deleted_from = []
@@ -679,7 +725,12 @@ async def delete_story(story_id: str):
         
         if not deleted_from and not files_deleted:
             raise HTTPException(status_code=404, detail="Story not found")
-        
+
+        audit_log.record(
+            actor_user_id=current_user["id"], action="delete_story",
+            target_type="story", target_id=story_id,
+            details={"deleted_from": deleted_from, "files_deleted": files_deleted},
+        )
         return {
             "success": True,
             "message": f"Story deleted from: {', '.join(deleted_from)}{' and files' if files_deleted else ''}"
@@ -690,8 +741,8 @@ async def delete_story(story_id: str):
         logger.error(f"Delete story failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/stories/{story_id}/cancel", dependencies=[Depends(get_admin_user)])
-async def cancel_story(story_id: str):
+@router.post("/stories/{story_id}/cancel")
+async def cancel_story(story_id: str, current_user: dict = Depends(get_admin_user)):
     """Mark a stuck/hung generation job as failed and refund its credit."""
     try:
         conn = get_db_connection()
@@ -719,6 +770,10 @@ async def cancel_story(story_id: str):
             except Exception as refund_err:
                 logger.warning(f"Could not refund credit for cancelled job {story_id}: {refund_err}")
 
+        audit_log.record(
+            actor_user_id=current_user["id"], action="cancel_story",
+            target_type="story", target_id=story_id,
+        )
         return {"success": True, "message": f"Story {story_id} cancelled"}
     except HTTPException:
         raise
@@ -832,8 +887,8 @@ async def _run_retry(story_id: str, scenes: list) -> None:
     )
 
 
-@router.post("/stories/{story_id}/retry", dependencies=[Depends(get_admin_user)])
-async def retry_story(story_id: str):
+@router.post("/stories/{story_id}/retry")
+async def retry_story(story_id: str, current_user: dict = Depends(get_admin_user)):
     """Regenerate the failed images/audio of a failed job, in place.
 
     This is a repair, not a re-run: the source document is long gone, so the
@@ -871,6 +926,11 @@ async def retry_story(story_id: str):
         lambda t: logger.error(f"Retry task crashed for {story_id}: {t.exception()}") if t.exception() else None
     )
 
+    audit_log.record(
+        actor_user_id=current_user["id"], action="retry_story",
+        target_type="story", target_id=story_id,
+        details={"scenes_queued": len(scenes)},
+    )
     return RetryResult(
         scenes_queued=len(scenes),
         message=f"Retrying {len(scenes)} scene(s). Refresh in a moment to see progress."
@@ -917,8 +977,8 @@ async def update_story(story_id: str, update: StoryUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 # --- Credit grants (support/comp cases) ---
 
-@router.post("/users/{user_id}/grant-credits", dependencies=[Depends(get_admin_user)])
-async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest):
+@router.post("/users/{user_id}/grant-credits")
+async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest, current_user: dict = Depends(get_admin_user)):
     """Admin-only credit adjustment. Logged in credit_transactions ('admin_grant') like every other credit change."""
     if payload.amount == 0:
         raise HTTPException(status_code=400, detail="amount must be non-zero")
@@ -930,6 +990,11 @@ async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest):
             "INSERT INTO credit_transactions (user_id, delta, reason) VALUES (%s, %s, 'admin_grant')",
             (user_id, payload.amount)
         )
+    audit_log.record(
+        actor_user_id=current_user["id"], action="grant_credits",
+        target_type="user", target_id=user_id,
+        details={"amount": payload.amount, "note": payload.note},
+    )
     return {"success": True, "message": f"{payload.amount:+d} credits applied"}
 
 
@@ -942,8 +1007,8 @@ async def admin_list_plans():
         cursor.execute("SELECT * FROM subscription_plans ORDER BY sort_order")
         return {"success": True, "plans": cursor.fetchall()}
 
-@router.put("/plans/{tier_key}", dependencies=[Depends(get_admin_user)])
-async def admin_update_plan(tier_key: str, update: PlanUpdateRequest):
+@router.put("/plans/{tier_key}")
+async def admin_update_plan(tier_key: str, update: PlanUpdateRequest, current_user: dict = Depends(get_admin_user)):
     """Edit a plan's price/credits/active state/copy. Takes effect on the very next request - no deploy."""
     updates = []
     values = []
@@ -968,6 +1033,11 @@ async def admin_update_plan(tier_key: str, update: PlanUpdateRequest):
             cursor.execute("UPDATE subscription_plans SET is_recommended = FALSE WHERE tier_key != %s", (tier_key,))
         cursor.execute(f"UPDATE subscription_plans SET {', '.join(updates)} WHERE tier_key = %s", values)
 
+    audit_log.record(
+        actor_user_id=current_user["id"], action="update_plan",
+        target_type="subscription_plan", target_id=tier_key,
+        details=update.dict(exclude_unset=True),
+    )
     return {"success": True, "message": "Plan updated"}
 
 
@@ -979,8 +1049,8 @@ async def admin_list_promo_codes():
         cursor.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
         return {"success": True, "promo_codes": cursor.fetchall()}
 
-@router.post("/promo-codes", dependencies=[Depends(get_admin_user)])
-async def admin_create_promo_code(payload: PromoCodeCreateRequest):
+@router.post("/promo-codes")
+async def admin_create_promo_code(payload: PromoCodeCreateRequest, current_user: dict = Depends(get_admin_user)):
     code = payload.code.strip().upper()
     try:
         with get_db_cursor(commit=True) as cursor:
@@ -995,10 +1065,15 @@ async def admin_create_promo_code(payload: PromoCodeCreateRequest):
             )
     except mysql.connector.IntegrityError:
         raise HTTPException(status_code=409, detail=f"Promo code '{code}' already exists")
+    audit_log.record(
+        actor_user_id=current_user["id"], action="create_promo_code",
+        target_type="promo_code", target_id=code,
+        details={"discount_type": payload.discount_type, "discount_value": payload.discount_value},
+    )
     return {"success": True, "code": code}
 
-@router.put("/promo-codes/{code}", dependencies=[Depends(get_admin_user)])
-async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest):
+@router.put("/promo-codes/{code}")
+async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest, current_user: dict = Depends(get_admin_user)):
     code = code.strip().upper()
     updates = []
     values = []
@@ -1019,4 +1094,9 @@ async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest):
     with get_db_cursor(commit=True) as cursor:
         cursor.execute(f"UPDATE promo_codes SET {', '.join(updates)} WHERE code = %s", values)
 
+    audit_log.record(
+        actor_user_id=current_user["id"], action="update_promo_code",
+        target_type="promo_code", target_id=code,
+        details=update.dict(exclude_unset=True),
+    )
     return {"success": True, "message": "Promo code updated"}

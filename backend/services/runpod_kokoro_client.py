@@ -18,6 +18,8 @@ import time
 
 import requests
 
+from services import api_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,13 +72,19 @@ def generate_tts(text: str, voice: str = "af_sarah", speed: float = 1.0) -> byte
     payload = {"input": {"text": text, "voice": voice, "speed": speed}}
 
     start = time.time()
+    # Counted at submit, like the FLUX image path: the /status polls that follow
+    # are one logical request, not N, so counting those too would make TTS look
+    # 30x more expensive than it is purely because the worker was cold.
     try:
         resp = requests.post(f"{base_url}/run", headers=headers, json=payload, timeout=30)
     except requests.exceptions.RequestException as e:
+        api_usage.record("runpod-tts", "kokoro", "runpod", ok=False)
         raise RunpodTTSError(f"Could not reach RunPod Kokoro endpoint: {e}")
 
     if resp.status_code != 200:
+        api_usage.record("runpod-tts", "kokoro", "runpod", ok=False)
         raise RunpodTTSError(f"RunPod Kokoro /run returned {resp.status_code}: {resp.text[:200]}")
+    api_usage.record("runpod-tts", "kokoro", "runpod", ok=True)
 
     data = resp.json()
     output = data.get("output") if data.get("status") == "COMPLETED" else None

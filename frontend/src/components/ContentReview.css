@@ -1,0 +1,111 @@
+.content-review {
+  color: var(--ink-1, #e6e9f2);
+}
+
+.content-review .management-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.content-review .management-header h2 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.content-review .refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--edge, rgba(148, 163, 184, 0.12));
+  border-radius: 10px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  color: var(--ink-1, #e6e9f2);
+}
+
+.content-review .error-message {
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.3);
+  color: #ff8a8a;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  margin-bottom: 1rem;
+}
+
+.content-review .no-results {
+  color: var(--ink-2, #9aa3b5);
+  padding: 2rem 0;
+  text-align: center;
+}
+
+.cr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.cr-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  background: var(--bg-card, rgba(36, 20, 86, 0.9));
+  border: 1px solid rgba(255, 82, 82, 0.2);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+}
+
+.cr-icon {
+  color: #ff8a8a;
+  margin-top: 0.15rem;
+  flex-shrink: 0;
+}
+
+.cr-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cr-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cr-title {
+  font-weight: 700;
+  color: var(--ink-1, #e6e9f2);
+}
+
+.cr-code {
+  font-family: monospace;
+  font-size: 0.72rem;
+  color: var(--accent-2, #22d3ee);
+  background: rgba(34, 211, 238, 0.1);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+}
+
+.cr-retryable {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  color: #4ade80;
+}
+
+.cr-message {
+  font-size: 0.85rem;
+  color: var(--ink-1, #e6e9f2);
+  margin-top: 0.3rem;
+}
+
+.cr-meta {
+  font-size: 0.72rem;
+  color: var(--ink-2, #9aa3b5);
+  margin-top: 0.25rem;
+}

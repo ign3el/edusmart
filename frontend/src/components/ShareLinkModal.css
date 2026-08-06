@@ -1,0 +1,259 @@
+/* Share-link modal. Mobile-first: a bottom sheet on a phone, a centred dialog
+   from 768px up. Colours are the app's existing :root tokens - no new palette. */
+
+.share-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;      /* sheet from the bottom on a phone */
+  justify-content: center;
+  /* Scrim strong enough to isolate the dialog (the 40-60% guidance). */
+  background: rgba(8, 4, 24, 0.62);
+  backdrop-filter: blur(6px);
+}
+
+.share-modal {
+  width: 100%;
+  max-width: 32rem;
+  max-height: 90dvh;
+  overflow-y: auto;
+  padding: 1.25rem;
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+  border: 1px solid var(--edge);
+  border-bottom: none;
+  border-radius: 1.25rem 1.25rem 0 0;
+  background: var(--bg-panel-solid, #1d1147);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  color: var(--fg-primary);
+}
+
+.share-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.share-modal-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.share-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 160ms ease-out, color 160ms ease-out;
+}
+
+.share-icon-btn:hover {
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--fg-primary);
+}
+
+.share-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.share-modal-copy {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--fg-secondary);
+}
+
+.share-field-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.share-url-input {
+  width: 100%;
+  min-height: 48px;                 /* touch-friendly input height */
+  padding: 0 0.875rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.75rem;
+  background: rgba(8, 4, 24, 0.5);
+  color: var(--fg-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.9rem;
+  /* A share URL is longer than a phone is wide; let it scroll inside the field
+     rather than push the dialog sideways. */
+  overflow-x: auto;
+}
+
+.share-url-input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.share-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;                    /* >= 8px between touch targets */
+}
+
+.share-primary-btn,
+.share-secondary-btn,
+.share-danger-btn {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 48px;
+  padding: 0 1rem;
+  border: none;
+  border-radius: 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 160ms ease-out, box-shadow 160ms ease-out, background 160ms ease-out;
+}
+
+.share-primary-btn {
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary) 0%, #6d28d9 100%);
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.32);
+}
+
+.share-secondary-btn {
+  color: var(--fg-primary);
+  background: rgba(148, 163, 184, 0.14);
+}
+
+/* Destructive action: semantic danger colour AND a word that says what it
+   does - never colour alone. */
+.share-danger-btn {
+  color: #fff;
+  background: var(--destructive, #ef4444);
+}
+
+.share-primary-btn:active,
+.share-secondary-btn:active,
+.share-danger-btn:active {
+  transform: scale(0.98);
+}
+
+.share-primary-btn:disabled,
+.share-secondary-btn:disabled,
+.share-danger-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.share-primary-btn:focus-visible,
+.share-secondary-btn:focus-visible,
+.share-danger-btn:focus-visible,
+.share-revoke-btn:focus-visible,
+.share-icon-btn:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 2px;
+}
+
+/* Revoke is spatially separated from the primary actions above it, so a
+   mis-tap can't kill a link the user meant to copy. */
+.share-revoke-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  margin-top: 0.5rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.75rem;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.share-revoke-btn:hover {
+  color: var(--destructive, #ef4444);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.share-revoke-confirm {
+  margin-top: 0.5rem;
+  padding: 0.875rem;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 0.75rem;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.share-revoke-confirm p {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--fg-primary);
+}
+
+.share-modal-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 0;
+  color: var(--fg-secondary);
+}
+
+.share-modal-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0.875rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #fca5a5;               /* meets 4.5:1 on the dark panel */
+}
+
+.share-spinner {
+  animation: share-spin 900ms linear infinite;
+}
+
+@keyframes share-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-spinner { animation: none; opacity: 0.7; }
+  .share-primary-btn,
+  .share-secondary-btn,
+  .share-danger-btn,
+  .share-icon-btn { transition: none; }
+}
+
+@media (min-width: 768px) {
+  .share-modal-overlay {
+    align-items: center;          /* centred dialog on tablet and up */
+    padding: 1.5rem;
+  }
+
+  .share-modal {
+    border-bottom: 1px solid var(--edge);
+    border-radius: 1.25rem;
+    padding: 1.5rem;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  }
+}

@@ -7,6 +7,10 @@ import UserManagement from './UserManagement';
 import StoryManagement from './StoryManagement';
 import PlanManagement from './PlanManagement';
 import PromoCodeManagement from './PromoCodeManagement';
+import SystemDashboard from './SystemDashboard';
+import FeatureFlags from './FeatureFlags';
+import AuditLog from './AuditLog';
+import ContentReview from './ContentReview';
 
 const AdminPanel = ({ onPlayStory, onBack }) => {
     const [activeTab, setActiveTab] = useState('story-management');
@@ -49,6 +53,30 @@ const AdminPanel = ({ onPlayStory, onBack }) => {
                     >
                         Job Status
                     </button>
+                    <button
+                        className={`admin-nav-button ${activeTab === 'system' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('system')}
+                    >
+                        System
+                    </button>
+                    <button
+                        className={`admin-nav-button ${activeTab === 'feature-flags' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('feature-flags')}
+                    >
+                        Feature Flags
+                    </button>
+                    <button
+                        className={`admin-nav-button ${activeTab === 'content-review' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('content-review')}
+                    >
+                        Content Review
+                    </button>
+                    <button
+                        className={`admin-nav-button ${activeTab === 'audit-log' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('audit-log')}
+                    >
+                        Audit Log
+                    </button>
                 </nav>
             </header>
             <main className="admin-panel-content">
@@ -65,6 +93,10 @@ const AdminPanel = ({ onPlayStory, onBack }) => {
                         {activeTab === 'plans' && <PlanManagement />}
                         {activeTab === 'promo-codes' && <PromoCodeManagement />}
                         {activeTab === 'jobs' && <JobStatusViewer />}
+                        {activeTab === 'system' && <SystemDashboard />}
+                        {activeTab === 'feature-flags' && <FeatureFlags />}
+                        {activeTab === 'content-review' && <ContentReview />}
+                        {activeTab === 'audit-log' && <AuditLog />}
                     </motion.div>
                 </AnimatePresence>
             </main>

@@ -315,6 +315,75 @@
   border-color: var(--accent-1);
 }
 
+.quality-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--edge);
+}
+
+.quality-scores-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.quality-gate-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.quality-gate-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.quality-gate-badge.pass {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.quality-gate-badge.fail {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.quality-overall {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-2);
+}
+
+.quality-findings {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+.quality-findings-warn {
+  color: #fbbf24;
+}
+
+.quality-scores-missing {
+  opacity: 0.65;
+  font-style: italic;
+}
+
 .story-card-actions {
   display: flex;
   gap: 0.5rem;
@@ -525,4 +594,73 @@
   .confirm-btn {
     width: 100%;
   }
+}
+
+/* --- Per-story API call counters -------------------------------------- */
+/* Same shell as .quality-scores deliberately: both are admin-only diagnostic
+   blocks on the back of the card, and giving them different chrome would imply
+   they are different KINDS of thing. Cyan rather than the gate green/red - a
+   call count is a cost, not a pass or a fail, and colouring it like a gate
+   would invite reading "12 calls" as a verdict. */
+.api-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--edge);
+}
+
+.api-usage-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.api-usage-errors {
+  color: #f87171;
+  font-weight: 500;
+}
+
+.api-usage-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.api-usage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  color: #67e8f9;
+  /* Model ids get long (gemini-2.5-flash-preview); let a badge wrap out of the
+     row rather than force the card to scroll sideways. */
+  max-width: 100%;
+}
+
+.api-usage-provider {
+  font-weight: 700;
+}
+
+.api-usage-model {
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 11ch;
+}
+
+.api-usage-count {
+  font-weight: 700;
+  padding-left: 0.3rem;
+  border-left: 1px solid rgba(34, 211, 238, 0.3);
 }

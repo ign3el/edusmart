@@ -12,7 +12,8 @@
 # its resolver+fallback setup, so this needs no nginx reload. If the new
 # color fails its health check, the old one was never touched - no outage.
 #
-# Frontend still deploys in place (recreate, brief gap) - not yet blue/green.
+# Frontend also deploys blue/green (frontend-blue/frontend-green, see below) -
+# this comment was stale until 2026-08-04; don't let it happen again.
 #
 #   ./deploy.sh              build + deploy both services
 #   ./deploy.sh backend      build + deploy one service
@@ -30,6 +31,27 @@ list_tags() {
     docker images "edusmart-$svc" --format '  {{.Tag}}  ({{.CreatedSince}}, {{.Size}})' \
       | grep -v '  latest' || echo "  (none yet)"
   done
+}
+
+# Records which color is live for a service, read by the admin panel's
+# read-only "System" tab (GET /api/admin/system/deploy-status) - the backend
+# container has no Docker socket and must never get one, so it can't ask
+# Docker directly; this file is how it finds out. Bind-mounted read-only into
+# both backend colors as ./status:/app/status:ro (docker-compose.yml). Merges
+# into the existing file so deploying one service doesn't clobber the other's
+# last-known status.
+write_deploy_status() {
+  local service="$1" color="$2" version="$3"
+  local dir="./status" file="./status/deploy_status.json"
+  mkdir -p "$dir"
+  local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local tmp; tmp=$(mktemp "$dir/.deploy_status.XXXXXX")
+  local current="{}"
+  [ -f "$file" ] && current=$(cat "$file" 2>/dev/null || echo "{}")
+  echo "$current" | jq --arg svc "$service" --arg color "$color" --arg ver "$version" --arg now "$now" \
+    '.[$svc] = {active_color: $color, version: $ver, deployed_at: $now}' > "$tmp" 2>/dev/null \
+    || echo "{\"$service\": {\"active_color\": \"$color\", \"version\": \"$version\", \"deployed_at\": \"$now\"}}" > "$tmp"
+  mv "$tmp" "$file"
 }
 
 # Block until a container reports healthy. `docker compose up -d` returns as
@@ -148,6 +170,7 @@ deploy_backend() {
     echo "     ./deploy.sh --rollback backend $(docker images edusmart-backend --format '{{.Tag}}' | grep -v latest | grep -v "$STAMP" | head -1)"
     exit 1
   }
+  write_deploy_status backend "$(backend_active_color)" "$STAMP"
 
   docker images "edusmart-backend" --format '{{.Tag}} {{.CreatedAt}}' \
     | grep -v '^latest ' | sort -k2 -r | tail -n +$((KEEP + 1)) | awk '{print $1}' \
@@ -160,6 +183,7 @@ rollback_backend() {
     || { echo "No such image: edusmart-backend:$tag"; exit 1; }
   docker tag "edusmart-backend:$tag" "edusmart-backend:latest"
   backend_roll_out || exit 1
+  write_deploy_status backend "$(backend_active_color)" "$tag"
   echo "Rolled backend back to $tag."
 }
 
@@ -239,6 +263,7 @@ deploy_frontend() {
     echo "     ./deploy.sh --rollback frontend $(docker images edusmart-frontend --format '{{.Tag}}' | grep -v latest | grep -v "$STAMP" | head -1)"
     exit 1
   }
+  write_deploy_status frontend "$(frontend_active_color)" "$STAMP"
 
   docker images "edusmart-frontend" --format '{{.Tag}} {{.CreatedAt}}' \
     | grep -v '^latest ' | sort -k2 -r | tail -n +$((KEEP + 1)) | awk '{print $1}' \
@@ -251,6 +276,7 @@ rollback_frontend() {
     || { echo "No such image: edusmart-frontend:$tag"; exit 1; }
   docker tag "edusmart-frontend:$tag" "edusmart-frontend:latest"
   frontend_roll_out || exit 1
+  write_deploy_status frontend "$(frontend_active_color)" "$tag"
   echo "Rolled frontend back to $tag."
 }
 

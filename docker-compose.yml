@@ -25,9 +25,20 @@ x-backend-common: &backend-common
   image: edusmart-backend:latest
   environment:
     - GEMINI_API_KEY=${GEMINI_API_KEY}
+    # Optional 2nd AI Studio project key - separate free-tier RPD pool. See
+    # the __init__ comment in services/story_service.py for the rotation logic.
+    - GEMINI_API_KEY_FALLBACK=${GEMINI_API_KEY_FALLBACK:-}
     - GROQ_API_KEY=${GROQ_API_KEY:-}
     - HF_TOKEN=${HF_TOKEN:-}
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Caching (config.py Config.USE_CACHE/REDIS_URL/CACHE_TTL) and upload
+    # size limit - previously read by config.py but never forwarded here,
+    # so .env values had zero effect regardless of what was set. Added
+    # 2026-08-04, same class of gap as IMAGE_BACKEND/LLM_BACKEND above.
+    - USE_CACHE=${USE_CACHE:-true}
+    - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    - CACHE_TTL=${CACHE_TTL:-86400}
+    - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-10485760}
     # Concurrency limits. These bound simultaneous I/O, not CPU work, so
     # they scale with expected in-flight requests rather than core count.
     # MYSQL_POOL_SIZE is capped at 32 in code (mysql-connector's own
@@ -165,6 +176,11 @@ x-backend-common: &backend-common
     - ./backend/saved_stories:/app/saved_stories
     - ./backend/generated_stories:/app/generated_stories
     - backend_db:/app/db_data
+    # Read-only: deploy.sh/backup.sh write here from the host, the admin
+    # panel's System tab reads it. Never write from inside the container -
+    # this is deliberately :ro so the app can observe deploy/backup state
+    # without ever being able to trigger either (see PROJECT.md).
+    - ./status:/app/status:ro
   # Runs as the host ubuntu user's UID (matches ownership of all bind
   # mounts above) instead of root - was root only because nothing had
   # ever fixed the ownership of the backend_db named volume.

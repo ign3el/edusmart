@@ -1,0 +1,182 @@
+/* Public shared-story page.
+
+   Mobile-first: every value below is the phone layout, and the single
+   media query at the bottom scales it up. Colours come from the app's
+   existing :root tokens (App.css / index.css) - no new palette. */
+
+.shared-story {
+  /* Published for StoryPlayer, which sizes itself to
+     calc(100dvh - var(--app-header-h)). Keeping the bar height here means the
+     player fits the viewport exactly instead of overflowing behind it. */
+  --app-header-h: 56px;
+
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(ellipse 80% 60% at 10% 10%, rgba(139, 92, 246, 0.15), transparent 40%),
+    radial-gradient(ellipse 60% 80% at 90% 80%, rgba(34, 211, 238, 0.10), transparent 40%),
+    linear-gradient(135deg, #150d33 0%, #1d1147 50%, #200e52 100%);
+  color: var(--fg-primary);
+}
+
+/* --- Top bar: wordmark + the page's single call to action --- */
+
+.shared-bar {
+  height: var(--app-header-h);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0.875rem;
+  /* The notch/Dynamic Island sits above this on a phone in landscape. */
+  padding-left: max(0.875rem, env(safe-area-inset-left));
+  padding-right: max(0.875rem, env(safe-area-inset-right));
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--edge);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.shared-brand {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px; /* touch target, even though the mark itself is short */
+  text-decoration: none;
+}
+
+.shared-brand-mark {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* One primary action on the page. Everything else is a link. */
+.shared-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-decoration: none;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary) 0%, #6d28d9 100%);
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35);
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+  touch-action: manipulation;
+}
+
+.shared-cta:hover {
+  box-shadow: 0 6px 20px rgba(139, 92, 246, 0.5);
+}
+
+.shared-cta:active {
+  transform: scale(0.97);
+}
+
+.shared-cta:focus-visible,
+.shared-brand:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 3px;
+}
+
+/* --- Loading / error states ------------------------------------------- */
+
+.shared-state {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem 1.25rem;
+  text-align: center;
+  color: var(--fg-secondary);
+}
+
+.shared-state-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+.shared-state-body {
+  margin: 0;
+  max-width: 34ch; /* keeps the measure readable on a phone */
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.shared-state-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  margin-top: 0.5rem;
+  padding: 0 1.25rem;
+  border-radius: 999px;
+  font-weight: 700;
+  text-decoration: none;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary) 0%, #6d28d9 100%);
+  touch-action: manipulation;
+}
+
+.shared-state-action:active {
+  transform: scale(0.97);
+}
+
+.shared-spinner {
+  animation: shared-spin 900ms linear infinite;
+  color: var(--primary);
+}
+
+@keyframes shared-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* A spinner that cannot spin is just a static glyph, so swap it for an
+   honest pulse rather than leaving a frozen icon on screen. */
+@media (prefers-reduced-motion: reduce) {
+  .shared-spinner {
+    animation: none;
+    opacity: 0.7;
+  }
+
+  .shared-cta,
+  .shared-state-action {
+    transition: none;
+  }
+}
+
+@media (min-width: 768px) {
+  .shared-story {
+    --app-header-h: 64px;
+  }
+
+  .shared-bar {
+    padding: 0 1.5rem;
+  }
+
+  .shared-brand-mark {
+    font-size: 1.35rem;
+  }
+
+  .shared-cta {
+    font-size: 1rem;
+    padding: 0 1.35rem;
+  }
+}

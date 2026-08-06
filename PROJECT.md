@@ -1,7 +1,10 @@
-# PROJECT.md — EduSmart
+# PROJECT.md — LearnTale (formerly EduSmart, in-app branding only — see "Brand rename" note below)
 
 ## Purpose
 AI-powered educational storybook platform. A user (teacher/parent/student) uploads a lesson document (PDF/DOCX), picks a grade level, and the backend turns it into an illustrated, narrated interactive story with a 10+ question quiz. Stories can be played immediately, saved to an account, downloaded as an offline ZIP, or synced for offline playback via PWA.
+
+## Brand rename (2026-08-05, in progress)
+Product renamed from "EduSmart" to "LearnTale" in every user-facing string (page title, PWA manifest, logo/wordmark, share text, verification/reset emails). Deliberately **not yet changed**: the domain (still `edusmart.ign3el.com`), repo/deploy directory (`/www/wwwroot/edusmart`), Docker container/service names, MySQL DB/pool names, and client-side storage keys (`edusmart_*` localStorage keys, `EduSmartDB` IndexedDB) — the last group is live in real users' browsers, so renaming those keys would orphan existing saved offline stories/sessions/quiz progress. Domain is `learntale.app`, not purchased yet; cut over nginx/DNS/CORS/env vars only once it's bought and pointed here.
 
 ## Stack
 | Layer | Tech |
@@ -1301,6 +1304,247 @@ ever run in this project. If it is ever adopted, add it as a third `TTS_BACKEND`
 its own RunPod endpoint and measure GPU-seconds against `RUNPOD_MONTHLY_CAP_AED` first —
 Kokoro is 82M params, Chatterbox is 0.5B, and scene 0 latency is what gates the player
 opening at ~8s.
+
+## Admin observability suite (2026-08-04, backend `20260804_225548` / frontend `20260804_230141`)
+
+Added to the admin panel: a **System** tab (active config, blue/green deploy status, backup
+status, health/concurrency/RunPod cost, rate-limit snapshot), **Feature Flags** (live DB-backed
+toggles + the site-wide announcement banner manager), **Content Review** (failed generations with
+a human-readable reason), and **Audit Log** (who did what admin action, when). Also a public,
+no-auth `AnnouncementBanner` mounted above every route in `App.jsx`.
+
+**Deliberately excluded: no button anywhere triggers a deploy, rollback, or blue/green
+switchover.** An admin JWT compromise must stay a data-access problem, not become host-level
+RCE via a Docker socket. Those actions remain SSH + `./deploy.sh` only.
+
+- **Deploy/backup status is file-based, not Docker-based.** `deploy.sh` and `scripts/backup.sh`
+  write `status/deploy_status.json` / `status/backup_status.json` in the project root after
+  every run; that directory is bind-mounted **read-only** (`./status:/app/status:ro`) into both
+  backend colors. The backend has no Docker socket and must never get one - this is how it
+  learns deploy/backup state without being able to trigger either. Verified the mount is
+  genuinely read-only from inside the container (`touch` inside `/app/status` → EROFS).
+- **Feature flags** live in a new `app_config` MySQL table (same "DB not code" pattern as
+  `subscription_plans`) - `services/app_config.py` has a 30s-TTL cached `get_flag()` reader so a
+  hot request path checking a flag doesn't add a DB round trip. Two flags shipped:
+  `image_generation_enabled` (checked in `StoryService.generate_image()` - skips image gen,
+  story proceeds text-only, same contract as every other "return None" failure path there) and
+  `groq_fallback_enabled` (checked only on the gemini-primary → groq-fallback path in
+  `_call_story_model`, not on the `LLM_BACKEND=groq` primary path - those are different things).
+- **Audit log** (`admin_audit_log` table, `services/audit_log.py`) is explicit `record()` calls
+  at 9 existing write sites in `admin.py` (grant-credits, user update/delete, story
+  delete/cancel/retry, plan update, promo code create/update) plus the new config-flag and
+  announcement routes - not a decorator/middleware wrapper, so each site stays independently
+  reviewable on a router that already handles payments and credits. A logging failure never
+  fails the action it's describing (swallows and logs its own exception).
+- **`app_config.set_flag()` and the announcement update route use SELECT-then-UPDATE, not
+  `cursor.rowcount == 0`, for existence checks** - MySQL reports rows *changed*, not rows
+  *matched*, so setting a flag to the value it already has would otherwise look identical to
+  "no such key" (same class of bug as the `complete-quiz` 404 fixed in the earlier hardening
+  pass - see [[feedback-mysql-rowcount-is-changed-rows]] if reading from memory).
+- New routers: `system.py`, `config_flags.py`, `announcements.py` (kept out of the already-large
+  `admin.py`, matching how `billing.py`/`upload.py` are separate). `runpod_usage.py` is a
+  read-only `snapshot()` mirroring `vision_budget.snapshot()`'s shape exactly, reading the same
+  `db_data/runpod_usage.json` the existing spend-guard writes - does not touch that write path.
+- Verified end-to-end for real, not just "should work": real `./deploy.sh backend`/`frontend`
+  runs produced and merged `deploy_status.json` correctly; a real (sudo-triggered, non-cron)
+  `backup.sh` run produced a matching `backup_status.json` including a genuine R2 upload; every
+  new route curled with and without a real admin JWT (401 vs 200); a config-flag flip and an
+  announcement create/deactivate both round-tripped through the public endpoint; a real
+  grant-credits and a real promo-code create/update both landed correctly in `admin_audit_log`;
+  a full authenticated headless-Chromium click-through of all four new tabs produced zero JS
+  errors (the only console errors present are pre-existing WebGL/Three.js failures from this
+  GPU-less VPS, unrelated to this work).
+
+## Public share links (2026-08-05, backend `20260805_040727` / frontend `20260805_040255`)
+
+**Why:** a story could only ever be opened by a signed-in user, so there was no way to show one
+to a prospective customer. `/s/<token>` is a revocable public URL that plays a saved story with
+no account — the demo asset for outreach, and a real feature for teachers sharing with parents.
+
+**`is_public` is deliberately NOT reused.** It means "other *signed-in* users may find this"
+(discoverability, used by duplicate detection); every read route behind it still requires a JWT.
+A share token is a stronger, separate consent — "anyone holding this URL may read this" — so it
+is its own nullable, unique `user_stories.share_token` column, revocable independently. Reusing
+the flag would have retroactively published every story whose owner only agreed to the first thing.
+
+- `backend/routers/share.py` — owner routes (`GET`/`POST`/`DELETE /api/story/{id}/share`, JWT) and
+  public routes (`GET /api/share/{token}`, `GET /api/share/{token}/media/{filename}`, **no auth**).
+  Token is `secrets.token_urlsafe(32)` via the existing `generate_secure_token()`. Issuing is
+  idempotent so pressing Share twice doesn't orphan a link already pasted into a message;
+  `{"rotate": true}` is the leaked-link escape.
+- `backend/services/story_media.py` (new) — the five-pattern scene-filename lookup and the CORS
+  header block, lifted out of `main.py`'s `/api/saved-stories/...` handler (where the CORS block
+  was copy-pasted once per branch). Both the authenticated and the public media routes now share
+  it, so a story that plays for its owner also plays for a visitor.
+- Frontend: `/s/:token` route sits **above** the `/*` catch-all and outside `MainApp`'s auth gate;
+  `SharedStory.jsx` publishes its bar height as `--app-header-h`, which `StoryPlayer` already
+  subtracts from `100dvh` (measured 56 + 788 = 844 on a 390x844 viewport, no overflow).
+  `StoryPlayer` gained a `shareMode` prop that drops the Home/Share buttons and passes
+  `storyId={null}` to `Quiz` — Quiz uses that id to POST completion, which an anonymous visitor
+  cannot do.
+
+**Three real bugs this shook out, all verified fixed in production:**
+
+1. **Every 404 on this site was reaching the browser as a 502.** `/www/server/nginx/conf/proxy.conf`
+   had a **global** `proxy_next_upstream ... http_404`, telling nginx to treat a 404 as a *failed
+   upstream* and retry the next pool member. Under blue/green only one member is ever up, so every
+   legitimate 404 exhausted the pool and became a 502 — confirmed on `/api/load-story/<missing>`,
+   which long predates this work. Backend said 404, container nginx said 404, host nginx said 502.
+   Fixed by removing `http_404` from that line (backup alongside the original; `nginx -t` +
+   reload; all other sites on the box spot-checked healthy afterwards). **This is an aaPanel-shared
+   file — re-check it after any panel upgrade.**
+2. **A share link leaked the source document.** The media route served anything in the story
+   folder, including `metadata.json` (which records the uploaded lesson's path, grade level and
+   internal ids) and the raw extracted `test_story.txt`. Now an allow-list regex: scene assets only
+   (`scene_N.ext` / `<uuid>_scene_N.ext`), everything else 404s.
+3. **Revoking a link did not revoke access.** Cloudflare cached shared scene images under its
+   default extension rules (`cf-cache-status: HIT`, `age: 778`, 4h TTL) and kept serving them after
+   revocation while the origin correctly returned 404. `media_response()` now sends
+   `Cache-Control: private, max-age=300` — `private` keeps revocable content out of shared caches
+   while the visitor's own browser still caches it for a sitting. Verified: `HIT` → `BYPASS`, and
+   media 404s immediately after revoke.
+
+Also fixed: `quiz` is persisted as a JSON *string* about as often as a list (the authenticated path
+papers over this in `App.jsx`), so the share payload normalises it server-side — otherwise the
+shared page rendered a quiz by iterating over the characters of a string.
+
+**Verified:** anonymous fetch returns the story with zero owner PII (allow-list payload, not
+key-deletion); bogus/revoked tokens 404; `/api/load-story` and `/api/saved-stories` still 401
+without a JWT; headless anonymous Chromium at 390x844 renders story, image, controls and quiz
+button with no JS errors, no failed requests and no horizontal scroll; the revoked-link state
+renders "Story unavailable" with a single CTA rather than a raw error.
+
+## 3D scene plane: stop cropping the picture (2026-08-05, frontend `20260805_095139`)
+
+**Symptom:** the player cut the edges off every scene image and showed a smeared duplicate around
+the borders, with the 3D effect on. Applies to BOTH the in-app player and the public share page —
+they render the same `StoryPlayer`, so this was never two bugs.
+
+**Root cause, in `frontend/src/components/3d/StorySceneImagePlane.jsx`:**
+
+`CameraRig` breathes camera distance (30 ±1.5) and fov (60 ±2.2°) every frame, but the plane was
+sized from `useThree().viewport`, which is a snapshot recomputed only on **resize**. So the plane's
+size was wrong for most of the breathing cycle. The previous fix for that was a blanket `1.2×`
+oversize on a **cover-fit** plane — guaranteeing coverage by throwing away **17% of the picture's
+width and 37% of its height**. On a square scene image in a 4:3 frame that means the subject's head.
+
+**Fix:** measure the live camera each frame (`frustumHalfExtents`, using `camera.position.length()`
+because CameraRig also offsets x/y) and **contain-fit** against it. With the real frame known there
+is nothing to guess, so no oversize factor is needed and nothing is cropped. `FG_MARGIN = 0.9` is
+tilt headroom, not a crop guard: a plane rotated by `FG_TILT` swings its near edge toward the
+camera, where the frustum is narrower, and would be clipped by the canvas at exactly 100%.
+
+Two artifacts that only became visible once the foreground stopped covering the whole frame, both
+found by screenshotting the deployed page rather than by reasoning:
+
+- The blurred backdrop was sized from the **foreground** (`BG_SCALE * fgW`). Contain-fit makes the
+  foreground smaller than the frame, so the backdrop stopped short and put its own hard border on
+  screen. It is now cover-fit against the **frame**, and it no longer inherits the page-turn
+  shift/yaw (which slid it far enough to uncover a corner mid-turn).
+- `BACKDROP_OVERSCAN = 3.6` is not slack. At low magnification the margin reads as a legible second
+  copy of the picture — the dragon's tail appearing again beside the dragon, i.e. the same
+  "duplicated border" complaint in another form. There is no blur pass here; **magnification is the
+  blur**.
+- The contact glow is an untextured additive plane, so every edge of it is a hard seam — it only
+  looks like a glow because the picture covers three of them. Any overhang past `fgW` ran its top
+  edge out into the side margin as a bright horizontal line.
+
+**Follow-up (same day, frontend `20260805_100923`) — the frame was the wrong shape all along.**
+Contain-fit in a 4:3 box left a square picture pillarboxed and visibly small. Every generator path
+writes **512×512** (verified on disk across stories), so the box is now square:
+`width: min(100%, 52dvh, 520px)` + `aspect-ratio: 1/1`. Sizing by `width: min()` rather than by
+`max-height` is the point — the old rule declared `aspect-ratio: 4/3` **and** a `max-height`, and on
+a phone max-height won, so the box was never even the ratio it claimed to be. Measured after:
+338×338 at 390×844, 468×468 at 1440×900, nothing pushed below the fold in either.
+
+The fixed 0.9 inset went with it. It was tilt headroom for a worst case that is rarely happening,
+paid for at every resting frame; `tiltFitScale()` now solves for the *current* tilt, so the picture
+is full-bleed at rest and gives back a few percent only while actually moving. `breathe` had to be
+inverted to pulse **down** from that fit — anything above 1.0 now clips.
+
+**Do not** reintroduce cover-fit to "avoid letterboxing", and do not put a `max-height` back on
+`.scene-image-container` — it silently re-widens the box and the crop comes back with it.
+
+## "Audio unavailable" on every share-link open (2026-08-05, frontend `20260805_100923`)
+
+Blocked autoplay is not a broken file. Mobile Chrome rejects `play()` with **NotAllowedError** until
+the page has had a user gesture — and a share link is the one entry point with no gesture before the
+player, because the visitor arrives straight on it instead of tapping through the app. All three
+`play().catch()` sites set `audioError` unconditionally, so every prospective customer opened the
+demo to a red "Audio unavailable".
+
+It never showed in-app, which is why it survived: you always tap something before reaching the
+player there. It is also why the earlier headless audio probe cleared it as an artifact — that probe
+ran with `--autoplay-policy=no-user-gesture-required`, which is exactly the condition that does not
+hold for a real visitor. **A flag that suppresses the failure mode cannot be used to rule it out.**
+
+`handlePlayRejection` now separates the two: `NotAllowedError` → a neutral "Tap play to start the
+story" hint that times out after 4.5s (it shares the error banner's fixed slot, which sits over the
+header); anything else → the real error. The `<audio>` element's own `error` event still sets
+`audioError` directly, which is the genuine load-failure path and is untouched.
+
+**Verified:** headless Chromium at 390×844 with WebGL forced on
+(`--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader` — plain `--disable-gpu` falls
+back to the flat `<img>` path and silently proves nothing about the 3D layer). Banner on load reads
+`player-error player-hint :: Tap play to start the story`, and is `null` when re-probed at 20s, so
+the hint self-dismisses. No JS errors.
+
+## Scene plane: full-bleed picture and clean edges (2026-08-05, frontend `20260805_121351`)
+
+Third and final round on the same frame. Two independent defects, both reported off a phone
+screenshot: the picture still sat visibly inset in its frame, and its borders went wavy in motion.
+
+**The inset was a geometry impossibility, not a tuning miss.** `tiltFitScale()` was solving for
+"no pixel of the tilted plane ever leaves the frustum". A tilting rectangle can never fit exactly
+inside a same-shaped window, so that constraint always returns < 1 — and the previous note's claim
+that it is "full-bleed at rest" was only ever true on desktop. On mobile there is no pointer, so
+`useTiltRef` drives a **permanent auto-drift** (`sin(t*0.35)*0.6`, `cos(t*0.27)*0.4`) that never
+returns to zero. Replayed over a full drift cycle, the fit bottomed out at **0.9207** and averaged
+well under 1 — an ~8% margin for the picture's entire life, matching the ~0.906 measured off the
+user's screenshot.
+
+Two changes make the fit sit at exactly 1.0:
+- `TILT_BLEED = 0.06` — the tilted near edge may overhang the frame by 6% before the picture is
+  scaled down. `Math.min(1, …)` still caps it, so bleed buys the right to *fill* the frame, never to
+  grow past it. Worst case ~5% of **one** edge is clipped, at the extreme of a 20-second sweep.
+- **fov 60 → 38, camera z 30 → 48** (`CameraRig.jsx`). fov 60 is a wide-angle lens: a frame-filling
+  plane keystones violently the instant it tilts, its near edge ballooning outward. That error is
+  what forced the shrink in the first place, *and* it is the "distortion at the borders" complaint.
+  Distance and fov move together (`halfExtent = dist * tan(fov/2)`), so the framing is unchanged —
+  only the wide-angle stretch is. This cut the required bleed from ~9% to ~5%.
+
+**Every amplitude scaled by 48/30 when the camera moved back.** CameraRig's x/y/z/fov swings and
+`StorySceneImagePlane`'s depth constants (`BG_Z`, `FLY_IN_Z`, `GLOW_Z_OFFSET`) are absolute world
+units tuned at distance 30; left alone they shrink to a third of their former effect at 48 and the
+rig looks frozen and flat. If the camera distance is ever changed again, scale all of them.
+
+**The wavy borders were `antialias: !isMobile` + `dpr: isMobile ? 1 : [1,2]`.** A blanket perf
+reflex. This canvas is one slowly rotating textured quad whose four edges are hard geometry: with
+MSAA off at dpr 1, those edges stair-step, and because the plane is always moving the steps *crawl*
+along the edge every frame. The canvas is ~340 CSS px square — under half a megapixel at dpr 2, on
+three quads. Both are now unconditional, with dpr capped at `[1, 2]` so a 3×-DPR screen doesn't pay
+for resolution past the point the edge already reads clean. The `isMobile` state and its resize
+listener existed only to feed those two props and were removed with them.
+
+**Regression loop:** `fit_loop.py` in the session scratchpad parses the constants straight out of
+both source files and replays the sizing math across a full drift cycle. Red before (`min fill
+0.9207`), green after (`min fill 1.0000`, `max bleed 0.0508`). Reach for it before touching
+`FG_TILT`, the drift amplitudes, the fov, or `TILT_BLEED` — all four are coupled.
+
+**Verified in production** (`fill_probe.py`, same scratchpad — measures the picture's real edges
+inside the container by luminance step, from screenshot pixels):
+
+| | container | drawing buffer | fill w × h |
+|---|---|---|---|
+| 390×844 | 338×338 | **671×671** (dpr 2) | 0.990 × 0.991 |
+| 1440×900 | 468×468 | **932×932** (dpr 2) | 0.990 × 0.996 |
+
+The buffer being 2× the CSS box is the antialias/dpr fix showing up as a number. Sampling mid-fly-in
+reads lower (~0.84) — that is the entry transition from `FLY_IN_Z`, not the resting state.
+
+**Do not** set `TILT_BLEED` back to 0 to "stop the clipping" — that is the same trade the 0.9 inset
+and the tilt-exact fit both lost. **Do not** re-disable antialias or drop dpr on mobile for
+"performance"; measure this canvas first.
 
 ## Notes
 - API keys/secrets live in root `.env` (docker-compose reads from here, not `backend/.env`).

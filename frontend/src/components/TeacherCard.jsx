@@ -230,6 +230,37 @@ function TeacherCardItem({ teacher, isActive, isPlaying, onSelect, onPlay }) {
 function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage = "en" }) {
   const [playingVoice, setPlayingVoice] = useState(null);
   const [audioCache, setAudioCache] = useState({});
+  // The sample used to be a bare local `new Audio(...)` inside playSample, so
+  // nothing outside that one call could ever reach it again. A detached
+  // HTMLAudioElement keeps playing after React unmounts its component, which is
+  // why a preview carried straight through "Generate Story" and talked over the
+  // generating screen. Holding it here makes it stoppable.
+  const previewRef = useRef(null);
+  const previewRequestRef = useRef(0);
+
+  const stopPreview = () => {
+    const audio = previewRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      previewRef.current = null;
+    }
+    setPlayingVoice(null);
+  };
+
+  // Leaving the screen for any reason - Generate Story, back, the drawer -
+  // silences the sample. This is the cleanup that was missing entirely.
+  useEffect(() => () => {
+    // Bumping the token first invalidates any fetch still in flight, so a
+    // sample that finishes downloading after this screen is gone never starts.
+    previewRequestRef.current++;
+    const audio = previewRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      previewRef.current = null;
+    }
+  }, []);
 
   // Filter teachers based on detected language
   const filteredTeachers = TEACHERS.filter(teacher => {
@@ -259,16 +290,43 @@ function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage
   const playSample = async (e, teacher) => {
     e.stopPropagation(); // Prevent card selection when clicking play
 
-    if (playingVoice) return; // Prevent multiple plays
+    // Switching voices silences the one already talking. The old guard was
+    // `if (playingVoice) return`, which meant a preview that never fired its
+    // onended - or was still being fetched - locked out every other sample
+    // until the screen was left entirely.
+    //
+    // Note the button carrying this handler is disabled={isPlaying}, so "tap
+    // the same voice again" is not a reachable path and is deliberately not
+    // handled here: a tap-to-stop toggle was tried, and with the button enabled
+    // the tap started a SECOND playback of the same clip instead of stopping the
+    // first (observed live: two <audio> elements, same src, pause() never
+    // called). Not worth the regression for a nicety nobody asked for.
+    stopPreview();
+
+    // Claims this attempt. Anything started before it - a slow fetch still in
+    // flight - fails the check below and is discarded instead of playing over
+    // whatever the user moved on to. TTS cold-starts on RunPod take seconds,
+    // which is exactly long enough to hit Generate Story first.
+    const requestId = ++previewRequestRef.current;
+    const stillWanted = () => previewRequestRef.current === requestId;
 
     setPlayingVoice(teacher.id);
+
+    const start = (src) => {
+      if (!stillWanted()) return;
+      const audio = new Audio(src);
+      previewRef.current = audio;
+      audio.onended = () => {
+        if (previewRef.current === audio) previewRef.current = null;
+        setPlayingVoice((current) => (current === teacher.id ? null : current));
+      };
+      audio.play().catch(() => stopPreview());
+    };
 
     try {
       // Check cache first
       if (audioCache[teacher.id]) {
-        const audio = new Audio(audioCache[teacher.id]);
-        audio.onended = () => setPlayingVoice(null);
-        audio.play();
+        start(audioCache[teacher.id]);
         return;
       }
 
@@ -293,16 +351,16 @@ function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage
       const audioBlob = await response.blob();
       const audioUrl = URL.createObjectURL(audioBlob);
 
-      // Cache the audio
+      // Cached even when this attempt is no longer wanted - the bytes are paid
+      // for either way, and the next tap should be instant.
       setAudioCache(prev => ({ ...prev, [teacher.id]: audioUrl }));
 
-      const audio = new Audio(audioUrl);
-      audio.onended = () => setPlayingVoice(null);
-      audio.play();
+      start(audioUrl);
 
     } catch (error) {
       console.error('Error playing sample:', error);
-      setPlayingVoice(null);
+      if (!stillWanted()) return;
+      stopPreview();
 
       // Fallback: Show error message
       alert(`Unable to play voice sample for ${teacher.name}. Please try again.`);

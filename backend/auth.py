@@ -88,23 +88,31 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
     return encoded_jwt
 
-def verify_token(token: str) -> Optional[str]:
+def verify_token_claims(token: str) -> Optional[dict]:
     """
-    Verifies a JWT token.
-    
-    If the token is valid and not expired, it returns the subject ('sub') claim.
-    Otherwise, it returns None.
+    Verifies a JWT token and returns its full claim set (None if invalid/expired).
+    Used where a caller needs more than the subject - e.g. checking the
+    embedded 'tv' (token_version) claim against the user's current value.
     """
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        # 'sub' (subject) is a standard JWT claim. We use it for the user's identifier (e.g., email).
-        subject = payload.get("sub")
-        if subject is None:
-            return None
-        return subject
+        return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
     except JWTError:
         # This catches various errors like invalid signature, expired token, etc.
         return None
+
+
+def verify_token(token: str) -> Optional[str]:
+    """
+    Verifies a JWT token.
+
+    If the token is valid and not expired, it returns the subject ('sub') claim.
+    Otherwise, it returns None.
+    """
+    payload = verify_token_claims(token)
+    if payload is None:
+        return None
+    # 'sub' (subject) is a standard JWT claim. We use it for the user's identifier (e.g., email).
+    return payload.get("sub")
 
 # --- Generic Token Generation ---
 def generate_secure_token() -> str:

@@ -851,3 +851,120 @@ class StoryOperations:
             logger.error(f"Error deleting story {story_id}: {e}")
 
             return False
+
+    # --- Share links -------------------------------------------------------
+    #
+    # A share token is a bearer credential: whoever holds the URL can read the
+    # story without signing in. That is a different, stronger consent than
+    # `is_public` (which only exposes a story to other signed-in users), so it
+    # lives in its own column and is revoked independently.
+
+    @staticmethod
+    def get_share_token(story_id: str, user: User) -> Optional[Dict[str, Any]]:
+        """Current share state for a story the caller owns, or None."""
+        try:
+            with get_db_cursor() as cursor:
+                cursor.execute(
+                    "SELECT user_id, share_token, share_created_at "
+                    "FROM user_stories WHERE story_id = %s",
+                    (story_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                if not user.get('is_admin') and row['user_id'] != user['id']:
+                    return None
+                return {
+                    "share_token": row['share_token'],
+                    "share_created_at": row['share_created_at'],
+                }
+        except mysql.connector.Error as e:
+            logger.error(f"Error reading share token for story {story_id}: {e}")
+            return None
+
+    @staticmethod
+    def create_share_token(story_id: str, user: User, rotate: bool = False) -> Optional[str]:
+        """Mint (or return) the story's share token. Owner/admin only.
+
+        Idempotent by default: pressing "Share" twice hands out the same link
+        rather than orphaning the one already pasted into a WhatsApp message.
+        `rotate=True` is the "the old link leaked" path - it replaces the token,
+        which immediately dead-ends every copy of the previous URL.
+
+        Ownership is checked with a SELECT rather than inferred from the
+        UPDATE's rowcount: MySQL reports *changed* rows, so re-issuing an
+        identical token would affect 0 rows and read as "not yours".
+        """
+        try:
+            with get_db_cursor(commit=True) as cursor:
+                cursor.execute(
+                    "SELECT user_id, share_token FROM user_stories WHERE story_id = %s",
+                    (story_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                if not user.get('is_admin') and row['user_id'] != user['id']:
+                    return None
+                if row['share_token'] and not rotate:
+                    return row['share_token']
+
+                token = generate_secure_token()
+                cursor.execute(
+                    "UPDATE user_stories SET share_token = %s, share_created_at = NOW() "
+                    "WHERE story_id = %s",
+                    (token, story_id)
+                )
+                return token
+        except mysql.connector.Error as e:
+            logger.error(f"Error creating share token for story {story_id}: {e}")
+            return None
+
+    @staticmethod
+    def revoke_share_token(story_id: str, user: User) -> bool:
+        """Kill the link. Owner/admin only. Idempotent - revoking an already
+        unshared story is a success, not a 404, so the UI never has to care
+        which state it was in."""
+        try:
+            with get_db_cursor(commit=True) as cursor:
+                cursor.execute(
+                    "SELECT user_id FROM user_stories WHERE story_id = %s",
+                    (story_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                if not user.get('is_admin') and row['user_id'] != user['id']:
+                    return False
+                cursor.execute(
+                    "UPDATE user_stories SET share_token = NULL, share_created_at = NULL "
+                    "WHERE story_id = %s",
+                    (story_id,)
+                )
+                return True
+        except mysql.connector.Error as e:
+            logger.error(f"Error revoking share token for story {story_id}: {e}")
+            return False
+
+    @staticmethod
+    def get_story_by_share_token(token: str) -> Optional[Dict[str, Any]]:
+        """Resolve a share token to its story. No user scoping - the token *is*
+        the credential. Callers must strip owner identity before returning
+        anything from this row to an anonymous requester."""
+        if not token:
+            return None
+        try:
+            with get_db_cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM user_stories WHERE share_token = %s",
+                    (token,)
+                )
+                story = cursor.fetchone()
+                if not story:
+                    return None
+                if story.get('story_data') and isinstance(story['story_data'], str):
+                    story['story_data'] = json.loads(story['story_data'])
+                return story
+        except mysql.connector.Error as e:
+            logger.error(f"Error resolving share token: {e}")
+            return None

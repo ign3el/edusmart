@@ -1,0 +1,214 @@
+.system-dashboard {
+  color: var(--ink-1, #e6e9f2);
+}
+
+.system-dashboard .management-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.system-dashboard .management-header h2 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.system-dashboard .refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--edge, rgba(148, 163, 184, 0.12));
+  border-radius: 10px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  color: var(--ink-1, #e6e9f2);
+}
+
+.system-dashboard .error-message {
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.3);
+  color: #ff8a8a;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  margin-bottom: 1rem;
+}
+
+.sys-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.9rem;
+}
+
+.sys-card {
+  background: var(--bg-card, rgba(36, 20, 86, 0.9));
+  border: 1px solid var(--edge, rgba(148, 163, 184, 0.12));
+  border-radius: 14px;
+  padding: 1rem 1.1rem;
+}
+
+.sys-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  color: var(--accent-2, #22d3ee);
+}
+
+.sys-card-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink-1, #e6e9f2);
+}
+
+.sys-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+  color: var(--ink-1, #e6e9f2);
+}
+
+.sys-row span:first-child {
+  color: var(--ink-2, #9aa3b5);
+}
+
+.sys-mono {
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+
+.sys-detail {
+  font-size: 0.75rem;
+  color: var(--ink-2, #9aa3b5);
+  margin-top: 0.15rem;
+}
+
+.sys-footnote {
+  font-size: 0.72rem;
+  color: var(--ink-2, #9aa3b5);
+  margin-top: 0.6rem;
+  font-style: italic;
+}
+
+.sys-muted {
+  font-size: 0.85rem;
+  color: var(--ink-2, #9aa3b5);
+}
+
+.sys-ok {
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.sys-bad {
+  color: #ff8a8a;
+  font-weight: 600;
+}
+
+.sys-pill {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.sys-pill-blue {
+  background: rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+}
+
+.sys-pill-green {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.sys-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  margin-top: 0.5rem;
+  overflow: hidden;
+}
+
+.sys-bar-fill {
+  height: 100%;
+  background: var(--accent-gradient, linear-gradient(135deg, #8b5cf6, #22d3ee));
+}
+
+@media (max-width: 768px) {
+  .sys-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Requests-per-day per model per key ------------------------------- */
+.rpd-row {
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.rpd-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+/* The model id is the secondary fact - which KEY is burning quota is the
+   thing being looked for, so it leads and the model sits under it. */
+.rpd-model {
+  font-size: 0.68rem;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rpd-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rpd-errors {
+  color: #f87171;
+  font-size: 0.7rem;
+}
+
+.rpd-bar {
+  display: block;
+  width: 110px;
+  max-width: 34vw;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+
+.rpd-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22d3ee, #a855f7);
+  transition: width 0.3s ease;
+}
+
+/* Amber past halfway, red past 80% - a key at 80% of its daily pool is about
+   to flip over to the fallback, which is the moment worth noticing. */
+.rpd-bar.warm > span { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.rpd-bar.hot > span  { background: linear-gradient(90deg, #fb7185, #ef4444); }
+
+@media (max-width: 480px) {
+  .rpd-bar { width: 84px; }
+  .rpd-model { max-width: 40vw; }
+}

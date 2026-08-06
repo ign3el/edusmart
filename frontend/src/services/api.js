@@ -108,6 +108,41 @@ export const createBillingPortalSession = async () => {
   return response.data;
 };
 
+// --- Admin: System dashboard (all read-only, no deploy/switchover trigger exists) ---
+
+export const getAdminSystemConfig = async () => (await apiClient.get('/api/admin/system/config')).data;
+export const getAdminDeployStatus = async () => (await apiClient.get('/api/admin/system/deploy-status')).data;
+export const getAdminBackupStatus = async () => (await apiClient.get('/api/admin/system/backup-status')).data;
+export const getAdminSystemHealth = async () => (await apiClient.get('/api/admin/system/health')).data;
+export const getAdminRateLimits = async () => (await apiClient.get('/api/admin/system/rate-limits')).data;
+
+export const getAdminContentReview = async () => (await apiClient.get('/api/admin/system/content-review')).data;
+
+// Requests-per-day per model per API key. Returns key LABELS only - the key
+// values are never sent to the client.
+export const getAdminApiUsage = async (days = 3) =>
+  (await apiClient.get('/api/admin/usage/rpd', { params: { days } })).data;
+
+export const getAdminAuditLog = async (params = {}) =>
+  (await apiClient.get('/api/admin/system/audit-log', { params })).data;
+
+// --- Admin: Feature flags ---
+
+export const getAdminConfigFlags = async () => (await apiClient.get('/api/admin/config-flags')).data;
+export const updateAdminConfigFlag = async (key, configValue) =>
+  (await apiClient.put(`/api/admin/config-flags/${key}`, { config_value: configValue })).data;
+
+// --- Admin: Announcements (site-wide banner) ---
+
+export const getAdminAnnouncements = async () => (await apiClient.get('/api/admin/announcements')).data;
+export const createAdminAnnouncement = async (payload) =>
+  (await apiClient.post('/api/admin/announcements', payload)).data;
+export const updateAdminAnnouncement = async (id, payload) =>
+  (await apiClient.put(`/api/admin/announcements/${id}`, payload)).data;
+
+// Public - no auth. What the site-wide banner calls.
+export const getActiveAnnouncement = async () => (await apiClient.get('/api/announcements/active')).data;
+
 // Permanently deletes the signed-in account. Irreversible.
 // The credential goes in the request BODY, not the query string - a password in
 // a URL ends up in nginx access logs and browser history.
@@ -115,6 +150,27 @@ export const deleteAccount = async ({ password, confirmEmail }) => {
   const response = await apiClient.delete('/api/auth/me', {
     data: { password: password || null, confirm_email: confirmEmail || null },
   });
+  return response.data;
+};
+
+// --- Share links ---
+//
+// The owner-side calls go through apiClient so the interceptor attaches the
+// JWT. getSharedStory deliberately does NOT: it is the anonymous read path, and
+// sending a stale token there would only invite a 401 on a route that needs no
+// credentials at all.
+
+export const getShareLink = async (storyId) =>
+  (await apiClient.get(`/api/story/${storyId}/share`)).data;
+
+export const createShareLink = async (storyId, { rotate = false } = {}) =>
+  (await apiClient.post(`/api/story/${storyId}/share`, { rotate })).data;
+
+export const revokeShareLink = async (storyId) =>
+  (await apiClient.delete(`/api/story/${storyId}/share`)).data;
+
+export const getSharedStory = async (token) => {
+  const response = await axios.get(`${API_URL}/api/share/${encodeURIComponent(token)}`);
   return response.data;
 };
 

@@ -97,8 +97,56 @@
     scroll-behavior: smooth;
   }
 
+  /*
+    Scrollbars, themed once and globally. Every scroll container in the app
+    except the nav drawer was painting Chrome's default light-grey bar, which
+    on a dark purple panel reads as a bright seam down the edge of the card.
+    This is deliberately NOT scoped to a class: the offenders (Load Story,
+    admin Story Management, any future modal) all had the same default, so
+    styling them one at a time is how the drawer ended up as the only one
+    that looked right.
+
+    Both syntaxes are needed and they are not redundant - `scrollbar-color`
+    is what Firefox honours and it ignores ::-webkit-scrollbar entirely,
+    while Chrome/Safari only recently began supporting the standard property.
+  */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(168, 85, 247, 0.45) rgba(15, 8, 40, 0.35);
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: rgba(15, 8, 40, 0.35);
+    border-radius: 8px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.55), rgba(236, 72, 153, 0.55));
+    border-radius: 8px;
+    /* Inset the thumb off the track edge without changing the track width. */
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.85), rgba(236, 72, 153, 0.85));
+    background-clip: padding-box;
+  }
+
+  /* The corner where a horizontal and vertical bar meet defaults to white. */
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
   body {
+    /* dvh for the same reason as .app - see App.css. */
     min-height: 100vh;
+    min-height: 100dvh;
     background: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
@@ -130,5 +178,6 @@
 
   #root {
     min-height: 100vh;
+    min-height: 100dvh;
   }
 }

@@ -27,7 +27,33 @@ RETAIN_DAYS=30
 LOG_TAG="edusmart-backup"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-fail() { log "ERROR: $*"; exit 1; }
+
+# Records the outcome for the admin panel's read-only backup-status view
+# (GET /api/admin/system/backup-status). The backend container reads
+# status/backup_status.json - same mechanism as deploy.sh's deploy_status.json,
+# bind-mounted read-only, no other coupling to this script.
+write_backup_status() {
+  local success="$1" size="${2:-0}" r2_uploaded="$3" error_msg="${4:-}"
+  local status_dir="$PROJECT_DIR/status"
+  mkdir -p "$status_dir" 2>/dev/null || return 0
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local tmp; tmp="$(mktemp "$status_dir/.backup_status.XXXXXX" 2>/dev/null)" || return 0
+  jq -n --arg now "$now" --argjson success "$success" --argjson size "$size" \
+    --argjson r2 "$r2_uploaded" --arg err "$error_msg" \
+    '{last_run_at: $now, success: $success, archive_size_bytes: $size, r2_uploaded: $r2,
+      error: (if $err == "" then null else $err end)}' \
+    > "$tmp" 2>/dev/null || echo "{\"last_run_at\": \"$now\", \"success\": $success}" > "$tmp"
+  mv "$tmp" "$status_dir/backup_status.json"
+}
+
+R2_UPLOADED=false
+ARCHIVE_SIZE_BYTES=0
+
+fail() {
+  log "ERROR: $*"
+  write_backup_status false "$ARCHIVE_SIZE_BYTES" "$R2_UPLOADED" "$*"
+  exit 1
+}
 
 [ -f "$PASSPHRASE_FILE" ] || fail "passphrase file missing: $PASSPHRASE_FILE"
 [ "$(stat -c %a "$PASSPHRASE_FILE")" = "600" ] || fail "passphrase file must be mode 600"
@@ -84,6 +110,7 @@ gpg --batch --yes --symmetric --cipher-algo AES256 \
 rm -f "$FINAL_TAR"
 
 SIZE_HUMAN="$(du -h "$ENCRYPTED_FILE" | cut -f1)"
+ARCHIVE_SIZE_BYTES="$(stat -c %s "$ENCRYPTED_FILE")"
 log "Encrypted archive ready: $ENCRYPTED_FILE ($SIZE_HUMAN)"
 
 # Upload offsite (Cloudflare R2 via rclone remote "r2").
@@ -91,6 +118,7 @@ if rclone listremotes 2>/dev/null | grep -q '^r2:'; then
   log "Uploading to r2:edusmart-backups/..."
   rclone copy "$ENCRYPTED_FILE" "r2:edusmart-backups/" --checksum \
     || fail "rclone upload failed"
+  R2_UPLOADED=true
   log "Upload complete."
 
   log "Pruning offsite backups older than ${RETAIN_DAYS}d..."
@@ -103,4 +131,5 @@ fi
 # Local retention (staging dir also acts as a short local cache).
 find "$STAGING_DIR" -maxdepth 1 -name 'edusmart_backup_*.tar.gpg' -mtime +7 -delete
 
+write_backup_status true "$ARCHIVE_SIZE_BYTES" "$R2_UPLOADED"
 log "Backup finished: $ARCHIVE_NAME"

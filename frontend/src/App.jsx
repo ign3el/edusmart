@@ -10,6 +10,7 @@ import Signup from './components/Signup'
 import VerifyEmail from './components/VerifyEmail'
 import ForgotPassword from './components/ForgotPassword'
 import ResetPassword from './components/ResetPassword'
+import SharedStory from './components/SharedStory'
 import FileUpload from './components/FileUpload'
 import FileConfirmation from './components/FileConfirmation'
 import GeneratingSpinner from './components/GeneratingSpinner'
@@ -31,6 +32,7 @@ import NavigationMenu from './components/NavigationMenu'
 import BrandMark from './components/BrandMark'
 import Mascot from './components/Mascot'
 import ErrorBoundary from './components/ErrorBoundary'
+import AnnouncementBanner from './components/AnnouncementBanner'
 const AdminPanel = lazy(() => import('./components/AdminPanel'));
 import './App.css'
 
@@ -39,12 +41,19 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 function App() {
   // Use Routes to handle verification and password reset pages
   return (
-    <Routes>
-      <Route path="/verify-email" element={<VerifyEmail />} />
-      <Route path="/forgot-password" element={<ForgotPassword />} />
-      <Route path="/reset-password" element={<ResetPassword />} />
-      <Route path="/*" element={<MainApp />} />
-    </Routes>
+    <>
+      <AnnouncementBanner />
+      <Routes>
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        {/* Public shared story. Must sit ABOVE the /* catch-all, and outside
+            MainApp's auth gate - the whole point is that a visitor with no
+            account can open it. */}
+        <Route path="/s/:token" element={<SharedStory />} />
+        <Route path="/*" element={<MainApp />} />
+      </Routes>
+    </>
   )
 }
 
@@ -158,7 +167,7 @@ function MainApp() {
         setSaveFeedback({
           variant: 'success',
           title: "You're up to date",
-          message: 'EduSmart is already running the latest version.',
+          message: 'LearnTale is already running the latest version.',
         })
       }
     } catch (err) {
@@ -345,7 +354,7 @@ function MainApp() {
   }, [currentJobId])
 
   // Remember which story is on screen so an accidental refresh doesn't wipe it.
-  // The backend keeps unsaved generated stories around too (only handleRestart's
+  // The backend keeps unsaved generated stories around too (only resetStory's
   // explicit delete-story call removes one early) - this is just a pointer, not
   // a copy of the story itself, rehydrated via the same endpoints already used
   // elsewhere in this file. Offline stories are skipped - OfflineManager already
@@ -693,7 +702,14 @@ function MainApp() {
     logout()
   }
 
-  const handleRestart = () => {
+  // Throwing away the current unsaved story is the same teardown every time,
+  // but it does NOT always end in the same place, which is why the destination
+  // is a parameter rather than baked in. Two callers want two different things:
+  // the nav's "New Story" is a request to make one, so it belongs on the upload
+  // screen, while finishing the quiz is the end of a session and belongs home.
+  // This used to hardcode 'home', so "New Story" quietly did nothing but return
+  // to the screen the reader was already looking at.
+  const resetStory = (destination) => {
     // Cleanup unsaved story
     if (pollTimerRef.current) {
       stopPolling()
@@ -701,8 +717,8 @@ function MainApp() {
     }
     // Captured before the state resets below, which would otherwise clear it.
     const jobToDelete = currentJobId && !isSaved ? currentJobId : null
-    
-    navigateTo('home')
+
+    navigateTo(destination)
     setUploadedFile(null)
     setSelectedAvatar(null)
     setStoryData(null)
@@ -730,6 +746,12 @@ function MainApp() {
       })
     }
   }
+
+  // Both are zero-arg wrappers on purpose: they get handed straight to onClick,
+  // so anything taking an argument would receive the click event as its
+  // destination and navigate somewhere that doesn't exist.
+  const handleRestart = () => resetStory('home')
+  const handleNewStory = () => resetStory('upload')
 
   const handleSaveStory = () => {
     setShowSaveModal(true)
@@ -815,7 +837,7 @@ function MainApp() {
             user={user}
             isAdmin={user?.is_admin}
             onHome={() => navigateTo('home')}
-            onNewStory={handleRestart}
+            onNewStory={handleNewStory}
             onLoadStories={() => navigateTo('load')}
             onOfflineManager={() => navigateTo('offline')}
             onAdminClick={() => navigateTo('admin')}
@@ -848,7 +870,22 @@ function MainApp() {
             </div>
           )}
           
-          <AnimatePresence mode="wait">
+          {/* mode="wait" removed 2026-08-05: none of the screens below declare
+              initial/animate/exit props, so "wait" bought zero visible
+              crossfade while creating a real deadlock - StoryPlayer's own
+              nested scene-turn AnimatePresence (StoryPlayer.jsx, the
+              turnDir-driven page transition) left mid-cycle by a single
+              "Next scene" click meant this outer AnimatePresence's
+              exit-complete callback never fired, permanently freezing the
+              screen on the old step even though `step` state (and the URL
+              history) had already updated correctly. Confirmed via a live
+              repro: history.state and the .app element's class both flipped
+              to the new step instantly, but .story-player never unmounted
+              and the new screen's content never mounted either - classic
+              orphaned mode="wait" exit signal, not a click or event-handler
+              bug. Default (sync) mode swaps screens without waiting on any
+              exit callback, which removes the deadlock class entirely. */}
+          <AnimatePresence>
             {step === 'admin' && (
               user?.is_admin ? (
                 <Suspense fallback={<div className="loading-message">Loading Admin Panel...</div>}>
@@ -1062,8 +1099,28 @@ function MainApp() {
             </motion.div>
           )}
 
+        </AnimatePresence>
+
+          {/* Deliberately OUTSIDE AnimatePresence, and a plain div rather than
+              motion.div (moved 2026-08-05). This screen never had its own
+              enter/exit animation, so it got nothing from framer-motion's
+              presence tracking - but it paid for it: StoryPlayer owns a
+              SEPARATE nested AnimatePresence for the scene-turn transition
+              (StoryPlayer.jsx, turnDir), and once that inner group had been
+              through even one enter/exit cycle (i.e. the user clicked "Next
+              scene" once), its unresolved presence bookkeeping blocked this
+              outer AnimatePresence from ever signaling "safe to unmount" for
+              the whole player subtree - confirmed live: `step` state and the
+              URL both flipped to the next screen instantly and correctly,
+              but .story-player stayed mounted in the DOM indefinitely (mode
+              ="wait": both old and new screen stuck in limbo; default mode:
+              new screen mounted fine but the old one leaked forever). Taking
+              this screen out of AnimatePresence's management entirely removes
+              the dependency on that inner group ever settling - React's own
+              reconciliation mounts/unmounts it immediately and correctly, the
+              same way it always did before framer-motion was in the loop. */}
           {step === 'playing' && storyData && (
-            <motion.div key="playing" className="player-container">
+            <div className="player-container">
               {/* A short quiz is a note on a finished story, not a failure - it
                   must never use the error banner, which offers "Try Again" for
                   something that already succeeded. */}
@@ -1079,9 +1136,8 @@ function MainApp() {
               )}
               <StoryPlayer
                 ref={storyPlayerRef}
-                storyData={storyData} 
-                avatar={selectedAvatar} 
-                onHome={() => navigateTo('home')}
+                storyData={storyData}
+                avatar={selectedAvatar}
                 onRestart={handleRestart}
                 onSave={storyFullyReady && !isSaved ? handleSaveStory : null}
                 onDownloadOffline={storyFullyReady ? () => storyPlayerRef.current?.triggerDownload() : null}
@@ -1092,9 +1148,8 @@ function MainApp() {
                 totalScenes={totalScenes}
                 completedSceneCount={completedSceneCount}
               />
-            </motion.div>
+            </div>
           )}
-        </AnimatePresence>
 
           {showSaveModal && (
             <SaveStoryModal

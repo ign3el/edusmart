@@ -6,6 +6,7 @@ import requests
 import asyncio
 from typing import Optional
 from dotenv import load_dotenv
+from services import api_usage
 
 load_dotenv()
 
@@ -63,13 +64,16 @@ class KokoroTTSClient:
             
             if response.status_code == 200:
                 audio_bytes = response.content
+                api_usage.record("kokoro-tts", "kokoro", "runpod", ok=True)
                 print(f"✓ Kokoro TTS generated: {len(audio_bytes)} bytes")
                 return audio_bytes
             else:
+                api_usage.record("kokoro-tts", "kokoro", "runpod", ok=False)
                 print(f"✗ Kokoro TTS failed: {response.status_code} - {response.text}")
                 return None
-                
+
         except requests.exceptions.RequestException as e:
+            api_usage.record("kokoro-tts", "kokoro", "runpod", ok=False)
             print(f"✗ Kokoro TTS connection failed: {e}")
             raise TTSConnectionError(f"Could not connect to Kokoro TTS at {self.base_url}. Please ensure the service is running.")
         except Exception as e:

@@ -6,7 +6,10 @@
   backdrop-filter: blur(8px);
   display: grid;
   place-items: center;
-  z-index: 1000;
+  /* Only meaningful because the modal is portaled to <body> (see LoadStory.jsx).
+     Above .app-header (100) and the player header (50), below the nav drawer
+     (9998/9999) so the drawer can still open over it. */
+  z-index: 1200;
   padding: 1rem;
   overflow-y: auto;
 }
@@ -30,6 +33,21 @@
   box-shadow: 0 20px 50px rgba(168, 85, 247, 0.15);
 }
 
+/* Sticky so the close control stays reachable no matter how far the story
+   grid below it scrolls - it used to live only as a "Back to Home" button
+   after the last card, which meant a full page of stories buried the only
+   way out of the modal below the fold. */
+.load-story-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: inherit;
+}
+
 .load-story-container h2 {
   display: flex;
   align-items: center;
@@ -38,6 +56,26 @@
   text-align: left;
   font-size: clamp(1.4rem, 3vw, 1.8rem);
   letter-spacing: -0.02em;
+}
+
+.load-story-close {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-1);
+  transition: transform var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.load-story-close:hover {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.4);
+  color: var(--danger);
+  transform: rotate(90deg);
 }
 
 .spin-icon {

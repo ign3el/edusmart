@@ -1,4 +1,4 @@
-// Service Worker for EduSmart Stories
+// Service Worker for LearnTale Stories
 // Implements App Shell architecture with offline-first strategy
 
 const CACHE_VERSION = 'build-20260725203733';

@@ -1,7 +1,7 @@
 """
 Models Package
 
-Data models for the EduSmart application using Pydantic for validation.
+Data models for the LearnTale application using Pydantic for validation.
 
 Models:
     - Scene: Individual scene with visual description, narration, and learning point

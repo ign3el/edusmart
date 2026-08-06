@@ -24,9 +24,13 @@ from routers.auth import router as auth_router, get_current_user
 from routers.admin import router as admin_router
 from routers.upload import router as upload_router
 from routers.billing import router as billing_router, check_and_reserve_credit, refund_credit
+from routers.system import router as system_router
+from routers.config_flags import router as config_flags_router
+from routers.announcements import admin_router as announcements_admin_router, public_router as announcements_public_router
+from routers.share import owner_router as share_owner_router, public_router as share_public_router
 from core.setup import create_admin_user
 from database_models import User, StoryOperations, UserOperations
-from auth import verify_token
+from auth import verify_token_claims
 from services.story_service import (
     StoryService,
     normalize_quiz_size,
@@ -39,7 +43,9 @@ from job_state import job_manager
 from story_storage import storage_manager, cleanup_scheduler_task, database_cleanup_scheduler_task
 from services.concurrency import tts_governor, governor_snapshot, log_limits
 from services import vision_budget
+from services import api_usage
 from services import failure_reasons
+from services import story_media
 from services.job_queue import generation_queue, admit_generation
 from services.grade_bands import resolve_grade_spec
 from typing import Optional, TYPE_CHECKING, Dict, Any, List
@@ -195,6 +201,12 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(upload_router)
 app.include_router(billing_router)
+app.include_router(system_router)
+app.include_router(config_flags_router)
+app.include_router(announcements_admin_router)
+app.include_router(announcements_public_router)
+app.include_router(share_owner_router)
+app.include_router(share_public_router)
 
 
 # --- Non-Auth related application logic ---
@@ -257,13 +269,18 @@ async def get_media_user(request: Request, token: Optional[str] = None) -> dict:
     if not jwt_token:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    email = verify_token(jwt_token)
+    payload = verify_token_claims(jwt_token)
+    email = payload.get("sub") if payload else None
     if not email:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = UserOperations.get_by_email(email)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Same staleness check as get_current_user (routers/auth.py) - a media URL
+    # holding a token from before a password change must stop working too.
+    if payload.get("tv", 0) != (user.get("token_version") or 0):
+        raise HTTPException(status_code=401, detail="Session expired, please log in again.")
     return user
 
 
@@ -343,22 +360,11 @@ def _resolve_visible_duplicate(duplicate_info: dict, viewer: dict) -> Optional[D
 def _audio_media_type(path) -> str:
     """Media type from the file's leading bytes rather than its extension.
 
-    Returns "" when the file cannot be read or the header is unrecognised, so
-    callers can fall back to whatever they were going to do anyway.
+    Kept as a thin alias so the several callers below read unchanged; the
+    implementation moved to services/story_media.py when the share-link routes
+    needed the same sniffing.
     """
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(12)
-    except OSError:
-        return ""
-    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
-        return "audio/wav"
-    # MP3 is either an ID3 tag or a raw frame sync (0xFF 0xEx/0xFx).
-    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
-        return "audio/mpeg"
-    if head[:4] == b"OggS":
-        return "audio/ogg"
-    return ""
+    return story_media.sniff_media_type(path)
 
 @app.get("/api/health")
 async def health_check():
@@ -494,95 +500,15 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
         logger.error(f"❌ Story directory does not exist on disk: {story_dir}")
         raise HTTPException(status_code=404, detail=f"Story directory not found: {story_id}")
     
-    exact_path = story_dir / filename
-    logger.info(f"🔍 Checking exact path: {exact_path}")
-    
-    # Try exact match first
-    if exact_path.exists() and exact_path.is_file():
-        logger.info(f"✅ Found exact match: {exact_path}")
-        response = FileResponse(exact_path, media_type=_audio_media_type(exact_path) or None)
-        # Add CORS headers for media files
-        response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        return response
-    
-    # If not found, try multiple patterns to support both old and new formats
-    
-    # Pattern 1: UUID prefix (new format) - {uuid}_scene_0.png
-    pattern1 = str(story_dir / f"*_{filename}")
-    logger.info(f"🔎 Searching with UUID prefix pattern: {pattern1}")
-    matches1 = glob.glob(pattern1)
-    
-    if matches1:
-        logger.info(f"✅ Found UUID-prefixed file: {matches1[0]}")
-        response = FileResponse(matches1[0], media_type=_audio_media_type(matches1[0]) or None)
-        response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        return response
-    
-    # Pattern 2: Old format direct match - scene_0.png
-    # If filename is like "abc123_scene_0.png", try "scene_0.png"
-    if "_scene_" in filename:
-        base_filename = filename.split("_scene_")[-1]
-        old_format_path = story_dir / f"scene_{base_filename}"
-        logger.info(f"🔎 Trying old format: {old_format_path}")
-        
-        if old_format_path.exists() and old_format_path.is_file():
-            logger.info(f"✅ Found old format file: {old_format_path}")
-            response = FileResponse(old_format_path, media_type=_audio_media_type(old_format_path) or None)
-            response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-            return response
-    
-    # Pattern 3: Reverse - if requesting old format, try new format
-    if filename.startswith("scene_"):
-        # Extract scene number and type
-        parts = filename.split("_")
-        if len(parts) >= 2:
-            scene_part = parts[1].split(".")[0]
-            ext = filename.split(".")[-1]
-            # Try to find any UUID-prefixed file with this scene number
-            pattern3 = str(story_dir / f"*_scene_{scene_part}.{ext}")
-            logger.info(f"🔎 Trying new format pattern: {pattern3}")
-            matches3 = glob.glob(pattern3)
-            
-            if matches3:
-                logger.info(f"✅ Found new format file: {matches3[0]}")
-                response = FileResponse(matches3[0], media_type=_audio_media_type(matches3[0]) or None)
-                response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
-                response.headers["Access-Control-Allow-Credentials"] = "true"
-                response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-                return response
-    
-    # Pattern 4: Generic wildcard search
-    # Try to find any file containing the scene number
-    if "scene_" in filename:
-        scene_match = filename.split("scene_")[-1].split(".")[0]
-        pattern4 = str(story_dir / f"*scene_{scene_match}*")
-        logger.info(f"🔎 Trying wildcard pattern: {pattern4}")
-        matches4 = glob.glob(pattern4)
-        
-        if matches4:
-            logger.info(f"✅ Found wildcard match: {matches4[0]}")
-            response = FileResponse(matches4[0], media_type=_audio_media_type(matches4[0]) or None)
-            response.headers["Access-Control-Allow-Origin"] = "https://edusmart.ign3el.com"
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-            return response
-    
-    # List all files in directory for debugging
-    all_files = list(story_dir.iterdir())
-    logger.error(f"❌ File not found: {filename}")
-    logger.error(f"📂 Available files in {story_dir}: {[f.name for f in all_files]}")
-    raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    # The five-pattern lookup that used to be inlined here (and repeated the
+    # CORS block once per branch) now lives in services/story_media.py, so the
+    # share-link routes resolve filenames exactly the same way.
+    resolved = story_media.resolve_scene_file(story_dir, filename)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    logger.info(f"✅ Serving {resolved}")
+    return story_media.media_response(resolved)
 
 @app.api_route("/api/generated-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
 async def serve_generated_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
@@ -864,6 +790,14 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
     4. Process scenes in parallel (images + audio per scene)
     """
     workflow_start_time = time.time()
+    # Tag every outbound provider call made from here on with this story, so the
+    # admin panel can answer "what did this story cost in API calls?". A
+    # ContextVar rather than a parameter because the calls happen several layers
+    # down (StoryService -> Gemini/Groq/RunPod/TTS) and, crucially, inside
+    # asyncio.to_thread workers and spawned tasks - both of which inherit the
+    # context automatically. Set once here, at the top of the workflow, so
+    # images and narration are attributed too, not just the LLM pass.
+    api_usage.current_story.set(story_id)
     # Background tasks spawned by this workflow. The queue slot has to stay
     # held until they finish: otherwise a worker would report the story done
     # the moment Scene 0 was ready and immediately claim the next job, while
@@ -903,11 +837,18 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         # re-asking whether a bank receipt is educational costs a full
         # generation to arrive at the same answer.
         story_data = None
+        # Admin-only quality-pipeline scores (coverage/faithfulness/
+        # hallucination/citation_accuracy) - see StoryService.process_file_to_story's
+        # docstring for why this is a separate return value rather than a key
+        # inside story_data: story_data flows on into save/load paths, one of
+        # which (load) returns its stored blob verbatim to the story's own
+        # owner, not just an admin.
+        quality_scores = None
         last_error: Optional[Exception] = None
         for attempt in (1, 2):
             try:
                 async with llm_governor.slot():
-                    story_data = await asyncio.to_thread(
+                    story_data, quality_scores = await asyncio.to_thread(
                         gemini.process_file_to_story, file_path, grade_level, user_id, quiz_size
                     )
                 if story_data:
@@ -950,7 +891,8 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         )
 
         # Initialize job state with quiz data
-        job_manager.update_story_metadata(story_id, title, len(scenes), quiz)
+        key_points = story_data.get("key_points") or []
+        job_manager.update_story_metadata(story_id, title, len(scenes), quiz, quality_scores, key_points=key_points)
 
         # Create scene records immediately (text is ready)
         scene_ids = []
@@ -972,6 +914,31 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         # Define background task for remaining images (Scenes 1..N)
         async def generate_remaining_images_background(r_scenes, seed, mobile, reference_image=None):
             logger.info(f"🎨 Background generating images for {len(r_scenes)} scenes...")
+            published_images = set()
+
+            def _publish_image(idx: int, img_bytes: bytes) -> bool:
+                """Save one finished image and mark its scene completed, so
+                /api/status exposes it right away instead of only once every
+                image in the story has finished. Mirrors _publish_scene in
+                generate_remaining_tts."""
+                if idx in published_images:
+                    return True
+                try:
+                    url = storage_manager.save_file(story_id, f"scene_{idx}.png", img_bytes, in_saved=False)
+                    job_manager.update_scene_image(scene_ids[idx], "completed", url)
+                    published_images.add(idx)
+                    logger.info(f"✓ Scene {idx} image published ({len(published_images)}/{len(r_scenes)})")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed save scene {idx}: {e}")
+                    return False
+
+            async def on_image_ready(idx: int, img_bytes: bytes):
+                # to_thread because save_file and the job-state UPDATE are both
+                # blocking, and this runs on the same loop driving every other
+                # image still in flight.
+                await asyncio.to_thread(_publish_image, idx, img_bytes)
+
             try:
                 images_map = await gemini.generate_images_parallel(
                     r_scenes,
@@ -981,20 +948,17 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                     is_mobile=mobile,
                     start_index=1,
                     grade_level=grade_level,
-                    reference_image=reference_image
+                    reference_image=reference_image,
+                    on_image_ready=on_image_ready
                 )
+                # Safety net only. Everything that succeeded has normally been
+                # published by the callback already; this catches a callback
+                # that failed and marks genuinely-missing scenes failed, the
+                # same shape as the TTS sweep above.
                 for idx, img_bytes in images_map.items():
-                    if img_bytes:
-                        img_name = f"scene_{idx}.png"
-                        try:
-                            url = storage_manager.save_file(story_id, img_name, img_bytes, in_saved=False)
-                            job_manager.update_scene_image(scene_ids[idx], "completed", url)
-                            logger.info(f"✓ Scene {idx} image saved (background)")
-                        except Exception as e:
-                            logger.error(f"Failed save scene {idx}: {e}")
-                            job_manager.update_scene_image(scene_ids[idx], "failed")
-                    else:
-                        job_manager.update_scene_image(scene_ids[idx], "failed")
+                    if img_bytes and _publish_image(idx, img_bytes):
+                        continue
+                    job_manager.update_scene_image(scene_ids[idx], "failed")
             except Exception as e:
                 logger.error(f"Background image gen error: {e}")
 
@@ -1547,7 +1511,8 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
                         }
                         for idx, scene in enumerate(story_data.get("scenes", []))
                     ],
-                    "quiz": quiz_data
+                    "quiz": quiz_data,
+                    "key_points": _parse_key_points(story_data)
                 }
             
             # Try to load from story.json if it exists (legacy format)
@@ -1589,7 +1554,8 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
                         }
                         for idx, scene in enumerate(story_data.get("scenes", []))
                     ],
-                    "quiz": quiz_data
+                    "quiz": quiz_data,
+                    "key_points": _parse_key_points(story_data)
                 }
             else:
                 # No story.json, use new version-aware reconstruction
@@ -1700,6 +1666,27 @@ async def get_scene_status(story_id: str, scene_index: int, current_user: dict =
         "image_url": scene["image_url"],
         "audio_url": scene["audio_url"]
     }
+
+
+def _parse_key_points(source: Dict[str, Any]) -> List[str]:
+    """Read the stored key_points JSON array back out as a list of strings.
+
+    Returns [] for every story generated before the column existed, which the
+    player reads as "no summary screen for this story" - that is the intended
+    behaviour for old stories, not a failure. Never raises: a malformed row
+    must not take down a status poll that the client hits every 2 seconds.
+    """
+    raw = source.get("key_points")
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
 
 
 def _failure_payload(stored_error) -> Dict[str, Any]:
@@ -1822,7 +1809,8 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
             "result": {
                 "title": status["title"],
                 "scenes": completed_scenes,
-                "quiz": quiz_data
+                "quiz": quiz_data,
+                "key_points": _parse_key_points(status)
             }
         }
 
@@ -1959,9 +1947,14 @@ async def save_story(
         story_data = {
             "title": status["title"],
             "scenes": updated_scenes,
-            "quiz": quiz_data
+            "quiz": quiz_data,
+            # Persisted with the story, not re-derived on read: the saved-story
+            # endpoints load story.json and never look at the stories table, so
+            # omitting this here would silently drop the summary screen the
+            # moment a reader saved the story they had just been shown it in.
+            "key_points": _parse_key_points(status)
         }
-        
+
         success = StoryOperations.save_story(
             user_id=user['id'],
             story_id=saved_story_id,
@@ -2193,6 +2186,39 @@ async def export_job(job_id: str, current_user: dict = Depends(get_current_user)
         }
     )
 
+def _sniff_audio_ext(path: str, fallback: str) -> str:
+    """Return the extension the file's BYTES justify, else `fallback`.
+
+    The extension on disk cannot be trusted: a survey of saved_stories found 33
+    of 74 audio files misnamed - mp3 bytes sitting in scene_N.wav and RIFF/WAVE
+    bytes in scene_N.mp3 - because the writer picked the suffix from config
+    rather than from what the TTS actually returned. That is harmless while the
+    file is streamed over HTTP (the browser sniffs, and the server sends its own
+    Content-Type), but an offline bundle has no server: the importer derives the
+    data-URL MIME purely from the filename, so a misnamed file becomes
+    `data:audio/wav;base64,<mp3>` and the player can refuse its own bundle.
+    Naming the bundled copy after its content is what makes it decodable offline.
+
+    Images are deliberately not sniffed - all 72 on disk are true PNG, so there
+    is nothing to correct and no reason to read them.
+    """
+    if fallback not in (".mp3", ".wav", ".m4a", ".ogg", ".aac", ".webm"):
+        return fallback
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return fallback
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return ".wav"
+    # ID3v2 tag, or a bare MPEG frame sync (11 set bits).
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return ".mp3"
+    if head[:4] == b"OggS":
+        return ".ogg"
+    return fallback
+
+
 @app.get("/api/export-story/{story_id}")
 async def export_story(story_id: str, user: User = Depends(get_current_user)):
     """
@@ -2208,33 +2234,68 @@ async def export_story(story_id: str, user: User = Depends(get_current_user)):
     # Create ZIP file in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # Update story data with local file references
+        # Update story data with local file references.
+        # quiz and key_points travel with the bundle so an imported story is the
+        # whole lesson, not just the pictures: previously the export carried
+        # title + scenes only, so going offline silently dropped the quiz and the
+        # Lesson Notes screen. Both are plain JSON already in story_data - the
+        # player reads them from exactly these keys - so they need no rewriting,
+        # only including. _parse_key_points tolerates the older rows where the
+        # column predates the feature and holds NULL or a JSON string.
+        # Older rows hold quiz as a JSON *string* rather than an array - the four
+        # read paths above (get_story_status et al) each normalise it on the way
+        # out, so the DB genuinely contains both shapes. Handing the string
+        # straight to the bundle would put `quiz: "[{...}]"` in story.json and
+        # the offline player, which does `questions={storyData?.quiz || []}`,
+        # would iterate a string one character at a time.
+        quiz_data = story_data.get("quiz") or []
+        if isinstance(quiz_data, str):
+            try:
+                quiz_data = json.loads(quiz_data)
+            except (json.JSONDecodeError, TypeError):
+                quiz_data = []
+        if not isinstance(quiz_data, list):
+            quiz_data = []
+
         export_data = {
             "title": story_data.get("title", story["name"]),
+            "quiz": quiz_data,
+            "key_points": _parse_key_points(story_data),
             "scenes": []
         }
         
+        # The bundled name must follow the real file, and story.json must follow
+        # the bundle. Hardcoding .mp3/.png did neither: a story whose TTS wrote
+        # .wav shipped a manifest promising scene_N.mp3 that was nowhere in the
+        # zip, and the offline importer only rewrites a URL it can find a file
+        # for - so the bare name survived into the player, which pasted it onto
+        # the origin and asked for https://edusmart.ign3el.comscene_0.mp3.
+        # Returning "" for anything not actually bundled keeps the manifest
+        # honest. /api/export-job already derives the extension this way.
+        def bundle(src_url, idx):
+            """Copy a scene asset into the zip under a flat name; '' if absent."""
+            # basename() also contains the path: a crafted url cannot escape
+            # the story's own directory.
+            name = os.path.basename((src_url or "").split("?")[0].split("#")[0])
+            ext = os.path.splitext(name)[1].lower()
+            if not name or not ext:
+                return ""
+            src = os.path.join("saved_stories", story_id, name)
+            if not os.path.exists(src):
+                return ""
+            bundled = f"scene_{idx}{_sniff_audio_ext(src, ext)}"
+            zip_file.write(src, bundled)
+            return bundled
+
         # Add each scene's assets
         for idx, scene in enumerate(story_data.get("scenes", [])):
-            scene_data = {
+            export_data["scenes"].append({
                 "text": scene.get("text", ""),
-                "image_url": f"scene_{idx}.png",
-                "audio_url": f"scene_{idx}.mp3"
-            }
-            export_data["scenes"].append(scene_data)
-            
-            # Add image file from saved_stories directory
-            if scene.get("image_url"):
-                img_path = os.path.join("saved_stories", story_id, f"scene_{idx}.png")
-                if os.path.exists(img_path):
-                    zip_file.write(img_path, f"scene_{idx}.png")
-            
-            # Add audio file from saved_stories directory
-            if scene.get("audio_url"):
-                audio_path = os.path.join("saved_stories", story_id, f"scene_{idx}.mp3")
-                if os.path.exists(audio_path):
-                    zip_file.write(audio_path, f"scene_{idx}.mp3")
-        
+                "image_url": bundle(scene.get("image_url"), idx),
+                "audio_url": bundle(scene.get("audio_url"), idx),
+            })
+
+
         # Add story.json
         zip_file.writestr("story.json", json.dumps(export_data, indent=2))
     

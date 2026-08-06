@@ -1,15 +1,19 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle, lazy, Suspense } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { animate } from 'animejs'
 import {
-  Play, Pause, SkipForward, SkipBack, RotateCw, Home,
-  BookOpen, Volume2, ImageOff, Loader2
+  Play, Pause, SkipForward, SkipBack, RotateCw,
+  BookOpen, Volume2, ImageOff, Loader2, Share2
 } from 'lucide-react'
 import { buildFullUrl } from '../utils/urlHelpers'
 import Quiz from './Quiz'
 import './StoryPlayer.css'
 
 const StoryScene3DLayer = lazy(() => import('./StoryScene3DLayer'))
+// Lazy: the sharing dialog is opened by a minority of sessions, and it pulls in
+// its own stylesheet - no reason for it to sit in the player's initial chunk.
+const ShareLinkModal = lazy(() => import('./ShareLinkModal'))
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
@@ -46,7 +50,6 @@ function hasWebGL() {
 const StoryPlayer = forwardRef(({
   storyData,
   avatar,
-  onHome,
   onRestart,
   onSave,
   onDownloadOffline,
@@ -57,7 +60,12 @@ const StoryPlayer = forwardRef(({
   totalScenes = 0,
   completedSceneCount = 0,
   initialScene = 0,
+  // Read-only public view (/s/:token). No account, no ownership, so every
+  // control that writes something has to be absent rather than merely
+  // disabled - there is no session behind them to authorise the call.
+  shareMode = false,
 }, ref) => {
+  const [showShareModal, setShowShareModal] = useState(false)
   const [currentScene, setCurrentScene] = useState(initialScene)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showQuiz, setShowQuiz] = useState(false)
@@ -67,6 +75,26 @@ const StoryPlayer = forwardRef(({
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
   const [audioError, setAudioError] = useState(false)
+  // Blocked autoplay is NOT a broken file. Mobile Chrome rejects play() with
+  // NotAllowedError whenever the page has had no user gesture yet - which is
+  // every single visit to a share link, because the visitor arrives straight on
+  // the player instead of tapping through the app first. Reporting that as
+  // "Audio unavailable" sent every prospective customer a story that looks
+  // broken on open. Autoplay policy gets its own, non-alarming state.
+  const [needsTapToPlay, setNeedsTapToPlay] = useState(false)
+  const handlePlayRejection = (err) => {
+    setIsPlaying(false)
+    if (err?.name === 'NotAllowedError') setNeedsTapToPlay(true)
+    else setAudioError(true)
+  }
+  // It shares the error banner's fixed slot, which sits over the header - fine
+  // for a fault the user has to act on, wrong for a hint. Times out like a toast;
+  // the play button it points at stays on screen regardless.
+  useEffect(() => {
+    if (!needsTapToPlay) return undefined
+    const t = setTimeout(() => setNeedsTapToPlay(false), 4500)
+    return () => clearTimeout(t)
+  }, [needsTapToPlay])
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadMessage, setDownloadMessage] = useState('')
   const [generatingMessage, setGeneratingMessage] = useState('')
@@ -125,6 +153,38 @@ const StoryPlayer = forwardRef(({
   const generationDone = totalScenes > 0 && completedSceneCount >= totalScenes
   const nextScene = scenes[currentScene + 1]
   const nextNotReady = !generationDone && !!nextScene && !nextScene.audio_url
+  // Single source of truth for "may the reader turn the page", because the
+  // arrow buttons are no longer the only way to do it - a swipe on the picture
+  // does the same thing, and a gesture that ignores a guard the button honours
+  // is how you end up on a scene with no narration recorded yet.
+  // The lesson notes: a summary screen that sits after the last scene and
+  // before the quiz. It is a virtual page, not a scene - there is no image, no
+  // narration and no row in `scenes` for it, only an index one past the end.
+  // Stories generated before key_points existed simply have none, and for them
+  // hasSummary is false and the player behaves exactly as it always did.
+  const keyPoints = Array.isArray(storyData?.key_points)
+    ? storyData.key_points.filter(p => typeof p === 'string' && p.trim())
+    : []
+  // Gated on the story being finished: reaching the summary means the reader is
+  // past the final scene, so offering it while scenes are still being written
+  // would let them skip pages that had not arrived yet.
+  const hasSummary = keyPoints.length > 0 && scenes.length >= actualTotal
+  const summaryIndex = actualTotal
+  const isSummary = hasSummary && currentScene === summaryIndex
+  // Highest index the reader may turn to, which is the summary when there is
+  // one. Both the Next button and the swipe gesture clamp to this.
+  const maxIndex = hasSummary ? summaryIndex : scenes.length - 1
+
+  // Written as an explicit "is there anywhere left to go" rather than folded
+  // into the expression below, because the two cases genuinely differ: with a
+  // summary the last stop is summaryIndex, without one it is the last scene,
+  // and the no-summary branch is kept byte-identical to the original condition
+  // so stories with no key_points behave exactly as they did before.
+  const atEnd = hasSummary
+    ? currentScene >= summaryIndex
+    : (currentScene >= scenes.length - 1 && scenes.length >= actualTotal)
+  const canGoNext = !nextNotReady && !atEnd
+  const canGoPrev = currentScene > 0
   // The 'ended' listener is registered per scene but runs much later, by which
   // point more assets have landed - so it must not trust its captured `scenes`.
   const scenesRef = useRef(scenes)
@@ -223,10 +283,7 @@ const StoryPlayer = forwardRef(({
         // canplaythrough - the "pause doesn't work" report.
         if (userPausedRef.current || autoPlayedRef.current) return
         autoPlayedRef.current = true
-        audioRef.current.play().catch(() => {
-          setAudioError(true)
-          setIsPlaying(false)
-        })
+        audioRef.current.play().catch(handlePlayRejection)
       }
     }
 
@@ -272,6 +329,15 @@ const StoryPlayer = forwardRef(({
     }
   }, [showQuiz])
 
+  // Escape closes the quiz. Free to add once a dismiss path exists, and it is
+  // what a keyboard user reaches for first in any dialog.
+  useEffect(() => {
+    if (!showQuiz) return
+    const onKey = (e) => { if (e.key === 'Escape') setShowQuiz(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showQuiz])
+
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768)
     window.addEventListener('resize', handleResize)
@@ -304,6 +370,7 @@ const StoryPlayer = forwardRef(({
 
     const handlePlay = () => {
       userPausedRef.current = false
+      setNeedsTapToPlay(false)
       setIsPlaying(true)
     }
     const handlePause = () => {
@@ -415,10 +482,7 @@ const StoryPlayer = forwardRef(({
       // Resume from wherever the element already is. It used to rewind to
       // savedTimeRef, which is written on pause but NOT on seek - so seeking
       // while paused and then pressing play silently threw the seek away.
-      audio.play().catch(() => {
-        setAudioError(true)
-        setIsPlaying(false)
-      })
+      audio.play().catch(handlePlayRejection)
     } else {
       savedTimeRef.current = audio.currentTime
       audio.pause()
@@ -511,10 +575,7 @@ const StoryPlayer = forwardRef(({
     lastUpdateRef.current = 0
     setProgress(0)
     setCurrentTime(0)
-    audio.play().catch(() => {
-      setAudioError(true)
-      setIsPlaying(false)
-    })
+    audio.play().catch(handlePlayRejection)
   }
 
   const cyclePlaybackRate = () => {
@@ -541,6 +602,80 @@ const StoryPlayer = forwardRef(({
     pointerTiltRef.current.x = 0
     pointerTiltRef.current.y = 0
   }
+
+  // Swipe the picture to turn the page - swipe left for the next scene, right
+  // for the previous one, the same direction convention as every photo gallery
+  // and story app a child has already used. The arrow buttons stay exactly as
+  // they are; this is an additional way in, not a replacement, so keyboard and
+  // screen-reader users lose nothing.
+  const swipeRef = useRef(null)
+
+  const handleSwipeStart = (e) => {
+    // Only a primary drag counts. A right-click drag or a second finger landing
+    // mid-pinch must not turn a page.
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    swipeRef.current = { x: e.clientX, y: e.clientY, id: e.pointerId }
+  }
+
+  const handleSwipeEnd = (e) => {
+    const start = swipeRef.current
+    swipeRef.current = null
+    if (!start || start.id !== e.pointerId) return
+
+    const dx = e.clientX - start.x
+    const dy = e.clientY - start.y
+    // 44px so a tap that wobbles is still a tap (the scene dots live inside this
+    // container and have to stay tappable), and |dx| > 1.5*|dy| so a mostly
+    // vertical drag - the reader scrolling, or dragging past the picture - never
+    // reads as a page turn. Both conditions have to hold; distance alone would
+    // make a long diagonal flick ambiguous.
+    if (Math.abs(dx) < 44 || Math.abs(dx) < Math.abs(dy) * 1.5) return
+    // Deliberately NO time limit. A 700ms cap was tried and it made the gesture
+    // fail in portrait while working in landscape: portrait renders a much
+    // larger 3D canvas, the main thread is slower, and the identical finger
+    // travel took 1191ms instead of 449ms. Speed is the wrong signal - it
+    // measures the device, not the intent. Distance and direction are enough:
+    // a finger resting on the artwork doesn't travel 44px sideways however long
+    // it stays there.
+
+    if (dx < 0) {
+      if (canGoNext) goToScene(currentScene + 1)
+    } else if (canGoPrev) {
+      goToScene(currentScene - 1)
+    }
+  }
+
+  // The gesture is STARTED on the artwork but FINISHED on the window, and that
+  // split is the whole point.
+  //
+  // A touch gesture gets implicit pointer capture, which is what delivers
+  // pointerup back to the element the finger began on even after the finger has
+  // travelled off it (a swipe on a 205px-wide picture routinely ends 30px past
+  // the screen edge). But the capture belongs to the exact ELEMENT that received
+  // pointerdown - here, the <canvas> the 3D layer owns - and StoryScene3DLayer
+  // re-creates that canvas whenever the scene's image reloads. Destroying the
+  // element destroys the capture, and the pointerup then retargets to <html>,
+  // where nothing is listening. Measured on the deployed build: identical
+  // swipes, three runs - pointerup hit CANVAS once (page turned) and HTML twice
+  // (silently ignored). Any swipe that overlapped a 3D re-render was lost.
+  //
+  // Listening on window removes the dependency on any element surviving the
+  // gesture. It does not widen what counts as a swipe: swipeRef is only ever set
+  // by a pointerdown on an actual swipe surface, so a pointerup anywhere else
+  // still finds a null start and returns immediately.
+  const swipeEndRef = useRef(null)
+  swipeEndRef.current = handleSwipeEnd
+
+  useEffect(() => {
+    const onUp = (e) => swipeEndRef.current?.(e)
+    const onCancel = () => { swipeRef.current = null }
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+    return () => {
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+    }
+  }, [])
 
   const handleOfflineDownload = async () => {
     const exportId = savedStoryId || currentJobId
@@ -601,6 +736,11 @@ const StoryPlayer = forwardRef(({
 
       {/* Error banners */}
       <AnimatePresence>
+        {needsTapToPlay && !audioError && (
+          <motion.div className="player-error player-hint" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+            <span><Volume2 size={16} aria-hidden="true" /> Tap play to start the story</span>
+          </motion.div>
+        )}
         {(audioError || imageError) && (
           <motion.div className="player-error" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
             {audioError && <span><Volume2 size={16} aria-hidden="true" /> Audio unavailable <button className="err-btn" onClick={() => { setAudioError(false); savedTimeRef.current = 0 }}>Retry</button></span>}
@@ -611,11 +751,14 @@ const StoryPlayer = forwardRef(({
 
       {/* Header */}
       <header className="player-header">
-        <button className="icon-btn" onClick={onHome} aria-label="Back to home"><Home size={18} /></button>
+        {/* No "home" button here. The app's own nav bar sits directly above this
+            one and already carries Home, so a second one duplicated a control
+            the user could see at the same time - and in share mode there was
+            never a home to offer a visitor in the first place. */}
         <div className="header-title-area">
           <h1 className="story-title">{storyData?.title || 'Untitled Story'}</h1>
           <span className="scene-badge">
-            Scene {currentScene + 1} of {actualTotal}
+            {isSummary ? 'Lesson Notes' : `Scene ${currentScene + 1} of ${actualTotal}`}
             {!allScenesReady && (
               <span className="scenes-ready-chip" aria-live="polite">
                 <Loader2 size={11} className="scenes-ready-spinner" aria-hidden="true" />
@@ -630,16 +773,73 @@ const StoryPlayer = forwardRef(({
             one gave a dead end ("navigation doesn't work while playing"). All
             four entries already exist elsewhere: Save and Download in the app
             drawer, Quiz as the button below, Restart as New Story. */}
+        {/* Sharing needs a saved story to point at, and an owner to authorise
+            the call - so it appears only once the story has been saved, and
+            never on the public view. */}
+        {!shareMode && savedStoryId && (
+          <button
+            className="icon-btn"
+            onClick={() => setShowShareModal(true)}
+            aria-label="Share this story"
+          >
+            <Share2 size={18} />
+          </button>
+        )}
         <button className="icon-btn" onClick={handleReplay} aria-label="Replay from the beginning"><RotateCw size={18} /></button>
       </header>
 
       {/* Main content */}
-      <main className="player-content">
+      <main className={`player-content ${isSummary ? 'is-summary' : ''}`}>
+        {isSummary ? (
+          /* Lesson notes. Deliberately NOT built out of the scene layout: there
+             is no picture, no narration track and no playback here, so reusing
+             the scene shell would mean an empty image frame and a dead transport
+             bar. The swipe handlers ARE reused, so swiping right returns to the
+             final scene exactly like turning back a page. */
+          <motion.div
+            className="summary-card"
+            initial={{ opacity: 0, y: 18 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.45, ease: 'easeOut' }}
+            onPointerDown={handleSwipeStart}
+          >
+            <div className="summary-head">
+              <BookOpen size={20} aria-hidden="true" />
+              <h2>What we learned</h2>
+            </div>
+            <p className="summary-sub">Keep these in mind before the quiz.</p>
+            <ul className="summary-points">
+              {keyPoints.map((point, i) => (
+                <motion.li
+                  key={i}
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.35, ease: 'easeOut', delay: 0.1 + i * 0.08 }}
+                >
+                  <span className="summary-bullet">{i + 1}</span>
+                  <span className="summary-text">{point}</span>
+                </motion.li>
+              ))}
+            </ul>
+            <div className="summary-actions">
+              <button className="summary-back" onClick={() => goToScene(summaryIndex - 1)}>
+                <SkipBack size={16} aria-hidden="true" /> Back to the story
+              </button>
+              <button className="quiz-btn" onClick={() => { setIsPlaying(false); setShowQuiz(true) }}>
+                <BookOpen size={18} aria-hidden="true" /> Take Quiz
+              </button>
+            </div>
+          </motion.div>
+        ) : (
+        <>
         {/* Scene image */}
         <div
           className="scene-image-container"
           onPointerMove={handlePointerMove}
           onPointerLeave={handlePointerLeave}
+          /* Only the START is bound here - the end is resolved on window, see
+             the comment on swipeEndRef. */
+          onPointerDown={handleSwipeStart}
         >
           {show3D && (
             <Suspense fallback={null}>
@@ -710,6 +910,13 @@ const StoryPlayer = forwardRef(({
           </div>
         </div>
 
+        {/* Everything that is not the picture, grouped so the side-by-side
+            layout can centre it as ONE block. Without this wrapper the four
+            children are independent flex/grid items and the narration ends up
+            centred inside a full-height track, which opens a large gap between
+            the text and the controls. `display: contents` in the stacked
+            layout keeps this element completely invisible to layout there. */}
+        <div className="player-side">
         {/* Narration text */}
         <div className="narration-area">
           {scene?.text ? (
@@ -746,7 +953,7 @@ const StoryPlayer = forwardRef(({
 
         {/* Controls */}
         <div className="controls">
-          <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={currentScene === 0} aria-label="Previous scene">
+          <button className="ctrl-btn" onClick={() => goToScene(Math.max(0, currentScene - 1))} disabled={!canGoPrev} aria-label="Previous scene">
             <SkipBack size={22} />
           </button>
           <button
@@ -761,8 +968,8 @@ const StoryPlayer = forwardRef(({
           </button>
           <button
             className={`ctrl-btn ${nextNotReady ? 'is-waiting' : ''}`}
-            onClick={() => goToScene(Math.min(scenes.length - 1, currentScene + 1))}
-            disabled={(currentScene >= scenes.length - 1 && scenes.length >= actualTotal) || nextNotReady}
+            onClick={() => goToScene(Math.min(maxIndex, currentScene + 1))}
+            disabled={!canGoNext}
             aria-label={nextNotReady ? 'The next page is still being recorded' : 'Next scene'}
             title={nextNotReady ? 'The next page is still being recorded' : undefined}
           >
@@ -773,24 +980,69 @@ const StoryPlayer = forwardRef(({
           </button>
         </div>
 
-        {/* Quiz button */}
+        {/* Quiz button. Still here for stories with no lesson notes - and for
+            readers who want the quiz without walking to the last page. */}
         <button className="quiz-btn" onClick={() => { setIsPlaying(false); setShowQuiz(true) }}>
           <BookOpen size={18} /> Take Quiz
         </button>
+        </div>
+        </>
+        )}
       </main>
 
-      {/* Quiz modal */}
+      {/* Quiz modal.
+
+          Rendered through a portal into document.body rather than in place.
+          .app-main sets `position: relative; z-index: 1`, which makes it a
+          stacking context, and a child can never escape its parent's context
+          however large its own z-index is - so this overlay's z-index: 500 was
+          being compared as "1" against the sticky header (100) and the fixed
+          hamburger button (1000), both of which therefore painted on top of the
+          quiz and covered its close button. Raising 500 higher would have
+          changed nothing; leaving the context is the only fix. */}
+      {createPortal(
       <AnimatePresence>
         {showQuiz && (
-          <motion.div className="quiz-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          <motion.div
+            className="quiz-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            /* Tapping the backdrop dismisses, which is what every modal a child
+               has used already does. The target check matters: without it, any
+               click that bubbles up from inside the quiz card - picking an
+               answer - would close the quiz too. */
+            onClick={(e) => { if (e.target === e.currentTarget) setShowQuiz(false) }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Quiz"
+          >
             <Quiz
               questions={storyData?.quiz || []}
-              storyId={savedStoryId || currentJobId}
+              /* No storyId in share mode: Quiz uses it to POST completion and
+                 to keep per-story progress in localStorage, and an anonymous
+                 visitor has no session for either. Passing null skips both
+                 cleanly instead of firing a call that can only 401. */
+              storyId={shareMode ? null : (savedStoryId || currentJobId)}
               onClose={() => setShowQuiz(false)}
               onBackToStory={() => setShowQuiz(false)}
-              onComplete={() => { setShowQuiz(false); onRestart?.() }}
+              onComplete={() => { setShowQuiz(false); if (!shareMode) onRestart?.() }}
             />
           </motion.div>
+        )}
+      </AnimatePresence>,
+      document.body
+      )}
+
+      <AnimatePresence>
+        {showShareModal && savedStoryId && (
+          <Suspense fallback={null}>
+            <ShareLinkModal
+              storyId={savedStoryId}
+              storyTitle={storyData?.title}
+              onClose={() => setShowShareModal(false)}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
     </div>

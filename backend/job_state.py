@@ -92,6 +92,12 @@ class JobStateManager:
                     conn.execute("ALTER TABLE stories ADD COLUMN username TEXT")
                 if 'quiz' not in columns:
                     conn.execute("ALTER TABLE stories ADD COLUMN quiz TEXT")
+                if 'key_points' not in columns:
+                    # JSON array of short revision notes shown on the summary
+                    # screen between the last scene and the quiz. Nullable on
+                    # purpose: every story generated before this column existed
+                    # has none, and the player simply skips the screen for them.
+                    conn.execute("ALTER TABLE stories ADD COLUMN key_points TEXT")
                 if 'error' not in columns:
                     # mark_story_failed() writes here. Before this column existed
                     # the error message it was given was silently discarded (the
@@ -114,6 +120,31 @@ class JobStateManager:
                     # status, and inventing one there would break every existing
                     # branch that expects initializing/processing/completed/failed.
                     conn.execute("ALTER TABLE stories ADD COLUMN attempt INTEGER DEFAULT 1")
+                # Quality-pipeline scores (see StoryService.process_file_to_story
+                # and _score_story) - admin-only visibility, never exposed on any
+                # user-facing route. missing_items/unsupported_claims/
+                # uncited_questions are JSON-encoded TEXT, same pattern as the
+                # existing `quiz` column above.
+                if 'coverage_score' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN coverage_score REAL")
+                if 'faithfulness_score' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN faithfulness_score REAL")
+                if 'hallucination_score' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN hallucination_score REAL")
+                if 'citation_accuracy_score' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN citation_accuracy_score REAL")
+                if 'overall_score' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN overall_score REAL")
+                if 'gates_passed' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN gates_passed INTEGER")
+                if 'quality_attempt_count' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN quality_attempt_count INTEGER")
+                if 'missing_items' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN missing_items TEXT")
+                if 'unsupported_claims' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN unsupported_claims TEXT")
+                if 'uncited_questions' not in columns:
+                    conn.execute("ALTER TABLE stories ADD COLUMN uncited_questions TEXT")
             except Exception as e:
                 # If migration fails, log it but continue (table might be new)
                 print(f"Migration info: {e}")
@@ -190,8 +221,23 @@ class JobStateManager:
                 VALUES (?, 'initializing', 'Initializing story...', ?, 0, 0, ?, ?, ?, ?)
             """, (story_id, grade_level, file_hash, user_id, username, quiz_size))
 
-    def update_story_metadata(self, story_id: str, title: str, total_scenes: int, quiz: Optional[List[Dict]] = None):
-        """Update story metadata after initial AI processing."""
+    def update_story_metadata(
+        self,
+        story_id: str,
+        title: str,
+        total_scenes: int,
+        quiz: Optional[List[Dict]] = None,
+        quality_scores: Optional[Dict] = None,
+        key_points: Optional[List[str]] = None,
+    ):
+        """Update story metadata after initial AI processing.
+
+        quality_scores is the dict StoryService.process_file_to_story returns
+        as its second value (never nested inside the story JSON itself - see
+        that method's docstring for why). Optional and written in a separate
+        UPDATE so a None here (scoring failed soft, or an older caller) never
+        blocks the title/scenes/quiz update it was previously coupled to.
+        """
         with self._get_conn() as conn:
             if quiz is not None:
                 quiz_json = json.dumps(quiz)
@@ -206,6 +252,67 @@ class JobStateManager:
                     SET status = 'processing', title = ?, total_scenes = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE story_id = ?
                 """, (title, total_scenes, story_id))
+
+            # Separate UPDATE for the same reason quality_scores gets one: the
+            # model can return a story with no usable key_points, and that must
+            # not stop the title/scenes/quiz write it would otherwise share.
+            if key_points:
+                conn.execute("""
+                    UPDATE stories SET key_points = ? WHERE story_id = ?
+                """, (json.dumps(key_points), story_id))
+
+            if quality_scores is not None:
+                conn.execute("""
+                    UPDATE stories
+                    SET coverage_score = ?, faithfulness_score = ?, hallucination_score = ?,
+                        citation_accuracy_score = ?, overall_score = ?, gates_passed = ?,
+                        quality_attempt_count = ?, missing_items = ?, unsupported_claims = ?,
+                        uncited_questions = ?
+                    WHERE story_id = ?
+                """, (
+                    quality_scores.get("coverage"),
+                    quality_scores.get("faithfulness"),
+                    quality_scores.get("hallucination"),
+                    quality_scores.get("citation_accuracy"),
+                    quality_scores.get("overall"),
+                    quality_scores.get("gates_passed"),
+                    quality_scores.get("attempt"),
+                    json.dumps(quality_scores.get("missing_items") or []),
+                    json.dumps(quality_scores.get("unsupported_claims") or []),
+                    json.dumps(quality_scores.get("uncited_questions") or []),
+                    story_id,
+                ))
+
+    def get_quality_scores(self, story_ids: List[str]) -> Dict[str, Dict]:
+        """Batch-fetch quality scores for the admin panel: story_id -> scores
+        dict, or absent when a story predates this feature or scoring never
+        ran. One query for the whole admin list, not one per row."""
+        if not story_ids:
+            return {}
+        with self._get_conn() as conn:
+            placeholders = ",".join("?" for _ in story_ids)
+            cursor = conn.execute(f"""
+                SELECT story_id, coverage_score, faithfulness_score, hallucination_score,
+                       citation_accuracy_score, overall_score, gates_passed,
+                       quality_attempt_count, missing_items, unsupported_claims, uncited_questions
+                FROM stories
+                WHERE story_id IN ({placeholders}) AND overall_score IS NOT NULL
+            """, story_ids)
+            result = {}
+            for row in cursor.fetchall():
+                result[row["story_id"]] = {
+                    "coverage": row["coverage_score"],
+                    "faithfulness": row["faithfulness_score"],
+                    "hallucination": row["hallucination_score"],
+                    "citation_accuracy": row["citation_accuracy_score"],
+                    "overall": row["overall_score"],
+                    "gates_passed": row["gates_passed"],
+                    "attempt": row["quality_attempt_count"],
+                    "missing_items": json.loads(row["missing_items"]) if row["missing_items"] else [],
+                    "unsupported_claims": json.loads(row["unsupported_claims"]) if row["unsupported_claims"] else [],
+                    "uncited_questions": json.loads(row["uncited_questions"]) if row["uncited_questions"] else [],
+                }
+            return result
     
     def create_scene(self, story_id: str, scene_index: int, text: str, character_prompt: Optional[str] = None):
         """Create a new scene for tracking."""

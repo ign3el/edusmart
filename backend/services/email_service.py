@@ -164,10 +164,10 @@ def send_verification_email(email: str, token: str) -> bool:
     """Send email verification link"""
     verification_url = f"{FRONTEND_URL}/verify-email?token={token}"
     
-    subject = "EduSmart - Verify Your Email Address"
-    
+    subject = "LearnTale - Verify Your Email Address"
+
     text_content = f"""
-Welcome to EduSmart!
+Welcome to LearnTale!
 
 Please verify your email address by clicking the link below:
 
@@ -178,9 +178,9 @@ This link will expire in 24 hours.
 If you didn't create an account, please ignore this email.
 
 Best regards,
-The EduSmart Team
+The LearnTale Team
 """
-    
+
     html_content = f"""
 <!DOCTYPE html>
 <html>
@@ -197,11 +197,11 @@ The EduSmart Team
 <body>
     <div class="container">
         <div class="header">
-            <h1>Welcome to EduSmart! 🎓</h1>
+            <h1>Welcome to LearnTale! 🎓</h1>
         </div>
         <div class="content">
             <p>Hi there!</p>
-            <p>Thank you for signing up for EduSmart. We're excited to have you on board!</p>
+            <p>Thank you for signing up for LearnTale. We're excited to have you on board!</p>
             <p>Please verify your email address by clicking the button below:</p>
             <p style="text-align: center;">
                 <a href="{verification_url}" class="button">Verify Email Address</a>
@@ -214,7 +214,7 @@ The EduSmart Team
             <p>If you didn't create an account, please ignore this email.</p>
         </div>
         <div class="footer">
-            <p>&copy; 2026 EduSmart. All rights reserved.</p>
+            <p>&copy; 2026 LearnTale. All rights reserved.</p>
         </div>
     </div>
 </body>
@@ -227,12 +227,12 @@ def send_password_reset_email(email: str, token: str) -> bool:
     """Send password reset link"""
     reset_url = f"{FRONTEND_URL}/reset-password?token={token}"
     
-    subject = "EduSmart - Password Reset Request"
-    
+    subject = "LearnTale - Password Reset Request"
+
     text_content = f"""
 Password Reset Request
 
-We received a request to reset your password for your EduSmart account.
+We received a request to reset your password for your LearnTale account.
 
 Click the link below to reset your password:
 
@@ -243,7 +243,7 @@ This link will expire in 1 hour.
 If you didn't request a password reset, please ignore this email or contact support if you have concerns.
 
 Best regards,
-The EduSmart Team
+The LearnTale Team
 """
     
     html_content = f"""
@@ -267,7 +267,7 @@ The EduSmart Team
         </div>
         <div class="content">
             <p>Hi there!</p>
-            <p>We received a request to reset the password for your EduSmart account.</p>
+            <p>We received a request to reset the password for your LearnTale account.</p>
             <p>Click the button below to reset your password:</p>
             <p style="text-align: center;">
                 <a href="{reset_url}" class="button">Reset Password</a>
@@ -282,7 +282,7 @@ The EduSmart Team
             </div>
         </div>
         <div class="footer">
-            <p>&copy; 2026 EduSmart. All rights reserved.</p>
+            <p>&copy; 2026 LearnTale. All rights reserved.</p>
         </div>
     </div>
 </body>

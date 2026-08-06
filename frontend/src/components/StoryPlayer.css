@@ -81,6 +81,14 @@
   gap: 0.5rem;
 }
 
+/* Blocked autoplay is not a fault - it is the browser waiting for a tap, which
+   happens on every share-link visit. Same slot, same motion, none of the red. */
+.player-error.player-hint {
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 34%, transparent);
+  color: var(--fg-primary);
+}
+
 .err-btn {
   background: rgba(239, 68, 68, 0.2);
   border: 1px solid rgba(239, 68, 68, 0.4);
@@ -234,6 +242,14 @@
   overflow: hidden;
 }
 
+/* The side column is a grouping element for the side-by-side layout only.
+   display:contents makes it vanish from the box tree everywhere else, so the
+   stacked layout behaves exactly as if its children were direct children of
+   .player-content. */
+.player-side {
+  display: contents;
+}
+
 /* Everything below the narration is fixed furniture - it must never be what
    gets pushed off-screen. */
 .audio-row,
@@ -243,30 +259,41 @@
 }
 
 /* Scene image — the 3D canvas (StorySceneImagePlane) renders inside this, an
-   absolute layer at z-index 0; skeleton/fallback/dots sit above it.
-   Scene images are square (see StorySceneImagePlane's cover-fit comment) - on
-   wide/laptop viewports a plain height cap (45vh, up to 400px) let this box
-   stretch to ~2:1 against .player-content's 800px max-width, so cover-fit had
-   to crop away roughly half the image vertically to fill the frame. Capping
-   width + aspect-ratio keeps the box close to the image's own aspect ratio at
-   any viewport size, so the crop stays mild instead of cutting off subjects. */
+   absolute layer at z-index 0; skeleton/fallback/dots sit above it. */
 .scene-image-container {
   position: relative;
-  width: 100%;
-  max-width: 640px;
-  aspect-ratio: 4 / 3;
+  /* SQUARE, because the scene images are square - every generator path writes
+     512x512 (verified on disk across stories). A 4:3 box for a 1:1 picture has
+     only two outcomes: crop the picture, or pillarbox it. This used to be 4:3
+     with a separate max-height, and max-height won on a phone, so the box was
+     never even the ratio it declared. */
+  /* The image is the ONLY element here that can afford to be elastic, so it
+     is the one that flexes: it soaks up whatever height the text and controls
+     don't need (no dead gaps, picture as large as the screen allows), and it
+     gives height back when the narration is long. Sizing by dvh caps was the
+     previous approach and it could not do either - a fixed cap leaves slack as
+     empty space on short text and refuses to yield on long text.
+     height comes from flex, width follows from aspect-ratio. */
+  flex: 1 1 auto;
+  height: auto;
+  width: auto;
+  min-height: 0;
+  max-height: min(56dvh, 600px);
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
   margin: 0 auto;
-  /* Shrinkable, and capped against the viewport rather than a flat pixel
-     number - the image is the one element that can afford to give ground when
-     the screen is short. */
-  flex: 0 1 auto;
-  min-height: 140px;
-  max-height: min(45dvh, 480px);
+  min-width: 140px;
   border-radius: var(--radius-lg);
   overflow: hidden;
   background: var(--bg-panel-solid);
   border: 1px solid var(--edge);
   box-shadow: var(--shadow-soft);
+  /* Swiping the picture turns the page (handleSwipeStart/End). Without this the
+     browser claims horizontal drags for its own panning and fires pointercancel
+     partway through, so the gesture would work with a mouse and silently fail
+     on the phone it was built for. pan-y, not none: vertical scrolling still
+     belongs to the browser. */
+  touch-action: pan-y;
 }
 
 .scene-image {
@@ -321,14 +348,16 @@
 /* Scene dots overlay */
 .scene-dots-overlay {
   position: absolute;
-  bottom: 0.75rem;
+  bottom: 0.4rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 2;
   display: flex;
-  gap: 0.6rem;
-  padding: 0.45rem 0.85rem;
-  background: rgba(21, 13, 51, 0.55);
+  gap: 0.45rem;
+  /* Slimmer and more transparent: this sits ON TOP of the artwork, and at the
+     old size it hid a visible band of every scene. */
+  padding: 0.25rem 0.55rem;
+  background: rgba(21, 13, 51, 0.32);
   backdrop-filter: var(--blur);
   border-radius: 999px;
   border: 1px solid var(--edge);
@@ -336,8 +365,8 @@
 
 .dot {
   position: relative;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   border: 1.5px solid rgba(255, 255, 255, 0.2);
   background: transparent;
@@ -387,8 +416,16 @@
    scrolls inside this box instead of scrolling the controls off the screen. */
 .narration-area {
   padding: 1rem 0.5rem;
-  flex: 1 1 auto;
-  min-height: 2.5rem;
+  /* flex:1 1 auto (fill-all-remaining-space) was the previous fix, and it
+     overcorrected: it made narration claim 100% of leftover height even for
+     a 4-sentence paragraph, rendering as a large dead-space gap under the
+     text and starving the image of room it wasn't using anyway. flex:0 1
+     auto sizes the box to its own content instead - short text gets a short
+     box, long text grows up to max-height and then scrolls internally
+     (the original bug this exists to prevent). */
+  flex: 0 1 auto;
+  min-height: 6rem;
+  max-height: 34dvh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -563,7 +600,13 @@
 .quiz-overlay {
   position: fixed;
   inset: 0;
-  z-index: 500;
+  /* Above the fixed hamburger button (.mobile-menu-btn, z-index 1000) and the
+     sticky app header (100), both of which used to cover the quiz's own close
+     button. This number only means anything because the overlay is portaled to
+     document.body - inside .app-main's stacking context it was capped no matter
+     what was written here. Still below the nav drawer (9998/9999) so opening the
+     menu over the quiz behaves normally. */
+  z-index: 1200;
   background: rgba(21, 13, 51, 0.95);
   backdrop-filter: var(--blur);
   display: flex;
@@ -585,17 +628,21 @@
      as "the button does nothing", which is exactly the complaint. */
   .icon-btn { width: 44px; height: 44px; }
   .story-title { font-size: 0.85rem; }
+  /* Every rem trimmed here goes straight into the picture: the image is the
+     only flexible box in the column, so tighter padding/gaps around the text
+     make it grow rather than opening a gap. Worth ~20px of extra artwork on a
+     424x811 phone without pushing a normal scene's narration into scrolling. */
   .player-content {
-    padding: 0.6rem;
-    gap: 0.6rem;
+    padding: 0.5rem;
+    gap: 0.45rem;
   }
   .scene-image-container {
-    min-height: 140px;
-    max-height: 34dvh;
     border-radius: var(--radius-md);
+    max-height: min(64dvh, 600px);
   }
   .narration-area {
-    padding: 0.6rem 0.4rem;
+    padding: 0.35rem;
+    max-height: 26dvh;
   }
   .narration-text {
     font-size: 0.88rem;
@@ -611,14 +658,159 @@
 
 /* Small phones */
 @media (max-width: 380px) {
-  .scene-image-container {
-    max-height: 30dvh;
-    min-height: 120px;
-  }
   .narration-text {
     font-size: 0.82rem;
     line-height: 1.6;
   }
+}
+
+/* ---- Tablets and large screens, stacked (portrait) ----------------------
+   Keyed on HEIGHT as well as width on purpose: an iPad Mini in portrait is
+   744px wide, so a width-only breakpoint drops it into the phone branch and
+   it keeps phone-sized type on a 1043px-tall screen. */
+@media (min-width: 700px) and (min-height: 900px) {
+  .narration-text {
+    font-size: 1.1rem;
+    line-height: 1.75;
+  }
+}
+
+@media (min-width: 1000px) and (min-height: 1000px) {
+  .player-content { max-width: 960px; }
+  .scene-image-container { max-height: min(56dvh, 720px); }
+  .narration-text { font-size: 1.25rem; }
+}
+
+/* ---- Side-by-side: landscape-ish and at least 600px wide -----------------
+   Laptops, desktops and tablets held in landscape are wide and SHORT. Stacked,
+   they starve the picture vertically (a 1440x760 laptop got a 250px image)
+   while wasting most of the screen horizontally.
+   600px, not 900px: a phone turned sideways is ~875x311 CSS, which fell just
+   under the old 900px floor and got the stacked layout in 311px of height -
+   the image collapsed to its 140px floor and Take Quiz sat 312px below the
+   fold, unreachable because .story-player is overflow:hidden. Reported
+   2026-08-06. The min-aspect-ratio guard still keeps every portrait phone and
+   portrait tablet on the stacked layout. */
+@media (min-width: 600px) and (min-aspect-ratio: 1/1) {
+  .player-content {
+    flex-direction: row;
+    align-items: center;
+    gap: 2rem;
+    max-width: 1400px;
+  }
+
+  .scene-image-container {
+    flex: 0 0 auto;
+    /* Explicit height here, not flex-fill: in a row the flex axis is
+       horizontal, so the picture's size has to be stated against the viewport.
+       max-width keeps it from crowding out the text column on a very wide,
+       very short window. */
+    height: min(78dvh, 780px);
+    max-height: 100%;
+    width: auto;
+    max-width: 55%;
+    align-self: center;
+  }
+
+  .player-side {
+    display: flex;
+    flex-direction: column;
+    /* 'safe' matters: with plain centring, a column taller than the space
+       available is pushed up past the scroll origin and its first lines
+       become unreachable. safe falls back to top-aligned instead. */
+    justify-content: safe center;
+    flex: 1 1 auto;
+    min-width: 320px;
+    min-height: 0;
+    gap: 0.9rem;
+  }
+
+  .narration-area {
+    flex: 0 1 auto;
+    max-height: 100%;
+  }
+
+  .narration-text {
+    font-size: 1.15rem;
+    line-height: 1.75;
+  }
+}
+
+/* ---- Short landscape: a phone on its side --------------------------------
+   Wide but only ~300px tall, which is less height than the desktop-sized
+   controls, the 6rem narration floor and the quiz button need on their own.
+   Two things make this fit deterministically instead of by tuning numbers:
+   align-items:stretch, so the text column is bounded by the row's height
+   rather than being centred at its own content height and spilling out of it;
+   and flex:1 1 0 on the narration, so the text is the one box that absorbs
+   whatever is left and scrolls, while the audio row, the controls and the
+   quiz button keep their size. Everything below just buys the text more of
+   that remainder. */
+@media (min-aspect-ratio: 1/1) and (max-height: 520px) {
+  .player-header { padding: 0.2rem 0.5rem; gap: 0.5rem; }
+  .story-title { font-size: 0.8rem; }
+  .scene-badge { font-size: 0.68rem; }
+  .icon-btn { width: 34px; height: 34px; }
+
+  .player-content { padding: 0.4rem 0.6rem; gap: 0.85rem; align-items: stretch; }
+
+  .scene-image-container {
+    /* Height from the stretched row, not from dvh - on a 311px-tall screen
+       78dvh is bigger than the space that actually exists. */
+    height: auto;
+    align-self: stretch;
+    max-height: 100%;
+    max-width: 42%;
+  }
+
+  /* Controls and the quiz button share the last row instead of stacking, which
+     hands a whole button-row of height back to the text - the difference
+     between one visible line of narration and the whole scene. Grid, not flex,
+     because these four are fixed siblings in the DOM and grid can re-place them
+     by area with no wrapper: text across the top, progress bar under it, then
+     controls and quiz side by side. */
+  .player-side {
+    min-width: 220px;
+    min-height: 0;
+    display: grid;
+    /* Two EQUAL tracks for the last row. `auto minmax(140px, 1fr)` sized the
+       controls to their content and gave every remaining pixel to the quiz
+       button, so a ~170px cluster sat next to a stretched bar - same row, wildly
+       different weight. Equal halves with each cell's content centred makes them
+       read as a matched pair. Rows 1 and 2 span 1/-1, so they don't care. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    /* minmax(0, 1fr), never a bare 1fr: a bare 1fr floors at the row's
+       min-content, so the text could still push the row taller than the box. */
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    gap: 0.3rem 0.7rem;
+    align-content: stretch;
+  }
+  .narration-area { padding: 0.2rem 0.3rem; grid-column: 1 / -1; grid-row: 1; min-height: 0; max-height: none; overflow-y: auto; }
+  .audio-row { grid-column: 1 / -1; grid-row: 2; }
+  .controls  { grid-column: 1; grid-row: 3; justify-content: center; }
+  /* Capped and centred rather than filling its half: at 875px wide the half is
+     ~340px, and a 340px CTA next to a 170px control cluster is the imbalance
+     this block exists to remove. 200px is close enough to the cluster's own
+     width for the two to read as siblings. */
+  .quiz-btn  {
+    grid-column: 2;
+    grid-row: 3;
+    align-self: center;
+    justify-self: center;
+    width: 100%;
+    max-width: 200px;
+    /* Matches .play-btn below, so the two blocks are the same height too. */
+    min-height: 44px;
+  }
+
+  .narration-text { font-size: 0.88rem; line-height: 1.5; }
+  .audio-row { padding: 0; }
+  .controls { gap: 0.5rem; }
+  .play-btn { width: 44px; height: 44px; }
+  .play-btn-glow { inset: -6px; filter: blur(6px); }
+  .ctrl-btn { width: 34px; height: 34px; }
+  .speed-btn { width: auto; min-width: 34px; height: 34px; padding: 0 0.5rem; }
+  .quiz-btn { padding: 0.45rem; font-size: 0.85rem; }
 }
 
 
@@ -653,4 +845,171 @@
   .scene-image-container {
     perspective: none;
   }
+}
+
+/* ================================
+   LESSON NOTES (summary screen)
+   The virtual page between the last scene and the quiz. It replaces the whole
+   scene body rather than sitting inside it - there is no picture and no
+   narration here, so the image frame and transport row are absent, not empty.
+================================ */
+
+/* Beats the `flex-direction: row` set on .player-content inside the
+   side-by-side and short-landscape media queries on specificity alone (0,2,0
+   vs 0,1,0), so this one rule covers every breakpoint instead of needing a
+   copy inside each. There is only one child; a two-column layout has nothing
+   to put in the second column. */
+.player-content.is-summary {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+}
+
+.summary-card {
+  width: 100%;
+  max-width: 620px;
+  /* Bounded and self-scrolling for the same reason .quiz-container is: six
+     notes at a large accessibility font size on a 311px-tall landscape phone
+     overflow, and the parent centres with no scroll container of its own. */
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: clamp(1rem, 3.5vw, 1.6rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(168, 85, 247, 0.16), transparent 55%),
+    radial-gradient(circle at 100% 100%, rgba(34, 211, 238, 0.13), transparent 55%),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: var(--shadow-soft);
+  /* Swiping this card turns back to the last scene, same as on the picture.
+     Without pan-y the browser claims the horizontal drag and cancels the
+     gesture partway through - see .scene-image-container. */
+  touch-action: pan-y;
+}
+
+.summary-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink-1);
+}
+
+.summary-head h2 {
+  margin: 0;
+  font-size: clamp(1.15rem, 3.4vw, 1.5rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #f8fafc 0%, #a78bfa 55%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.summary-sub {
+  margin: 0.3rem 0 0.9rem;
+  color: var(--ink-2);
+  font-size: 0.9rem;
+}
+
+.summary-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.summary-points li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: var(--radius-md, 12px);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge);
+}
+
+.summary-bullet {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(135deg, #8b5cf6, #22d3ee);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35);
+}
+
+.summary-text {
+  color: var(--ink-1);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+/* The quiz button is the primary action, so it takes the room; "back" is a
+   quiet escape hatch next to it rather than a matching-weight twin. */
+.summary-actions .quiz-btn {
+  flex: 1;
+  margin: 0;
+}
+
+.summary-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  /* 44px tall to stay a comfortable tap target on a phone. */
+  min-height: 44px;
+  padding: 0 0.85rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--edge);
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.summary-back:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--ink-1);
+}
+
+@media (max-width: 420px) {
+  /* Side by side these two wrap awkwardly under ~420px: "Back to the story"
+     alone is most of the row. Stacking keeps the quiz CTA full width. */
+  .summary-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+  .summary-back { justify-content: center; }
+}
+
+/* Short landscape: the card is the only thing on screen, so it may use the
+   full height rather than the 620px reading measure meant for portrait. */
+@media (min-aspect-ratio: 1/1) and (max-height: 520px) {
+  .summary-card {
+    max-width: 760px;
+    padding: 0.8rem 1rem;
+  }
+  .summary-sub { margin-bottom: 0.6rem; }
+  .summary-points { gap: 0.4rem; }
+  .summary-points li { padding: 0.5rem 0.6rem; }
+  .summary-text { font-size: 0.88rem; line-height: 1.45; }
+  .summary-actions { margin-top: 0.7rem; }
 }

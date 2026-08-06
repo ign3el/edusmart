@@ -32,9 +32,16 @@ export const buildFullUrl = (url) => {
     return `${window.location.origin}${withAuthToken(url)}`
   }
 
-  // For other relative paths, prepend the API domain from environment or current origin
-  const apiDomain = import.meta.env.VITE_API_URL || window.location.origin
-  return `${apiDomain}${withAuthToken(url)}`
+  // For other relative paths, prepend the API domain from environment or current origin.
+  // The separator is not cosmetic. A bare name like "scene_0.mp3" - which is what
+  // an offline bundle contains - used to concatenate straight onto the origin and
+  // produce https://edusmart.ign3el.comscene_0.mp3: not a 404 on our own host but a
+  // request to a different, nonexistent one, which CSP then blocked as cross-origin.
+  // Normalising both sides also stops a VITE_API_URL with a trailing slash from
+  // emitting a double slash.
+  const apiDomain = (import.meta.env.VITE_API_URL || window.location.origin).replace(/\/+$/, '')
+  const path = withAuthToken(url)
+  return `${apiDomain}${path.startsWith('/') ? '' : '/'}${path}`
 }
 
 export const debounce = (fn, delay) => {

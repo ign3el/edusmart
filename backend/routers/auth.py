@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, validator
 
-from auth import create_access_token, verify_token, generate_secure_token, get_password_hash, verify_password
+from auth import create_access_token, verify_token, verify_token_claims, generate_secure_token, get_password_hash, verify_password
 from database_models import User, UserOperations
 from services.email_service import send_verification_email, send_password_reset_email
 from database import get_db_cursor
@@ -29,6 +29,21 @@ class RateLimiter:
             return False
         self.attempts[key].append(now)
         return True
+
+    def snapshot(self, window_seconds: int = 3600) -> list:
+        """Current buckets for the admin abuse monitor. In-process only - see
+        the NOTE below on why this is per-worker/per-container, not global."""
+        now = time.time()
+        out = []
+        for key, timestamps in self.attempts.items():
+            recent = [t for t in timestamps if now - t < window_seconds]
+            if recent:
+                out.append({
+                    "key": key,
+                    "attempts_in_window": len(recent),
+                    "most_recent_seconds_ago": round(now - max(recent), 1),
+                })
+        return sorted(out, key=lambda x: x["attempts_in_window"], reverse=True)
 
 _rate_limiter = RateLimiter()
 
@@ -176,9 +191,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     """
     Dependency to get the current user from a JWT token.
-    Raises 401 Unauthorized if the token is invalid, expired, or user not found.
+    Raises 401 Unauthorized if the token is invalid, expired, stale, or user not found.
     """
-    email = verify_token(token)
+    payload = verify_token_claims(token)
+    email = payload.get("sub") if payload else None
     if not email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -191,6 +207,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # A password change (self-service or admin-initiated) bumps token_version,
+    # invalidating every token minted before it - otherwise a stolen token
+    # would keep working for its full 7-day life even after the password that
+    # protects the account changes.
+    if payload.get("tv", 0) != (user.get("token_version") or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired, please log in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
@@ -250,11 +276,19 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
     Verifies credentials and returns a JWT access token.
     Note: The 'username' field accepts EITHER username OR email.
     """
-    # Rate limiting
+    # Rate limiting - per IP...
     ip = client_ip(request)
     if not _rate_limiter.check(ip):
         raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
-    
+
+    # ...and per account, so rotating source IPs can't grind one user's
+    # password by spreading attempts across addresses. Keyed on the raw
+    # submitted identifier (not the resolved user) so a nonexistent account
+    # is throttled identically to a real one - no enumeration signal here.
+    account_key = f"login-acct:{form_data.username.strip().lower()}"
+    if not _rate_limiter.check(account_key, max_attempts=8, window_seconds=900):
+        raise HTTPException(status_code=429, detail="Too many attempts for this account. Please try again later.")
+
     # Try to authenticate with either email or username
     user = None
     if '@' in form_data.username:
@@ -283,10 +317,11 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
         )
     
     logger.info(f"User '{user['email']}' authenticated successfully.")
-    
-    # The 'sub' (subject) of the token is the user's email.
-    access_token = create_access_token(data={"sub": user['email']})
-    
+
+    # The 'sub' (subject) of the token is the user's email. 'tv' pins the
+    # token to the password_hash it was issued against - see get_current_user.
+    access_token = create_access_token(data={"sub": user['email'], "tv": user.get('token_version') or 0})
+
     return {"access_token": access_token, "token_type": "bearer"}
 
 # --- Social sign-in (Google / Facebook) -------------------------------------
@@ -388,7 +423,7 @@ def social_login(provider: str, body: SocialAuthRequest, request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
 
     user = _login_or_create_social_user(profile)
-    access_token = create_access_token(data={"sub": user["email"]})
+    access_token = create_access_token(data={"sub": user["email"], "tv": user.get("token_version") or 0})
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -543,7 +578,7 @@ def reset_password(request: ResetPasswordRequest):
     try:
         with get_db_cursor(commit=True) as cursor:
             cursor.execute(
-                "UPDATE users SET password_hash = %s WHERE id = %s",
+                "UPDATE users SET password_hash = %s, token_version = token_version + 1 WHERE id = %s",
                 (password_hash, user_id)
             )
             # Delete the used token
@@ -613,12 +648,12 @@ def change_password(
     try:
         with get_db_cursor(commit=True) as cursor:
             cursor.execute(
-                "UPDATE users SET password_hash = %s WHERE id = %s",
+                "UPDATE users SET password_hash = %s, token_version = token_version + 1 WHERE id = %s",
                 (new_password_hash, current_user['id'])
             )
-        
+
         logger.info(f"Password changed successfully for user ID: {current_user['id']}")
-        return {"message": "Password changed successfully"}
+        return {"message": "Password changed successfully. Please log in again."}
     except Exception as e:
         logger.error(f"Failed to change password: {e}")
         raise HTTPException(

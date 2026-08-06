@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   Search, X, Play, Trash2, Save, Calendar, User, Mail, Hash, Layers,
-  ChevronLeft, ChevronRight, Pencil
+  ChevronLeft, ChevronRight, Pencil, CheckCircle2, XCircle, Gauge, Activity
 } from 'lucide-react';
 import apiClient from '../services/api';
 import { getItemsPerPage } from '../utils/responsiveUtils';
@@ -98,6 +98,23 @@ const StoryManagement = ({ onPlayStory }) => {
 
   const getTitle = (story) => story.title || story.name || 'Untitled';
   const getDraft = (story) => titleDrafts[story.story_id] ?? getTitle(story);
+
+  // Mirrors STORY_MIN_COVERAGE / STORY_MIN_HALLUCINATION_SCORE /
+  // STORY_MIN_FAITHFULNESS / STORY_MIN_CITATION_ACCURACY in
+  // backend/services/story_service.py - keep in sync if those change.
+  const QUALITY_GATES = [
+    { key: 'coverage', label: 'Coverage', min: 100 },
+    { key: 'hallucination', label: 'Hallucination', min: 98 },
+    { key: 'faithfulness', label: 'Faithfulness', min: 95 },
+    { key: 'citation_accuracy', label: 'Citation', min: 95 },
+  ];
+
+  const gateStatus = (scores) =>
+    QUALITY_GATES.map((g) => ({
+      ...g,
+      value: scores[g.key],
+      pass: typeof scores[g.key] === 'number' && scores[g.key] >= g.min,
+    }));
 
   const handleRename = async (story) => {
     const newTitle = getDraft(story).trim();
@@ -224,6 +241,76 @@ const StoryManagement = ({ onPlayStory }) => {
                     {story.email && <p className="story-detail-line"><Mail size={12} /> {story.email}</p>}
                     <p className="story-detail-line"><Calendar size={12} /> Created {formatDate(story.created_at)}</p>
                     {story.updated_at && <p className="story-detail-line"><Calendar size={12} /> Updated {formatDate(story.updated_at)}</p>}
+
+                    {story.quality_scores ? (
+                      <div className="quality-scores">
+                        <div className="quality-scores-header">
+                          <Gauge size={13} />
+                          <span>
+                            Quality: {story.quality_scores.gates_passed ?? '?'}/4 gates
+                            {story.quality_scores.attempt ? ` (attempt ${story.quality_scores.attempt}/3)` : ''}
+                          </span>
+                        </div>
+                        <div className="quality-gate-grid">
+                          {gateStatus(story.quality_scores).map((g) => (
+                            <span key={g.key} className={`quality-gate-badge ${g.pass ? 'pass' : 'fail'}`}>
+                              {g.pass ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                              {g.label} {typeof g.value === 'number' ? Math.round(g.value) : '?'}%
+                            </span>
+                          ))}
+                        </div>
+                        <p className="quality-overall">Overall {Math.round(story.quality_scores.overall ?? 0)}%</p>
+                        {story.quality_scores.missing_items?.length > 0 && (
+                          <p className="quality-findings">
+                            <strong>Missing:</strong> {story.quality_scores.missing_items.slice(0, 5).join('; ')}
+                            {story.quality_scores.missing_items.length > 5 && ` (+${story.quality_scores.missing_items.length - 5} more)`}
+                          </p>
+                        )}
+                        {story.quality_scores.unsupported_claims?.length > 0 && (
+                          <p className="quality-findings quality-findings-warn">
+                            <strong>Unsupported claims:</strong> {story.quality_scores.unsupported_claims.slice(0, 3).join('; ')}
+                            {story.quality_scores.unsupported_claims.length > 3 && ` (+${story.quality_scores.unsupported_claims.length - 3} more)`}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      story.story_type === 'generated' && (
+                        <p className="story-detail-line quality-scores-missing">
+                          <Gauge size={12} /> No quality scores recorded
+                        </p>
+                      )
+                    )}
+
+                    {story.api_usage ? (
+                      <div className="api-usage">
+                        <div className="api-usage-header">
+                          <Activity size={13} />
+                          <span>
+                            API calls: {story.api_usage.total}
+                            {story.api_usage.errors > 0 && (
+                              <span className="api-usage-errors"> ({story.api_usage.errors} failed)</span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="api-usage-grid">
+                          {story.api_usage.breakdown.map((b) => (
+                            <span key={`${b.provider}-${b.model}`} className="api-usage-badge">
+                              <span className="api-usage-provider">{b.provider}</span>
+                              <span className="api-usage-model">{b.model}</span>
+                              <span className="api-usage-count">{b.calls}</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      /* Distinct from "0 calls": counting started on 2026-08-06,
+                         so an older story has no row rather than an empty one. */
+                      story.story_type === 'generated' && (
+                        <p className="story-detail-line quality-scores-missing">
+                          <Activity size={12} /> API calls not recorded
+                        </p>
+                      )
+                    )}
 
                     <label className="field-label">
                       <span className="field-label-text"><Pencil size={12} /> Title</span>
