@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
-import { motion } from 'framer-motion'
-import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama, Users, Lock } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { BookOpen, WifiOff, Search, X, Calendar, Download, Trash2, ChevronLeft, ChevronRight, Loader2, CheckCircle2, Drama, Users, Lock, Share2, Link2, Clock, AlertTriangle } from 'lucide-react'
 import apiClient from '../services/api'
 import { getItemsPerPage } from '../utils/responsiveUtils'
+import { useDialog } from '../context/DialogContext'
 import './LoadStory.css'
+
+const ShareLinkModal = lazy(() => import('./ShareLinkModal'))
 
 const gridVariants = {
   hidden: {},
@@ -16,7 +19,8 @@ const cardVariants = {
   show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: 'easeOut' } }
 }
 
-function LoadStory({ onLoad, onBack }) {
+function LoadStory({ onLoad, onResumeUnsaved, onBack }) {
+  const { confirm, alert: showAlert } = useDialog()
   const [stories, setStories] = useState([])
   const [loading, setLoading] = useState(true)
   const [downloading, setDownloading] = useState(null)
@@ -27,6 +31,22 @@ function LoadStory({ onLoad, onBack }) {
   const [currentPage, setCurrentPage] = useState(1)
   const [isOnline, setIsOnline] = useState(navigator.onLine)
   const [itemsPerPage, setItemsPerPage] = useState(getItemsPerPage(window.innerWidth))
+  // 'all' | 'shared' - Shared Links narrows the grid to stories with an active
+  // share token and swaps each card's actions for link management. See
+  // ShareLinkModal for create/copy/revoke - this tab is just a way to find
+  // every story that already has one without opening each story individually.
+  const [activeTab, setActiveTab] = useState('all')
+  const [manageShareStory, setManageShareStory] = useState(null)
+
+  // 'Recent' tab - generated stories the user never saved. The backend keeps
+  // these around for 24h (story_storage.py's STORY_TTL_HOURS) before its
+  // cleanup sweep deletes them; this surfaces that window so a refresh or a
+  // closed tab before hitting Save isn't unrecoverable. Fetched lazily, only
+  // once, the first time this tab is opened.
+  const [unsavedStories, setUnsavedStories] = useState([])
+  const [unsavedLoading, setUnsavedLoading] = useState(false)
+  const [unsavedFetched, setUnsavedFetched] = useState(false)
+  const [resumingId, setResumingId] = useState(null)
 
   useEffect(() => {
     fetchStories()
@@ -71,16 +91,50 @@ function LoadStory({ onLoad, onBack }) {
       setStories(uniqueStories)
     } catch (error) {
       console.error('Error fetching stories:', error)
-      alert('Failed to load stories. Please refresh the page.')
+      showAlert('Failed to load stories. Please refresh the page.')
     } finally {
       setLoading(false)
     }
   }
 
+  const fetchUnsavedStories = async () => {
+    if (unsavedFetched) return
+    setUnsavedLoading(true)
+    try {
+      const response = await apiClient.get('/api/unsaved-stories')
+      setUnsavedStories(response.data || [])
+    } catch (error) {
+      console.error('Error fetching unsaved stories:', error)
+    } finally {
+      setUnsavedLoading(false)
+      setUnsavedFetched(true)
+    }
+  }
+
+  const handleSelectTab = (tab) => {
+    setActiveTab(tab)
+    if (tab === 'unsaved') fetchUnsavedStories()
+  }
+
+  const handleResume = async (story) => {
+    setResumingId(story.story_id)
+    try {
+      await onResumeUnsaved(story.story_id)
+    } finally {
+      setResumingId(null)
+    }
+  }
+
   // Filter stories based on search query
-  const filteredStories = stories.filter(story =>
+  const searchedStories = stories.filter(story =>
     story.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
+
+  // Shared Links tab narrows further to stories that currently have an
+  // active share token (is_shared, added server-side alongside is_public).
+  const filteredStories = activeTab === 'shared'
+    ? searchedStories.filter(story => story.is_shared)
+    : searchedStories
 
   // Pagination
   const totalPages = Math.ceil(filteredStories.length / itemsPerPage)
@@ -88,10 +142,10 @@ function LoadStory({ onLoad, onBack }) {
   const endIndex = startIndex + itemsPerPage
   const paginatedStories = filteredStories.slice(startIndex, endIndex)
 
-  // Reset to page 1 when search changes
+  // Reset to page 1 when search or tab changes
   useEffect(() => {
     setCurrentPage(1)
-  }, [searchQuery])
+  }, [searchQuery, activeTab])
 
   const handleLoad = async (story) => {
     try {
@@ -100,18 +154,19 @@ function LoadStory({ onLoad, onBack }) {
     } catch (error) {
       console.error('Failed to load story:', error)
       const errorMsg = error.response?.data?.detail || error.message
-      alert(`Failed to load story: ${errorMsg}\n\nStory ID: ${story.story_id || story.id}`)
+      await showAlert(`Failed to load story: ${errorMsg}\n\nStory ID: ${story.story_id || story.id}`)
     }
   }
 
   const handleDelete = async (story) => {
-    if (!confirm(`Delete "${story.name}"? This cannot be undone.`)) return
+    const ok = await confirm(`Delete "${story.name}"? This cannot be undone.`, { variant: 'danger', confirmLabel: 'Delete' })
+    if (!ok) return
 
     try {
       await apiClient.delete(`/api/delete-story/${story.story_id}`)
       setStories(stories.filter(s => s.story_id !== story.story_id))
     } catch (error) {
-      alert('Failed to delete story: ' + error.message)
+      await showAlert('Failed to delete story: ' + error.message)
     }
   }
 
@@ -159,11 +214,15 @@ function LoadStory({ onLoad, onBack }) {
 
     // Unsharing is not retroactive and the confirm says so. A toggle that
     // implies a recall it cannot perform is worse than no toggle.
-    if (!next && !window.confirm(
-      'Stop sharing this story?\n\n' +
-      'It will no longer appear for other people who upload the same file. ' +
-      'Anyone who already opened it keeps what they have - unsharing cannot undo that.'
-    )) return
+    if (!next) {
+      const ok = await confirm(
+        'Stop sharing this story?\n\n' +
+        'It will no longer appear for other people who upload the same file. ' +
+        'Anyone who already opened it keeps what they have - unsharing cannot undo that.',
+        { variant: 'danger', confirmLabel: 'Stop sharing' }
+      )
+      if (!ok) return
+    }
 
     setVisibilityBusy(story.story_id)
     try {
@@ -175,15 +234,29 @@ function LoadStory({ onLoad, onBack }) {
       )))
     } catch (error) {
       console.error('Error changing visibility:', error)
-      alert('Could not change sharing for this story. Please try again.')
+      await showAlert('Could not change sharing for this story. Please try again.')
     } finally {
       setVisibilityBusy(null)
     }
   }
 
   const formatDate = (timestamp) => {
-    const date = new Date(parseInt(timestamp) / 10000 - 12219292800000)
+    // story.saved_at is a numeric STRING of milliseconds-since-epoch
+    // (database_models.py's get_user_stories: str(int(created_at.timestamp()
+    // * 1000))). The old formula treated it as 100-nanosecond ticks with a
+    // wrong epoch offset, landing on 10/17/1582. Number(timestamp) - not the
+    // raw string - is required: `new Date(numericString)` doesn't parse a
+    // bare numeric string as epoch-ms and returns Invalid Date instead.
+    const date = new Date(Number(timestamp))
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
+  }
+
+  // share_created_at comes straight from the backend as an ISO string
+  // (routers/share.py's create_share_token / database_models.py isoformat()),
+  // a plain Date parse - not the legacy encoding formatDate above unpacks.
+  const formatShareDate = (isoString) => {
+    if (!isoString) return ''
+    return new Date(isoString).toLocaleDateString()
   }
 
   // Portaled to <body> for the same reason the quiz overlay is: this modal
@@ -211,6 +284,35 @@ function LoadStory({ onLoad, onBack }) {
           </button>
         </div>
 
+        <div className="load-story-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={activeTab === 'all'}
+            className={`load-story-tab ${activeTab === 'all' ? 'is-active' : ''}`}
+            onClick={() => handleSelectTab('all')}
+          >
+            <BookOpen size={15} /> All Stories
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'shared'}
+            className={`load-story-tab ${activeTab === 'shared' ? 'is-active' : ''}`}
+            onClick={() => handleSelectTab('shared')}
+          >
+            <Link2 size={15} /> Shared Links
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'unsaved'}
+            className={`load-story-tab ${activeTab === 'unsaved' ? 'is-active' : ''}`}
+            onClick={() => handleSelectTab('unsaved')}
+          >
+            <Clock size={15} /> Recent
+          </button>
+        </div>
+
+      {activeTab !== 'unsaved' && (
+      <>
       {!isOnline && (
         <div className="offline-warning">
           <WifiOff size={28} className="offline-icon" />
@@ -259,7 +361,12 @@ function LoadStory({ onLoad, onBack }) {
             </div>
           )}
 
-          {filteredStories.length === 0 ? (
+          {filteredStories.length === 0 && activeTab === 'shared' && !searchQuery ? (
+            <div className="no-stories">
+              <p><Link2 size={18} /> No shared links yet</p>
+              <p>Open a story and hit Share to create one - it'll show up here.</p>
+            </div>
+          ) : filteredStories.length === 0 ? (
             <div className="no-stories">
               <p><Search size={18} /> No stories found matching "{searchQuery}"</p>
               <button onClick={() => setSearchQuery('')} className="clear-search-btn">
@@ -283,54 +390,73 @@ function LoadStory({ onLoad, onBack }) {
                     whileTap={{ scale: 0.98 }}
                   >
                     <h3>{story.name}</h3>
-                    <div className="story-date">
-                      <Calendar size={14} /> {formatDate(story.saved_at)}
-                    </div>
-                    <button
-                      className={`share-toggle ${story.is_public ? 'is-on' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleToggleVisibility(story)
-                      }}
-                      disabled={visibilityBusy !== null}
-                      title={story.is_public
-                        ? 'Shared: anyone who uploads the same file can read this story. They cannot edit or delete it. Tap to stop sharing.'
-                        : 'Private: only you can open this. Tap to let others who upload the same file read it.'}
-                    >
-                      {visibilityBusy === story.story_id
-                        ? <Loader2 size={14} className="spin-icon" />
-                        : (story.is_public ? <Users size={14} /> : <Lock size={14} />)}
-                      {story.is_public ? 'Shared' : 'Private'}
-                    </button>
+                    {activeTab === 'shared' ? (
+                      <div className="story-date">
+                        <Calendar size={14} /> Shared {formatShareDate(story.share_created_at)}
+                      </div>
+                    ) : (
+                      <div className="story-date">
+                        <Calendar size={14} /> {formatDate(story.saved_at)}
+                      </div>
+                    )}
+                    {activeTab !== 'shared' && (
+                      <button
+                        className={`share-toggle ${story.is_public ? 'is-on' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleToggleVisibility(story)
+                        }}
+                        disabled={visibilityBusy !== null}
+                        title={story.is_public
+                          ? 'Shared: anyone who uploads the same file can read this story. They cannot edit or delete it. Tap to stop sharing.'
+                          : 'Private: only you can open this. Tap to let others who upload the same file read it.'}
+                      >
+                        {visibilityBusy === story.story_id
+                          ? <Loader2 size={14} className="spin-icon" />
+                          : (story.is_public ? <Users size={14} /> : <Lock size={14} />)}
+                        {story.is_public ? 'Shared' : 'Private'}
+                      </button>
+                    )}
                     <div className="story-card-actions">
-                      <button
-                        className="load-btn"
-                        onClick={() => handleLoad(story)}
-                      >
-                        Load Story
-                      </button>
-                      <button
-                        className="download-btn"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleDownload(story)
-                        }}
-                        disabled={downloading !== null}
-                        title="Download as ZIP file"
-                      >
-                        {downloading === story.story_id
-                          ? <><Loader2 size={14} className="spin-icon" /> Downloading...</>
-                          : <><Download size={14} /> Download</>}
-                      </button>
-                      <button
-                        className="delete-btn"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleDelete(story)
-                        }}
-                      >
-                        <Trash2 size={14} /> Delete
-                      </button>
+                      {activeTab === 'shared' ? (
+                        <button
+                          className="load-btn"
+                          onClick={() => setManageShareStory(story)}
+                        >
+                          <Share2 size={14} /> Manage Link
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="load-btn"
+                            onClick={() => handleLoad(story)}
+                          >
+                            Load Story
+                          </button>
+                          <button
+                            className="download-btn"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDownload(story)
+                            }}
+                            disabled={downloading !== null}
+                            title="Download as ZIP file"
+                          >
+                            {downloading === story.story_id
+                              ? <><Loader2 size={14} className="spin-icon" /> Downloading...</>
+                              : <><Download size={14} /> Download</>}
+                          </button>
+                          <button
+                            className="delete-btn"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDelete(story)
+                            }}
+                          >
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   </motion.div>
                 ))}
@@ -359,6 +485,53 @@ function LoadStory({ onLoad, onBack }) {
                 </div>
               )}
             </>
+          )}
+        </>
+      )}
+      </>
+      )}
+
+      {activeTab === 'unsaved' && (
+        <>
+          {unsavedLoading ? (
+            <div className="loading-stories"><Loader2 size={18} className="spin-icon" /> Loading recent generations...</div>
+          ) : unsavedStories.length === 0 ? (
+            <div className="no-stories">
+              <p><Clock size={20} /> No recent unsaved stories</p>
+              <p>Generate a story and it'll show up here until you save it or it expires.</p>
+            </div>
+          ) : (
+            <motion.div className="stories-grid" variants={gridVariants} initial="hidden" animate="show">
+              {unsavedStories.map((story) => (
+                <motion.div
+                  key={story.story_id}
+                  className="story-card"
+                  variants={cardVariants}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <h3>{story.title}</h3>
+                  <div className="story-date">
+                    <Calendar size={14} /> Generated {new Date(story.created_at).toLocaleString()}
+                  </div>
+                  <div className="unsaved-disclaimer">
+                    <AlertTriangle size={14} />
+                    Not saved - deletes automatically on {new Date(story.expires_at).toLocaleString()}
+                  </div>
+                  <div className="story-card-actions">
+                    <button
+                      className="load-btn"
+                      onClick={() => handleResume(story)}
+                      disabled={resumingId !== null}
+                    >
+                      {resumingId === story.story_id
+                        ? <><Loader2 size={14} className="spin-icon" /> Resuming...</>
+                        : 'Resume & Save'}
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </motion.div>
           )}
         </>
       )}
@@ -416,6 +589,25 @@ function LoadStory({ onLoad, onBack }) {
           </motion.div>
         </div>
       )}
+
+      <AnimatePresence>
+        {manageShareStory && (
+          <Suspense fallback={null}>
+            <ShareLinkModal
+              storyId={manageShareStory.story_id}
+              storyTitle={manageShareStory.name}
+              onClose={() => {
+                setManageShareStory(null)
+                // Revoking doesn't close the modal by itself (it drops back to
+                // the "create a link" state so the owner can immediately make
+                // a fresh one) - so the shared-tab list only needs refreshing
+                // once the modal actually closes, not on every keystroke inside it.
+                fetchStories()
+              }}
+            />
+          </Suspense>
+        )}
+      </AnimatePresence>
       </motion.div>
     </div>,
     document.body
