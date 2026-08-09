@@ -2,9 +2,9 @@
   width: 100%;
   max-width: 780px;
   margin: 0 auto;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 1.4rem;
-  padding-bottom: 100px;
 }
 
 .file-confirmation h2 {
@@ -99,15 +99,22 @@
 }
 
 .confirmation-actions {
-  position: fixed;
+  /* sticky, not fixed: iPadOS/iOS Safari can desync a `fixed` element from the
+     visual viewport as the browser chrome resizes during scroll, leaving it
+     floating mid-page with empty space below it while still overlapping
+     content that hasn't scrolled past yet (reported live 2026-08-09, iPad).
+     sticky is part of normal document flow - no separate padding-bottom hack
+     needed on the parent to keep content clear of it, and it can't desync
+     from the viewport the way an escaped `fixed` element can. */
+  position: sticky;
   bottom: 0;
-  left: 0;
-  right: 0;
+  margin-top: auto;
   z-index: 100;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 0.8rem;
   padding: 1.2rem;
+  padding-bottom: max(1.2rem, env(safe-area-inset-bottom));
   background: linear-gradient(to top, rgba(26, 15, 58, 0.98) 0%, rgba(26, 15, 58, 0.95) 100%);
   backdrop-filter: blur(20px);
   border-top: 1px solid rgba(168, 85, 247, 0.2);

@@ -623,11 +623,16 @@
 }
 
 @media (max-width: 768px) {
-  .player-header { padding: 0.5rem 0.6rem; }
+  /* Tighter gap/padding than the desktop default reclaims width for the
+     title, which otherwise competes with up to three 44px icon buttons on
+     this row (Share/Video/Replay) - on wider-but-still-narrow phones (e.g.
+     Samsung S23 Ultra, ~412-428px CSS width) that combination was truncating
+     titles more aggressively than the available space should require. */
+  .player-header { padding: 0.5rem 0.45rem; gap: 0.5rem; }
   /* 38px is under the 44px minimum touch target - near-misses on a phone read
      as "the button does nothing", which is exactly the complaint. */
   .icon-btn { width: 44px; height: 44px; }
-  .story-title { font-size: 0.85rem; }
+  .story-title { font-size: clamp(0.74rem, 3.6vw, 0.85rem); }
   /* Every rem trimmed here goes straight into the picture: the image is the
      only flexible box in the column, so tighter padding/gaps around the text
      make it grow rather than opening a gap. Worth ~20px of extra artwork on a
