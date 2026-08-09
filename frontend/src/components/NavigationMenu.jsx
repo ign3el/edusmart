@@ -5,9 +5,11 @@ import {
   Home, BookOpen, FolderOpen, Settings, Save, Download, FileText,
   Sparkles, RefreshCw, User, LogOut, Menu, X, Smartphone, Check, CreditCard
 } from 'lucide-react'
+import { useDialog } from '../context/DialogContext'
 import './NavigationMenu.css'
 
 function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOfflineManager, onAdminClick, onProfile, onLogout, onSaveStory, onDownloadStory, isPlayingStory, currentStory, onShowFileViewer, onCheckUpdate, onPricing }) {
+  const { alert: showAlert } = useDialog()
   const [isMobileOpen, setIsMobileOpen] = useState(false)
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
   const [showInstallPrompt, setShowInstallPrompt] = useState(false)
@@ -42,7 +44,7 @@ function NavigationMenu({ user, isAdmin, onHome, onNewStory, onLoadStories, onOf
       if (outcome === 'accepted') { setIsPWA(true); setShowInstallPrompt(false) }
       deferredPromptRef.current = null
     } else {
-      alert('Install prompt is not available yet. Please use the browser menu to install or revisit after a bit of usage.')
+      showAlert('Install prompt is not available yet. Please use the browser menu to install or revisit after a bit of usage.')
     }
   }
 

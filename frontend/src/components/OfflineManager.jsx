@@ -9,6 +9,7 @@ import apiClient from '../services/api'
 import * as storyStorage from '../utils/storyStorage'
 import { isStandalone } from '../utils/serviceWorkerRegistration'
 import { getItemsPerPage } from '../utils/responsiveUtils'
+import { useDialog } from '../context/DialogContext'
 import './OfflineManager.css'
 
 const gridVariants = {
@@ -22,6 +23,7 @@ const cardVariants = {
 }
 
 function OfflineManager({ onLoadOffline, onBack }) {
+  const { confirm, alert: showAlert } = useDialog()
   const [onlineStories, setOnlineStories] = useState([])
   const [localStories, setLocalStories] = useState([])
   const [isOnline, setIsOnline] = useState(navigator.onLine)
@@ -106,28 +108,29 @@ function OfflineManager({ onLoadOffline, onBack }) {
       if (storyData) {
         onLoadOffline(storyData.storyData, storyData.name)
       } else {
-        alert('Story not found')
+        await showAlert('Story not found')
       }
     } catch (error) {
-      alert('Failed to load story: ' + error.message)
+      await showAlert('Failed to load story: ' + error.message)
     }
   }
 
   const deleteLocal = async (storyId) => {
-    if (!confirm('Delete this local story?')) return
+    const ok = await confirm('Delete this local story?', { variant: 'danger', confirmLabel: 'Delete' })
+    if (!ok) return
 
     try {
       await storyStorage.deleteStory(storyId)
       setLocalStories(prev => prev.filter(s => s.id !== storyId))
       await loadLocalStories() // Refresh storage info
     } catch (error) {
-      alert('Failed to delete story: ' + error.message)
+      await showAlert('Failed to delete story: ' + error.message)
     }
   }
 
   const exportStory = async (storyId, storyName) => {
     if (!isOnline) {
-      alert('Export requires internet connection')
+      await showAlert('Export requires internet connection')
       return
     }
 

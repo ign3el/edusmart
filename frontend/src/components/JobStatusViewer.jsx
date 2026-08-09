@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { getJobStateTableData, cancelStuckJob, retryFailedJob, deleteJob } from '../services/api';
 import { getItemsPerPage } from '../utils/responsiveUtils';
+import { useDialog } from '../context/DialogContext';
 import Flip3DCard from './admin/Flip3DCard';
 import './JobStatusViewer.css';
 
@@ -47,6 +48,7 @@ const SceneStatusIcon = ({ status }) => {
 };
 
 const JobStatusViewer = () => {
+  const { confirm } = useDialog();
   const [jobs, setJobs] = useState([]);
   const [scenes, setScenes] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -86,7 +88,8 @@ const JobStatusViewer = () => {
   }, [fetchData]);
 
   const handleCancel = async (storyId) => {
-    if (!window.confirm('Mark this job as failed and refund the credit?')) return;
+    const ok = await confirm('Mark this job as failed and refund the credit?', { confirmLabel: 'Mark failed' });
+    if (!ok) return;
     setCancellingId(storyId);
     try {
       await cancelStuckJob(storyId);
@@ -122,7 +125,8 @@ const JobStatusViewer = () => {
   };
 
   const handleDelete = async (storyId) => {
-    if (!window.confirm('Permanently delete this job and all of its files? This cannot be undone.')) return;
+    const ok = await confirm('Permanently delete this job and all of its files? This cannot be undone.', { variant: 'danger', confirmLabel: 'Delete' });
+    if (!ok) return;
     setDeletingId(storyId);
     setError('');
     setNotice('');
