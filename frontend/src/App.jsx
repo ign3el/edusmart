@@ -243,7 +243,14 @@ function MainApp() {
   // Returns true if polling should continue.
   const pollJobStatus = async (jobId) => {
     try {
-      const statusRes = await fetch(`${API_URL}/api/status/${jobId}`, {
+      // Cache-busting query param + no-store: a real generation was observed
+      // finishing server-side in ~70s while this exact poll kept returning a
+      // stale "processing" response for 8+ minutes in the same browser tab,
+      // even though a fresh request to the identical URL got correct data
+      // instantly. Whatever is caching it (this project has hit CDN/browser
+      // caching of GET responses before), a unique URL each time defeats it.
+      const statusRes = await fetch(`${API_URL}/api/status/${jobId}?_=${Date.now()}`, {
+        cache: 'no-store',
         headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
       })
       if (!statusRes.ok) throw new Error('Could not fetch status')
@@ -398,6 +405,13 @@ function MainApp() {
             setSelectedAvatar({ id: 'loaded', name: response.data.name })
             setIsSaved(true)
             setSavedStoryId(pointer.savedStoryId)
+            // A saved story is complete by definition - without this,
+            // storyFullyReady stays false forever and Save/Download never
+            // reappear (they gate on totalScenes/completedSceneCount, which
+            // nothing else in this branch sets).
+            const sceneCount = (response.data.story_data.scenes || []).length
+            setTotalScenes(sceneCount)
+            setCompletedSceneCount(sceneCount)
             navigateTo('playing')
           }
           return
@@ -436,6 +450,42 @@ function MainApp() {
       }
     })()
   }, [isAuthenticated])
+
+  // Opening a story from LoadStory's "Recent" tab (an unsaved generated_stories
+  // entry the user picked deliberately) - same /api/status fetch the session
+  // rehydration effect above uses for a jobId pointer, just triggered by a
+  // click instead of an automatic refresh-recovery.
+  const handleResumeUnsaved = async (storyId) => {
+    try {
+      const statusRes = await fetch(`${API_URL}/api/status/${storyId}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` }
+      })
+      if (!statusRes.ok) throw new Error('Could not load this story - it may have expired.')
+      const job = await statusRes.json()
+
+      if (job.status === 'completed' && job.result) {
+        setStoryData(job.result)
+        setCurrentJobId(storyId)
+        setProgress(100)
+        if (job.total_scenes > 0) {
+          setTotalScenes(job.total_scenes)
+          setCompletedSceneCount(job.total_scenes)
+        }
+        navigateTo('playing')
+      } else if (job.status === 'processing' && job.result?.scenes?.length > 0) {
+        setStoryData(job.result)
+        setCurrentJobId(storyId)
+        generationStartRef.current = Date.now()
+        navigateTo('playing')
+        startPolling(storyId)
+      } else {
+        throw new Error('This story is not ready to resume.')
+      }
+    } catch (err) {
+      setError(err.message || 'Could not resume this story.')
+      navigateTo('home')
+    }
+  }
 
   // If not logged in and not loading, show auth screen
   if (isLoading) {
@@ -993,14 +1043,21 @@ function MainApp() {
 
           {step === 'load' && (
             <motion.div key="load" className="step-container">
-              <LoadStory 
+              <LoadStory
                 onLoad={(storyData, storyName, storyId) => {
                   setStoryData(storyData)
                   setSelectedAvatar({ id: 'loaded', name: 'Saved Story' })
                   setIsSaved(true)
                   setSavedStoryId(storyId)
+                  // Same fix as the session-rehydration branch above - a
+                  // saved story opened from the shelf is already complete,
+                  // but nothing here told storyFullyReady that.
+                  const sceneCount = (storyData.scenes || []).length
+                  setTotalScenes(sceneCount)
+                  setCompletedSceneCount(sceneCount)
                   navigateTo('playing')
                 }}
+                onResumeUnsaved={handleResumeUnsaved}
                 onBack={() => navigateTo('home')}
               />
             </motion.div>
@@ -1230,8 +1287,17 @@ function MainApp() {
                     
                     setStoryData(formattedStory)
                     setCurrentJobId(duplicateInfo.story_id)
-                    setIsSaved(true)
+                    // Only actually true for duplicate_type === 'saved' - a
+                    // 'generated' match is a completed-but-never-saved story,
+                    // and hardcoding true here permanently hid Save for it.
+                    setIsSaved(duplicateInfo.duplicate_type === 'saved')
                     setSavedStoryId(duplicateInfo.story_id)
+                    // This story is already fully generated (status was
+                    // checked === 'completed' above) - without this,
+                    // storyFullyReady stays false and Save/Download never
+                    // appear no matter how long the user waits.
+                    setTotalScenes(formattedStory.scenes.length)
+                    setCompletedSceneCount(formattedStory.scenes.length)
                     setSelectedAvatar({ id: 'loaded', name: 'Saved Story' })
                     
                     if (DEBUG) console.log('🎬 Navigating to playing...')
