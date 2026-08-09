@@ -174,4 +174,20 @@ export const getSharedStory = async (token) => {
   return response.data;
 };
 
+// Video export - one render per story, tracked server-side in story_videos.
+// generateVideo is safe to call again while a render is already in flight:
+// the backend returns the existing progress instead of starting a second one.
+export const generateVideo = async (storyId) =>
+  (await apiClient.post(`/api/story/${storyId}/video`)).data;
+
+export const getVideoStatus = async (storyId) =>
+  (await apiClient.get(`/api/story/${storyId}/video/status`)).data;
+
+// Fetched as a blob rather than used directly as a <video src>/<a href>: the
+// route needs the same Bearer JWT every other authenticated call uses, and
+// browsers cannot attach a custom header to a plain tag src. The caller turns
+// this into an object URL (see VideoExportModal).
+export const fetchVideoBlob = async (storyId) =>
+  (await apiClient.get(`/api/story/${storyId}/video`, { responseType: 'blob' })).data;
+
 export default apiClient;

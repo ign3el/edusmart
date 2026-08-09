@@ -4,9 +4,10 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { animate } from 'animejs'
 import {
   Play, Pause, SkipForward, SkipBack, RotateCw,
-  BookOpen, Volume2, ImageOff, Loader2, Share2
+  BookOpen, Volume2, ImageOff, Loader2, Share2, Video
 } from 'lucide-react'
 import { buildFullUrl } from '../utils/urlHelpers'
+import { usePauseMediaOnHidden } from '../hooks/usePauseMediaOnHidden'
 import Quiz from './Quiz'
 import './StoryPlayer.css'
 
@@ -14,6 +15,8 @@ const StoryScene3DLayer = lazy(() => import('./StoryScene3DLayer'))
 // Lazy: the sharing dialog is opened by a minority of sessions, and it pulls in
 // its own stylesheet - no reason for it to sit in the player's initial chunk.
 const ShareLinkModal = lazy(() => import('./ShareLinkModal'))
+// Same reasoning as ShareLinkModal: opened by a minority of sessions, own chunk.
+const VideoExportModal = lazy(() => import('./VideoExportModal'))
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
@@ -66,6 +69,7 @@ const StoryPlayer = forwardRef(({
   shareMode = false,
 }, ref) => {
   const [showShareModal, setShowShareModal] = useState(false)
+  const [showVideoModal, setShowVideoModal] = useState(false)
   const [currentScene, setCurrentScene] = useState(initialScene)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showQuiz, setShowQuiz] = useState(false)
@@ -473,6 +477,12 @@ const StoryPlayer = forwardRef(({
     }
   }, [])
 
+  // That cleanup above only covers unmounting the player. Backgrounding the
+  // whole app (Home button, app switcher) leaves it mounted and playing -
+  // confirmed live via screen recording, narration/video kept going after
+  // leaving the page entirely.
+  usePauseMediaOnHidden(audioRef)
+
   const togglePlay = () => {
     const audio = audioRef.current
     if (!audio) return
@@ -785,6 +795,15 @@ const StoryPlayer = forwardRef(({
             <Share2 size={18} />
           </button>
         )}
+        {!shareMode && savedStoryId && (
+          <button
+            className="icon-btn"
+            onClick={() => setShowVideoModal(true)}
+            aria-label="Create a video of this story"
+          >
+            <Video size={18} />
+          </button>
+        )}
         <button className="icon-btn" onClick={handleReplay} aria-label="Replay from the beginning"><RotateCw size={18} /></button>
       </header>
 
@@ -1041,6 +1060,18 @@ const StoryPlayer = forwardRef(({
               storyId={savedStoryId}
               storyTitle={storyData?.title}
               onClose={() => setShowShareModal(false)}
+            />
+          </Suspense>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showVideoModal && savedStoryId && (
+          <Suspense fallback={null}>
+            <VideoExportModal
+              storyId={savedStoryId}
+              storyTitle={storyData?.title}
+              onClose={() => setShowVideoModal(false)}
             />
           </Suspense>
         )}
