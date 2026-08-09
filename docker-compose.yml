@@ -76,15 +76,16 @@ x-backend-common: &backend-common
     - GENERATION_TIMEOUT_SECONDS=${GENERATION_TIMEOUT_SECONDS:-1800}
     # --- Concurrency governors (services/concurrency.py) ---
     # Process-wide ceilings on external calls, replacing the old per-story
-    # semaphores. MAX_CONCURRENT_TTS is the one to raise once Kokoro is on
-    # the GPU pod; MAX_CONCURRENT_IMAGES tracks the RunPod endpoint's own
-    # max-worker count. Same overlap note as MYSQL_POOL_SIZE above - two
-    # colors briefly running means up to 2x these ceilings hit RunPod at
-    # once during a deploy; RunPod's own per-endpoint workersMax absorbs it.
+    # semaphores. Kokoro moved to the GPU pod (TTS_BACKEND=runpod, confirmed
+    # live 2026-08-09) - MAX_CONCURRENT_TTS raised 4->6 accordingly.
+    # MAX_CONCURRENT_IMAGES tracks the RunPod endpoint's own max-worker count.
+    # Same overlap note as MYSQL_POOL_SIZE above - two colors briefly running
+    # means up to 2x these ceilings hit RunPod at once during a deploy;
+    # RunPod's own per-endpoint workersMax absorbs it.
     - MAX_CONCURRENT_IMAGES=${MAX_CONCURRENT_IMAGES:-6}
-    - MAX_CONCURRENT_TTS=${MAX_CONCURRENT_TTS:-4}
+    - MAX_CONCURRENT_TTS=${MAX_CONCURRENT_TTS:-6}
     - MAX_CONCURRENT_LLM=${MAX_CONCURRENT_LLM:-8}
-    - MAX_IMAGES_PER_STORY=${MAX_IMAGES_PER_STORY:-4}
+    - MAX_IMAGES_PER_STORY=${MAX_IMAGES_PER_STORY:-5}
     - RUNPOD_ENDPOINT_ID_FLUX=${RUNPOD_ENDPOINT_ID_FLUX:-}
     # schnell alternate image endpoint (see IMAGE_BACKEND below) - added
     # 2026-08-04, was never actually wired through to the container despite

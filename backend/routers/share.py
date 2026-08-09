@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from database_models import StoryOperations, User
+from job_state import job_manager
 from routers.auth import client_ip, get_current_user, _rate_limiter
 from services import story_media
 from story_storage import storage_manager
@@ -51,7 +52,8 @@ SHARE_LOOKUP_WINDOW_SECONDS = 60
 # ONLY, by pattern - an allow-list, because a deny-list would have to be updated
 # every time the generator starts writing a new kind of file.
 _SHAREABLE_ASSET = re.compile(
-    r"^(?:[A-Za-z0-9_\-]+_)?scene_\d+\.(?:png|jpg|jpeg|webp|gif|wav|mp3|ogg|m4a|mp4)$",
+    r"^(?:[A-Za-z0-9_\-]+_)?scene_\d+\.(?:png|jpg|jpeg|webp|gif|wav|mp3|ogg|m4a|mp4)$"
+    r"|^video\.mp4$",
     re.IGNORECASE,
 )
 
@@ -111,6 +113,16 @@ def _public_story_payload(story: dict) -> dict:
             "audio_url": _share_media_url(token, scene.get("audio_url"), story_id, idx, "mp3"),
         })
 
+    # A rendered video isn't a second consent surface (see module docstring) -
+    # anyone holding this story's share link already gets its scenes and
+    # quiz, so a completed video rides along on the same link automatically.
+    video_state = job_manager.get_video_status(story_id)
+    video_url = (
+        f"/api/share/{token}/media/video.mp4"
+        if video_state and video_state["status"] == "completed"
+        else None
+    )
+
     return {
         "name": story.get("name"),
         "story_data": {
@@ -126,6 +138,7 @@ def _public_story_payload(story: dict) -> dict:
                 p.strip() for p in (story_data.get("key_points") or [])
                 if isinstance(p, str) and p.strip()
             ],
+            "video_url": video_url,
         },
     }
 

@@ -529,11 +529,12 @@ class StoryOperations:
 
                 query = """
 
-                    SELECT id, story_id, name, created_at, updated_at, is_public 
+                    SELECT id, story_id, name, created_at, updated_at, is_public,
+                           share_token IS NOT NULL AS is_shared, share_created_at
 
-                    FROM user_stories 
+                    FROM user_stories
 
-                    WHERE user_id = %s 
+                    WHERE user_id = %s
 
                     ORDER BY updated_at DESC
 
@@ -554,6 +555,10 @@ class StoryOperations:
                     if story.get('updated_at'):
 
                         story['updated_at'] = story['updated_at'].isoformat()
+
+                    if story.get('share_created_at'):
+
+                        story['share_created_at'] = story['share_created_at'].isoformat()
 
                 return stories
 
@@ -578,6 +583,7 @@ class StoryOperations:
                 query = """
                     SELECT s.id, s.story_id, s.name, s.created_at, s.updated_at,
                            s.is_public,
+                           s.share_token IS NOT NULL AS is_shared, s.share_created_at,
                            COALESCE(u.username, 'Unknown User') as username
                     FROM user_stories s
                     LEFT JOIN users u ON s.user_id = u.id
@@ -599,6 +605,10 @@ class StoryOperations:
                     if story.get('updated_at'):
 
                         story['updated_at'] = story['updated_at'].isoformat()
+
+                    if story.get('share_created_at'):
+
+                        story['share_created_at'] = story['share_created_at'].isoformat()
 
                 return stories
 

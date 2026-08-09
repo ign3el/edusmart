@@ -207,11 +207,34 @@ class JobStateManager:
             # Only create index if file_hash column exists
             try:
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_stories_file_hash 
+                    CREATE INDEX IF NOT EXISTS idx_stories_file_hash
                     ON stories(file_hash, created_at)
                 """)
             except Exception as e:
                 print(f"Index creation skipped: {e}")
+
+            # One row per story - unlike generation_queue this isn't N jobs per
+            # story, it's a single video render that either hasn't happened,
+            # is in flight, or has a result. Lives in this same file for the
+            # same reason generation_queue does: it needs the same WAL settings
+            # and the same BEGIN IMMEDIATE claim discipline as everything else
+            # here, since both backend blue/green processes poll it.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS story_videos (
+                    story_id TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress_scene INTEGER DEFAULT 0,
+                    total_scenes INTEGER,
+                    error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_story_videos_status
+                ON story_videos(status, created_at)
+            """)
     
     def initialize_story(self, story_id: str, grade_level: str, file_hash: Optional[str] = None, user_id: Optional[int] = None, username: Optional[str] = None, quiz_size: Optional[int] = None):
         """Create a preliminary story job record."""
@@ -730,6 +753,82 @@ class JobStateManager:
                   AND finished_at IS NOT NULL
                   AND finished_at < datetime('now', '-' || ? || ' hours')
             """, (retention_hours,))
+            return cursor.rowcount
+
+    # ==================================================================
+    # Video render jobs
+    # ==================================================================
+    # See services/video_queue.py for the worker that drains this table and
+    # services/video_service.py for the actual ffmpeg work.
+
+    def get_video_status(self, story_id: str) -> Optional[Dict]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM story_videos WHERE story_id = ?", (story_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def enqueue_video(self, story_id: str, user_id: Optional[int], total_scenes: int) -> None:
+        """(Re)queue a video render. INSERT OR REPLACE so retrying a failed
+        render - or re-requesting after the story changed - starts clean
+        instead of layering onto a stale progress/error from a previous
+        attempt."""
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO story_videos
+                    (story_id, user_id, status, progress_scene, total_scenes, error, created_at, updated_at)
+                VALUES (?, ?, 'queued', 0, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (story_id, user_id, total_scenes))
+
+    def claim_next_video(self) -> Optional[Dict]:
+        """Same BEGIN IMMEDIATE atomic-claim pattern as claim_next_job above -
+        both backend colors poll this table, and a plain SELECT-then-UPDATE
+        would let both claim the same row and render the same story twice."""
+        with self._get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("""
+                SELECT * FROM story_videos
+                WHERE status = 'queued'
+                ORDER BY created_at
+                LIMIT 1
+            """).fetchone()
+            if not row:
+                return None
+            conn.execute("""
+                UPDATE story_videos
+                SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+                WHERE story_id = ?
+            """, (row["story_id"],))
+            return dict(row)
+
+    def update_video_progress(self, story_id: str, progress_scene: int) -> None:
+        with self._get_conn() as conn:
+            conn.execute("""
+                UPDATE story_videos
+                SET progress_scene = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE story_id = ?
+            """, (progress_scene, story_id))
+
+    def finish_video(self, story_id: str, error: Optional[str] = None) -> None:
+        """Settle a running video render. `error` set means it failed."""
+        with self._get_conn() as conn:
+            conn.execute("""
+                UPDATE story_videos
+                SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE story_id = ?
+            """, ("failed" if error else "completed", error, story_id))
+
+    def recover_stuck_videos(self) -> int:
+        """Fail any row left 'processing' from before this process started -
+        identical reasoning to reconcile_orphaned_jobs(): the coroutine that
+        owned it died with the previous process and will never update it
+        again. Returns the number of rows reclaimed."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("""
+                UPDATE story_videos
+                SET status = 'failed', error = 'abandoned - process restarted', updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'processing'
+            """)
             return cursor.rowcount
 
 

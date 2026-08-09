@@ -28,6 +28,8 @@ from routers.system import router as system_router
 from routers.config_flags import router as config_flags_router
 from routers.announcements import admin_router as announcements_admin_router, public_router as announcements_public_router
 from routers.share import owner_router as share_owner_router, public_router as share_public_router
+from routers.video import router as video_router
+from services.video_queue import video_queue
 from core.setup import create_admin_user
 from database_models import User, StoryOperations, UserOperations
 from auth import verify_token_claims
@@ -48,6 +50,7 @@ from services import failure_reasons
 from services import story_media
 from services.job_queue import generation_queue, admit_generation
 from services.grade_bands import resolve_grade_spec
+from services.subject_bands import resolve_persona_voice
 from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
 # Type checking imports for Pylance
@@ -170,6 +173,12 @@ async def startup_event():
         # loud: with no workers running, uploads are accepted and never start.
         logger.critical(f"FATAL: generation queue failed to start: {e}")
 
+    logger.info("Starting video render queue...")
+    try:
+        await video_queue.start()
+    except Exception as e:
+        logger.critical(f"FATAL: video render queue failed to start: {e}")
+
     logger.info("Reconciling orphaned jobs from a previous process...")
     try:
         orphaned = job_manager.reconcile_orphaned_jobs()
@@ -207,6 +216,7 @@ app.include_router(announcements_admin_router)
 app.include_router(announcements_public_router)
 app.include_router(share_owner_router)
 app.include_router(share_public_router)
+app.include_router(video_router)
 
 
 # --- Non-Auth related application logic ---
@@ -760,7 +770,7 @@ async def generate_remaining_tts(story_id: str, scenes: list, scene_ids: list, v
             story_id=story_id,
             scenes=scenes,
             voice=voice,
-            batch_size=2,
+            batch_size=3,
             max_threads_per_tts=1,
             on_scene_ready=on_scene_ready,
             grade_level=grade_level
@@ -877,6 +887,23 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         scenes = story_data.get("scenes", [])
         title = story_data.get("title", "Untitled Story")
         quiz = story_data.get("quiz", [])
+        subject = story_data.get("subject", "General")
+        detected_language = story_data.get("detected_language", "en")
+
+        # Auto-map the tutor persona (voice) to the subject/language this
+        # story actually turned out to be, now that both are known - subject
+        # is only decided by the model as part of the same call that just
+        # returned story_data, so this can't happen any earlier than here,
+        # before TTS starts. Islamic Studies and Arabic always resolve to the
+        # Arabic persona (explicit product decision - same tutor identity for
+        # that content every time); everything else only overrides a
+        # pre-generation voice pick that was left at the language default,
+        # never a deliberate manual choice. See resolve_persona_voice's own
+        # docstring for the full reasoning.
+        resolved_voice = resolve_persona_voice(subject, detected_language, voice)
+        if resolved_voice != voice:
+            logger.info(f"Story {story_id}: persona auto-mapped {voice} -> {resolved_voice} (subject={subject}, language={detected_language})")
+            voice = resolved_voice
 
         # Joined once per story, not re-derived per scene: the model defines each
         # recurring character's fixed appearance once (unified_prompt's CHARACTER
@@ -948,6 +975,7 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                     is_mobile=mobile,
                     start_index=1,
                     grade_level=grade_level,
+                    subject=subject,
                     reference_image=reference_image,
                     on_image_ready=on_image_ready
                 )
@@ -970,7 +998,8 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
                 story_seed=story_seed,
                 is_mobile=force_mobile,
                 scene_num=0,
-                grade_level=grade_level
+                grade_level=grade_level,
+                subject=subject
             )
             
             # 🔗 CRITICAL: Trigger background generation IMMEDIATELY after Scene 0 Image finishes
@@ -1823,12 +1852,20 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
 
         # A quiz that came up short of what the user asked for is a note on a
         # delivered story, not an error - the story is complete and playable.
+        #
+        # Does NOT claim "the document didn't have enough material" - that
+        # used to be asserted unconditionally here, but a shortfall is just as
+        # often the top-up call failing (rate limit, bad JSON - see
+        # _ensure_minimum_questions) as it is a genuinely thin document, and
+        # this endpoint has no way to tell which happened. Reported 2026-08-09:
+        # a document that passed the pre-generation capacity check for 10 and
+        # supported a full 8-scene story still shipped a 4-question quiz with
+        # this message blaming the document - false in that case.
         requested = status.get("quiz_size")
         if status["status"] == "completed" and requested and len(quiz_data) < int(requested):
             payload["quiz_notice"] = (
                 f"This quiz has {len(quiz_data)} questions instead of the "
-                f"{requested} you asked for - the document didn't have enough "
-                f"distinct material for more."
+                f"{requested} you asked for."
             )
 
         return payload
@@ -2038,6 +2075,50 @@ async def list_stories(user: User = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Failed to list stories: {e}")
         raise HTTPException(status_code=500, detail="Failed to list stories.")
+
+@app.get("/api/unsaved-stories")
+async def list_unsaved_stories(user: User = Depends(get_current_user)):
+    """
+    List this user's own generated-but-not-yet-saved stories still sitting in
+    generated_stories/ - recoverable until the hourly cleanup sweep deletes
+    them (story_storage.py's STORY_TTL_HOURS, currently 24h). Exists so an
+    accidental refresh/close before hitting Save isn't unrecoverable: the
+    backend already keeps the work around for a day, this just makes it
+    findable instead of relying solely on the single localStorage session
+    pointer App.jsx keeps (which a refresh can race, or which simply isn't
+    there on a different browser/device).
+    """
+    from story_storage import STORY_TTL_HOURS
+
+    results = []
+    for story_id in job_manager.get_story_ids_for_user(user['id']):
+        # Already saved - that's the "All Stories" tab's job, not this one.
+        if storage_manager.story_exists(story_id, in_saved=True):
+            continue
+        # Already swept, or never had a folder (e.g. failed before scene 0).
+        if not storage_manager.story_exists(story_id, in_saved=False):
+            continue
+
+        status_row = job_manager.get_story_status(story_id)
+        if not status_row or status_row.get('status') not in ('completed', 'processing'):
+            continue
+
+        metadata = storage_manager.get_metadata(story_id, in_saved=False)
+        created_at = metadata.get('created_at')
+        if not created_at:
+            story_path = storage_manager.get_story_path(story_id, in_saved=False)
+            created_at = os.path.getctime(story_path) if os.path.exists(story_path) else time.time()
+
+        results.append({
+            "story_id": story_id,
+            "title": status_row.get('title') or 'Untitled Story',
+            "status": status_row.get('status'),
+            "created_at": int(created_at * 1000),
+            "expires_at": int((created_at + STORY_TTL_HOURS * 3600) * 1000),
+        })
+
+    results.sort(key=lambda s: s['created_at'], reverse=True)
+    return results
 
 @app.get("/api/load-story/{story_id}")
 async def load_story(story_id: str, user: User = Depends(get_current_user)):

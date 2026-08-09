@@ -49,10 +49,12 @@ def _limit(name: str, default: int) -> int:
 # throughput. Raise it when the endpoint's max workers goes up.
 MAX_CONCURRENT_IMAGES = _limit("MAX_CONCURRENT_IMAGES", 6)
 
-# Concurrent TTS requests across the entire process. Kokoro currently runs on
-# CPU in a shared container; each request eats a core for its duration, so this
-# is the single most important dial to raise after the GPU migration.
-MAX_CONCURRENT_TTS = _limit("MAX_CONCURRENT_TTS", 4)
+# Concurrent TTS requests across the entire process. Kokoro moved from a
+# shared-CPU container to RunPod (TTS_BACKEND=runpod, 2026-08-09 confirmed
+# live) - the old CPU-core ceiling no longer applies, raised from 4 to 6 to
+# match the image governor's RunPod headroom. Revisit against RunPod's actual
+# Kokoro worker count if peak_wait_s (governor_snapshot()) climbs.
+MAX_CONCURRENT_TTS = _limit("MAX_CONCURRENT_TTS", 6)
 
 # Concurrent Groq story-generation calls. Cheap per call but rate-limited by
 # tokens-per-minute upstream, and each one occupies a thread-pool slot for the
@@ -63,7 +65,7 @@ MAX_CONCURRENT_LLM = _limit("MAX_CONCURRENT_LLM", 8)
 # governor. The governor keeps the app as a whole from flooding RunPod; this
 # keeps any single 10-scene story from taking every slot at once and starving
 # the users queued behind it.
-MAX_IMAGES_PER_STORY = _limit("MAX_IMAGES_PER_STORY", 4)
+MAX_IMAGES_PER_STORY = _limit("MAX_IMAGES_PER_STORY", 5)
 
 # Hard ceiling on how many pages/images of ONE document get vision-read.
 #
