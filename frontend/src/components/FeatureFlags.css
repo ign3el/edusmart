@@ -122,12 +122,33 @@
   font-size: 0.8rem;
   white-space: nowrap;
   color: var(--ink-2, #9aa3b5);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ff-toggle:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(148, 163, 184, 0.25);
+}
+
+.ff-toggle:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.ff-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .ff-toggle.on {
   color: #4ade80;
   border-color: rgba(74, 222, 128, 0.35);
   background: rgba(74, 222, 128, 0.08);
+}
+
+.ff-toggle.on:hover:not(:disabled) {
+  background: rgba(74, 222, 128, 0.15);
+  border-color: rgba(74, 222, 128, 0.5);
 }
 
 .ff-checkbox-label {
