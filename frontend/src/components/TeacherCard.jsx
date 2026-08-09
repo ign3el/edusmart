@@ -5,6 +5,7 @@ import {
   Play, Check, Star, Heart, Headphones, GraduationCap, Sun, BookOpen,
   Shield, Crown, Sparkles, Award, ScrollText, Moon, Smile, Target, BookMarked
 } from 'lucide-react';
+import { useDialog } from '../context/DialogContext';
 import './TeacherCard.css';
 
 const TEACHERS = [
@@ -228,6 +229,7 @@ function TeacherCardItem({ teacher, isActive, isPlaying, onSelect, onPlay }) {
 }
 
 function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage = "en" }) {
+  const { alert: showAlert } = useDialog();
   const [playingVoice, setPlayingVoice] = useState(null);
   const [audioCache, setAudioCache] = useState({});
   // The sample used to be a bare local `new Audio(...)` inside playSample, so
@@ -316,17 +318,47 @@ function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage
       if (!stillWanted()) return;
       const audio = new Audio(src);
       previewRef.current = audio;
-      audio.onended = () => {
+      const finish = () => {
+        clearTimeout(watchdog);
         if (previewRef.current === audio) previewRef.current = null;
         setPlayingVoice((current) => (current === teacher.id ? null : current));
       };
-      audio.play().catch(() => stopPreview());
+      audio.onended = finish;
+      // A bad/undecodable source (confirmed live 2026-08-09: a 200 response
+      // that wasn't actually audio) can leave an <audio> element neither
+      // erroring nor ending - play() just never settles, and the button was
+      // stuck on "Playing..." for minutes with no way out but a refresh. This
+      // guarantees the button always recovers even if a future source is bad
+      // in some new way onerror doesn't catch.
+      audio.onerror = () => {
+        finish();
+        showAlert(`Unable to play voice sample for ${teacher.name}. Please try again.`);
+      };
+      const watchdog = setTimeout(() => {
+        if (previewRef.current === audio) {
+          finish();
+          showAlert(`Voice sample for ${teacher.name} took too long to play. Please try again.`);
+        }
+      }, 15000);
+      audio.play().catch(() => { clearTimeout(watchdog); stopPreview(); });
     };
 
     try {
       // Check cache first
       if (audioCache[teacher.id]) {
         start(audioCache[teacher.id]);
+        return;
+      }
+
+      // Sample text is fixed per voice (see TEACHERS above) - there is no
+      // reason to ever regenerate it via TTS. A pre-rendered file at this
+      // path is checked first; only a voice missing one (e.g. newly added,
+      // not yet regenerated) falls through to the live TTS endpoint below.
+      const staticUrl = `/voice-samples/${teacher.id}.mp3`;
+      const staticCheck = await fetch(staticUrl, { method: 'HEAD' });
+      if (staticCheck.ok) {
+        setAudioCache(prev => ({ ...prev, [teacher.id]: staticUrl }));
+        start(staticUrl);
         return;
       }
 
@@ -363,7 +395,7 @@ function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage
       stopPreview();
 
       // Fallback: Show error message
-      alert(`Unable to play voice sample for ${teacher.name}. Please try again.`);
+      showAlert(`Unable to play voice sample for ${teacher.name}. Please try again.`);
     }
   };
 
