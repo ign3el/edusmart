@@ -103,6 +103,10 @@ x-backend-common: &backend-common
     - TTS_ENGINE=${TTS_ENGINE:-kokoro}
     # "flux-dev" (default) or "flux-schnell" - see config.py IMAGE_BACKEND.
     - IMAGE_BACKEND=${IMAGE_BACKEND:-flux-dev}
+    # Render knobs (story_service.py module header). Only IMAGE_SIZE is
+    # passed through; steps/sampler/scheduler/guidance are dev-only and keep
+    # their code defaults - schnell's graph is fixed at 4 steps.
+    - IMAGE_SIZE=${IMAGE_SIZE:-768}
     # Text-generation provider/model switches - see config.py LLM_BACKEND.
     - LLM_BACKEND=${LLM_BACKEND:-gemini}
     - LLM_STORY_MODEL=${LLM_STORY_MODEL:-gemini-3.5-flash-lite}

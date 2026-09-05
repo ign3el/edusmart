@@ -1,5 +1,5 @@
-import asyncio
 import logging
+import asyncio
 import io
 import httpx
 from typing import Optional
@@ -14,7 +14,7 @@ import docx
 
 from .auth import get_current_user, _rate_limiter
 from database_models import User
-from services.story_service import estimate_question_capacity
+from services.story_service import estimate_question_capacity, prewarm_endpoints
 
 TTS_PREVIEW_MAX_CHARS = 1000
 
@@ -59,6 +59,12 @@ async def extract_text_from_file(
     # the billing system - a handful of documents per hour is normal usage.
     if not _rate_limiter.check(f"extract-text:{current_user['id']}", max_attempts=30, window_seconds=3600):
         raise HTTPException(status_code=429, detail="Too many upload previews. Please wait before trying again.")
+
+    # Earliest signal that a story is coming: the user picked a file and is
+    # about to look at the preview/confirm screen. Booting the RunPod workers
+    # now (debounced, never raises) hides most of their 70-80s cold start
+    # behind the confirm step + Gemini's text generation.
+    asyncio.create_task(prewarm_endpoints())
 
     try:
         # Read file content
@@ -124,6 +130,18 @@ async def extract_text_from_file(
             raise e
         logger.error(f"Error processing file upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/prewarm")
+async def prewarm(current_user: User = Depends(get_current_user)):
+    """Boot the RunPod GPU workers on upload INTENT (dropzone tap), ~10-30s
+    earlier than extract-text can. Idempotent and cheap: prewarm_endpoints is
+    debounced server-side, so repeated taps collapse into one wake-up. The
+    per-user limit only bounds how often the debounce itself gets poked."""
+    if not _rate_limiter.check(f"prewarm:{current_user['id']}", max_attempts=60, window_seconds=3600):
+        raise HTTPException(status_code=429, detail="Too many requests.")
+    asyncio.create_task(prewarm_endpoints())
+    return {"ok": True}
 
 
 @router.post("/tts-preview")

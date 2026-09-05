@@ -3,6 +3,7 @@ import { useDropzone } from 'react-dropzone'
 import { motion } from 'framer-motion'
 import { animate } from 'animejs'
 import { UploadCloud, File as FileIcon, FileText } from 'lucide-react'
+import { prewarmGeneration } from '../services/api'
 import './FileUpload.css'
 
 function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading }) {
@@ -64,7 +65,7 @@ function FileUpload({ onUpload, gradeLevel, onGradeLevelChange, isReuploading })
       </div>
 
       <div
-        {...getRootProps()}
+        {...getRootProps({ onClick: prewarmGeneration, onDragEnter: prewarmGeneration })}
         className={`dropzone ${isDragActive ? 'active' : ''}`}
       >
         <input {...getInputProps()} />

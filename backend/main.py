@@ -38,6 +38,7 @@ from services.story_service import (
     normalize_quiz_size,
     DEFAULT_QUIZ_SIZE,
     QUIZ_SIZE_OPTIONS,
+    prewarm_endpoints,
 )
 from services.tts_service import kokoro_tts
 from services.hash_service import hash_service
@@ -66,8 +67,11 @@ RETRY_COOLDOWN_SECONDS = 20
 # Load environment variables from .env file
 load_dotenv()
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging. LOG_LEVEL is forwarded by docker-compose.yml but was never
+# read here, so the level was pinned at INFO regardless of what .env said.
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
 logger = logging.getLogger(__name__)
 
 # --- App Initialization ---
@@ -80,12 +84,14 @@ app = FastAPI(title="EduStory API")
 # (localhost-only) would have broken prod CORS if it ever had been wired
 # up. Removed from docker-compose.yml on 2026-07-26; change this list
 # directly if the origin set needs to change.
+# localhost origins removed 2026-09-03: local dev goes through the Vite proxy
+# (vite.config.mjs -> :8000) and is same-origin, so those entries only ever
+# granted a credentialed cross-origin channel to anything running on a
+# user's own machine.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://edusmart.ign3el.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -377,7 +383,7 @@ def _audio_media_type(path) -> str:
     return story_media.sniff_media_type(path)
 
 @app.get("/api/health")
-async def health_check():
+def health_check():
     """Liveness + dependency probe for Docker's healthcheck.
 
     Deliberately checks the things that can fail while the process still looks
@@ -436,7 +442,7 @@ async def health_check():
 
 
 @app.api_route("/api/outputs/{subpath:path}", methods=["GET", "HEAD"])
-async def serve_output_file(subpath: str, media_user: dict = Depends(get_media_user)):
+def serve_output_file(subpath: str, media_user: dict = Depends(get_media_user)):
     """
     Serve legacy TTS audio cache and job status files from outputs/.
     Kept for backward compatibility with older stories and as the live cache
@@ -472,7 +478,7 @@ async def serve_output_file(subpath: str, media_user: dict = Depends(get_media_u
 
 
 @app.api_route("/api/saved-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
-async def serve_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
+def serve_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
     """
     Serve story files with smart filename matching and proper CORS headers.
     Handles both GET and HEAD requests.
@@ -521,7 +527,7 @@ async def serve_story_file(story_id: str, filename: str, media_user: dict = Depe
     return story_media.media_response(resolved)
 
 @app.api_route("/api/generated-stories/{story_id}/{filename:path}", methods=["GET", "HEAD"])
-async def serve_generated_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
+def serve_generated_story_file(story_id: str, filename: str, media_user: dict = Depends(get_media_user)):
     """
     Serve files from generated_stories folder with proper CORS headers.
     Similar to saved-stories endpoint but for in-progress/temporary stories.
@@ -831,6 +837,69 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         _job_row = job_manager.get_story_status(story_id) or {}
         quiz_size = normalize_quiz_size(_job_row.get("quiz_size") or DEFAULT_QUIZ_SIZE)
 
+        # Seed shared by every image in the story (character consistency).
+        # Decided here, before the text phase, because the speculative scene 0
+        # image below needs it and it must be the SAME seed scenes 1..N use.
+        story_seed = int(uuid.uuid4().hex[:8], 16)
+        force_mobile = True
+
+        # --- Speculative scene 0 media -----------------------------------
+        # process_file_to_story hands over the first structurally valid draft
+        # BEFORE the self-review scores it (on_draft). Scene 0's image and
+        # narration start right then, overlapping the ~12s review plus any
+        # targeted patch / regen that follows. When the final story arrives,
+        # each asset is kept only if the input it was made from is unchanged
+        # (image_prompt + subject; narrative_text + voice) - otherwise it is
+        # cancelled and regenerated exactly as before. A wrong guess costs one
+        # image and one TTS job; a right one takes ~12-25s off first playable.
+        loop = asyncio.get_running_loop()
+        draft_media: dict = {}
+
+        def _start_draft_media(draft: dict):
+            if draft_media:
+                return
+            d_scenes = draft.get("scenes") or []
+            if not d_scenes or not isinstance(d_scenes[0], dict):
+                return
+            s0 = d_scenes[0]
+            d_subject = draft.get("subject", "General")
+            d_voice = resolve_persona_voice(d_subject, draft.get("detected_language", "en"), voice)
+            d_speed = resolve_grade_spec(grade_level)["tts_speed"]
+            draft_media.update({
+                "image_prompt": s0.get("image_prompt"), "subject": d_subject,
+                "narrative": s0.get("narrative_text"), "voice": d_voice,
+            })
+
+            async def _draft_image():
+                return await gemini.generate_image(
+                    s0.get("image_prompt", ""), story_seed=story_seed, is_mobile=force_mobile,
+                    scene_num=0, grade_level=grade_level, subject=d_subject,
+                )
+
+            async def _draft_tts():
+                async with tts_governor.slot():
+                    from services.kokoro_client import generate_tts_async
+                    return await generate_tts_async(
+                        text=s0.get("narrative_text", ""), voice=d_voice, speed=d_speed, parallel_chunks=2,
+                    )
+
+            draft_media["image"] = asyncio.create_task(_draft_image())
+            draft_media["audio"] = asyncio.create_task(_draft_tts())
+            logger.info(f"⚡ Story {story_id}: scene 0 image + TTS started from draft, overlapping self-review")
+
+        def _on_draft(draft: dict):
+            # Called from the to_thread worker - hop back onto the loop.
+            loop.call_soon_threadsafe(_start_draft_media, draft)
+
+        def _discard_draft_media(reason: str):
+            for k in ("image", "audio"):
+                t = draft_media.get(k)
+                if t is not None and not t.done():
+                    t.cancel()
+            if draft_media:
+                logger.info(f"⚡ Story {story_id}: draft scene 0 media discarded ({reason})")
+            draft_media.clear()
+
         # Generate story structure
         # Groq's SDK is synchronous, so this occupies a thread-pool slot for the
         # entire round trip, and Groq itself rate-limits by tokens per minute.
@@ -856,10 +925,13 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         quality_scores = None
         last_error: Optional[Exception] = None
         for attempt in (1, 2):
+            if attempt > 1:
+                _discard_draft_media("text generation retry")
             try:
                 async with llm_governor.slot():
                     story_data, quality_scores = await asyncio.to_thread(
-                        gemini.process_file_to_story, file_path, grade_level, user_id, quiz_size
+                        gemini.process_file_to_story, file_path, grade_level, user_id, quiz_size,
+                        on_draft=_on_draft,
                     )
                 if story_data:
                     break
@@ -935,8 +1007,8 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
         logger.info(f"✓ Story structure ready in {time.time() - workflow_start_time:.2f}s: {len(scenes)} scenes")
         
         # --- Optimized Generation Strategy ---
-        story_seed = int(uuid.uuid4().hex[:8], 16)
-        force_mobile = True
+        # story_seed / force_mobile are defined above the text phase (the
+        # speculative scene 0 image needs the same seed scenes 1..N use).
         
         # Define background task for remaining images (Scenes 1..N)
         async def generate_remaining_images_background(r_scenes, seed, mobile, reference_image=None):
@@ -992,15 +1064,27 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
 
         # Define Scene 0 Image Task with Immediate Chaining
         async def generate_scene_0_image_and_chain():
-            logger.info("🎨 Starting Scene 0 image generation...")
-            img_0 = await gemini.generate_image(
-                scenes[0]['image_prompt'],
-                story_seed=story_seed,
-                is_mobile=force_mobile,
-                scene_num=0,
-                grade_level=grade_level,
-                subject=subject
-            )
+            d_img = draft_media.get("image")
+            if (
+                d_img is not None
+                and draft_media.get("image_prompt") == scenes[0].get('image_prompt')
+                and draft_media.get("subject") == subject
+            ):
+                logger.info("🎨 Scene 0 image: reusing the job started from the draft")
+                img_0 = await d_img
+            else:
+                if d_img is not None:
+                    d_img.cancel()
+                    logger.info("🎨 Scene 0 image: draft prompt/subject changed - regenerating")
+                logger.info("🎨 Starting Scene 0 image generation...")
+                img_0 = await gemini.generate_image(
+                    scenes[0]['image_prompt'],
+                    story_seed=story_seed,
+                    is_mobile=force_mobile,
+                    scene_num=0,
+                    grade_level=grade_level,
+                    subject=subject
+                )
             
             # 🔗 CRITICAL: Trigger background generation IMMEDIATELY after Scene 0 Image finishes
             # This prevents RunPod 10s idle timeout if TTS takes longer than Image gen
@@ -1037,39 +1121,61 @@ async def run_ai_workflow_progressive_mobile(story_id: str, file_path: str, grad
             # the limit is how twenty simultaneous uploads make all twenty slower
             # than any of them queued.
             #
-            # It also goes through the SAME CLIENT as scenes 1..N. This used to
-            # call chatterbox.generate_audio(), which posts straight at
-            # CHATTERBOX_URL and has never once consulted Config.TTS_BACKEND - so
-            # with TTS_BACKEND=runpod every other scene ran on the GPU in 2.9-5.7s
-            # while scene 0, the only one blocking the player, sat on the CPU
-            # container for 26.5s. Route it through kokoro_client like everything
-            # else and the backend switch means what it says.
+            # It also goes through the SAME CLIENT as scenes 1..N - now
+            # services.kokoro_client.generate_tts_async, the single place
+            # voice -> engine routing is decided (Piper/Chatterbox/Kokoro). This
+            # used to be a hand-copied branch that drifted from
+            # story_service.py's (this is the exact bug class described
+            # below, generalized): call chatterbox.generate_audio(), which
+            # posted straight at CHATTERBOX_URL and never consulted
+            # Config.TTS_BACKEND - so with TTS_BACKEND=runpod every other
+            # scene ran on the GPU in 2.9-5.7s while scene 0, the only one
+            # blocking the player, sat on the CPU container for 26.5s.
             scene_0_text = scenes[0]['narrative_text']
             scene_0_speed = resolve_grade_spec(grade_level)["tts_speed"]
-            async with tts_governor.slot():
-                if voice == "ar_teacher":
-                    # Arabic goes to Piper, mirroring story_service's scene 1..N
-                    # branch - Kokoro has no Arabic voice.
-                    from services.piper_client import piper_tts
-                    audio = await piper_tts.generate_audio(scene_0_text, speed=scene_0_speed, silence=0.3)
-                else:
-                    from services.kokoro_client import generate_tts
-                    # generate_tts is a blocking requests.post; called bare from
-                    # async it stalls the event loop for the whole process.
-                    audio = await asyncio.to_thread(
-                        generate_tts,
-                        text=scene_0_text,
-                        voice=voice,
-                        speed=scene_0_speed
-                    )
+            d_aud = draft_media.get("audio")
+            if (
+                d_aud is not None
+                and draft_media.get("narrative") == scene_0_text
+                and draft_media.get("voice") == voice
+            ):
+                logger.info("🔊 Scene 0 TTS: reusing the job started from the draft")
+                audio = await d_aud
+            else:
+                if d_aud is not None:
+                    d_aud.cancel()
+                    logger.info("🔊 Scene 0 TTS: draft narration/voice changed - regenerating")
+                async with tts_governor.slot():
+                    from services.kokoro_client import generate_tts_async
+                    # parallel_chunks=2: scene 0 is the only scene the user is
+                    # blocked on, so it is split across both Chatterbox workers
+                    # (see kokoro_client._split_balanced).
+                    audio = await generate_tts_async(text=scene_0_text, voice=voice, speed=scene_0_speed, parallel_chunks=2)
             logger.info(f"✓ Scene 0 TTS generated in {time.time() - tts_0_start_time:.2f}s")
             return audio
         scene_0_tts_task = generate_scene_0_tts_timed()
 
         # Run Scene 0 tasks concurrently
         # Even if TTS takes longer, background images have already started!
-        scene_0_data = await asyncio.gather(scene_0_image_task, scene_0_tts_task)
-        img_0_bytes, scene_0_audio = scene_0_data
+        # return_exceptions=True: a plain gather() propagates the FIRST
+        # exception raised and never yields the other task's result, even if
+        # it already succeeded. A slow/failed TTS call (e.g. a RunPod
+        # Chatterbox execution-timeout) would otherwise throw away an
+        # already-generated scene 0 image and fail the entire story/refund
+        # the credit, even though 7/8 scenes generated fine. Each asset is
+        # now saved or marked failed independently below.
+        scene_0_results = await asyncio.gather(scene_0_image_task, scene_0_tts_task, return_exceptions=True)
+        img_0_result, scene_0_audio_result = scene_0_results
+        if isinstance(img_0_result, Exception):
+            logger.error(f"✗ Scene 0 image generation failed: {img_0_result}")
+            img_0_bytes = None
+        else:
+            img_0_bytes = img_0_result
+        if isinstance(scene_0_audio_result, Exception):
+            logger.error(f"✗ Scene 0 TTS generation failed: {scene_0_audio_result}")
+            scene_0_audio = None
+        else:
+            scene_0_audio = scene_0_audio_result
 
         logger.info(f"✓ Scene 0 assets generated. Saving...")
 
@@ -1192,6 +1298,10 @@ async def upload_story(
     If duplicate found and user chooses to view existing, delete temp story and redirect.
     If duplicate found and user chooses to generate new, create new story with copy of file.
     """
+    from services.kokoro_client import is_voice_allowed
+    if not is_voice_allowed(voice, current_user):
+        raise HTTPException(status_code=403, detail="Voice not available for this account")
+
     # Read file content
     file_content = await file.read()
     _validate_upload(file.filename, file_content)
@@ -1285,6 +1395,11 @@ async def upload_story(
             "user_id": current_user["id"],
         },
     )
+    # Wake the RunPod workers now, while Gemini spends ~15-20s writing the
+    # story. A cold FLUX/Chatterbox worker was measured at 72s/82s to first
+    # output (2026-09-04); by the time scene 0 needs them they are booted.
+    # Fire-and-forget: prewarm_endpoints never raises and is debounced.
+    asyncio.create_task(prewarm_endpoints())
 
     return {
         "job_id": story_id,
@@ -1315,9 +1430,19 @@ async def handle_duplicate_choice(
     - view_existing: Delete temp story and return existing story_id
     - generate_new: Create new story with file copy
     """
+    from services.kokoro_client import is_voice_allowed
+    if not is_voice_allowed(voice, current_user):
+        raise HTTPException(status_code=403, detail="Voice not available for this account")
+
     if choice == "view_existing":
         # Delete any temp story that was created
         if duplicate_type == "generated":
+            # duplicate_story_id is client-supplied. Without this check any
+            # signed-in user could rmtree + fail-mark someone else's in-flight
+            # generation (and the victim's credit stays spent).
+            existing = job_manager.get_story_status(duplicate_story_id)
+            if not existing or existing.get("user_id") != current_user["id"]:
+                raise HTTPException(status_code=404, detail="Story not found")
             # This is a temp story, delete it
             storage_manager.delete_story(duplicate_story_id, in_saved=False)
             job_manager.mark_story_failed(duplicate_story_id, "User chose to view existing story")
@@ -1391,6 +1516,7 @@ async def handle_duplicate_choice(
                 "user_id": current_user["id"],
             },
         )
+        asyncio.create_task(prewarm_endpoints())  # see /api/upload
 
         return {
             "action": "generate_new",
@@ -1408,7 +1534,7 @@ async def handle_duplicate_choice(
 
 # Progressive endpoints for scene-by-scene loading
 @app.get("/api/story/{story_id}/status")
-async def get_story_status(story_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+def get_story_status(story_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get overall story status with scene completion info."""
     logger.info(f"🔍 Getting story status for: {story_id}")
 
@@ -1627,23 +1753,19 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
                     scene_found = False
                     
                     if job_id:
-                        image_file = f"{job_id}_scene_{scene_index}.png"
                         audio_file = f"{job_id}_scene_{scene_index}.mp3"
-                        image_path = os.path.join(story_dir, image_file)
                         audio_path = os.path.join(story_dir, audio_file)
-                        
+
                         if not os.path.exists(audio_path):
                             audio_file = f"{job_id}_scene_{scene_index}.wav"
                             audio_path = os.path.join(story_dir, audio_file)
-                        
+
                         if os.path.exists(image_path) or os.path.exists(audio_path):
                             scene_found = True
                     else:
-                        image_file = f"scene_{scene_index}.png"
                         audio_file = f"scene_{scene_index}.wav"
-                        image_path = os.path.join(story_dir, image_file)
                         audio_path = os.path.join(story_dir, audio_file)
-                        
+
                         if os.path.exists(image_path) or os.path.exists(audio_path):
                             scene_found = True
                     
@@ -1677,7 +1799,7 @@ async def get_story_status(story_id: str, current_user: dict = Depends(get_curre
 
 
 @app.get("/api/story/{story_id}/scene/{scene_index}")
-async def get_scene_status(story_id: str, scene_index: int, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+def get_scene_status(story_id: str, scene_index: int, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Get specific scene data."""
     if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
@@ -1740,7 +1862,7 @@ def _failure_payload(stored_error) -> Dict[str, Any]:
 
 
 @app.get("/api/status/{job_id}")
-async def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+def get_status(job_id: str, current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     if not _verify_story_access(job_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
 
@@ -1876,7 +1998,7 @@ async def get_status(job_id: str, current_user: dict = Depends(get_current_user)
     return jobs[job_id]
 
 @app.patch("/api/stories/{story_id}/visibility")
-async def set_story_visibility(
+def set_story_visibility(
     story_id: str,
     is_public: bool = Body(..., embed=True),
     user: User = Depends(get_current_user),
@@ -1895,7 +2017,7 @@ async def set_story_visibility(
 
 
 @app.post("/api/save-story/{job_id}")
-async def save_story(
+def save_story(
     job_id: str,
     story_name: str = Form(...),
     make_public: bool = Form(False),
@@ -2057,7 +2179,7 @@ async def save_story(
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while saving the story.")
 
 @app.get("/api/list-stories")
-async def list_stories(user: User = Depends(get_current_user)):
+def list_stories(user: User = Depends(get_current_user)):
     """
     List stories. Admins see all stories, regular users see only their own.
     """
@@ -2077,7 +2199,7 @@ async def list_stories(user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to list stories.")
 
 @app.get("/api/unsaved-stories")
-async def list_unsaved_stories(user: User = Depends(get_current_user)):
+def list_unsaved_stories(user: User = Depends(get_current_user)):
     """
     List this user's own generated-but-not-yet-saved stories still sitting in
     generated_stories/ - recoverable until the hourly cleanup sweep deletes
@@ -2121,7 +2243,7 @@ async def list_unsaved_stories(user: User = Depends(get_current_user)):
     return results
 
 @app.get("/api/load-story/{story_id}")
-async def load_story(story_id: str, user: User = Depends(get_current_user)):
+def load_story(story_id: str, user: User = Depends(get_current_user)):
     """
     Load a specific story. Enforces ownership rules (users can only load their own
     stories, unless they are an admin).
@@ -2179,7 +2301,7 @@ async def load_story(story_id: str, user: User = Depends(get_current_user)):
     return {"name": story["name"], "story_data": story_data}
 
 @app.delete("/api/delete-story/{story_id}")
-async def delete_story(story_id: str, user: User = Depends(get_current_user)):
+def delete_story(story_id: str, user: User = Depends(get_current_user)):
     """
     Deletes a specific story. Enforces ownership (users can only delete their own
     stories, unless they are an admin).
@@ -2199,7 +2321,7 @@ async def delete_story(story_id: str, user: User = Depends(get_current_user)):
     return {"message": "Story deleted successfully"}
 
 @app.get("/api/export-job/{job_id}")
-async def export_job(job_id: str, current_user: dict = Depends(get_current_user)):
+def export_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """
     Export a job (story generation) as a ZIP file for offline use.
     Includes all scenes with images and audio files.
@@ -2301,7 +2423,7 @@ def _sniff_audio_ext(path: str, fallback: str) -> str:
 
 
 @app.get("/api/export-story/{story_id}")
-async def export_story(story_id: str, user: User = Depends(get_current_user)):
+def export_story(story_id: str, user: User = Depends(get_current_user)):
     """
     Export a saved story as a ZIP file for offline use.
     Includes all scenes with images and audio files.
@@ -2402,7 +2524,7 @@ async def get_tts_status(story_id: str, current_user: dict = Depends(get_current
     return await gemini.get_tts_status(story_id)
 
 @app.get("/api/story/{story_id}/scene/{scene_num}/audio")
-async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = Depends(get_current_user)):
+def get_scene_audio(story_id: str, scene_num: int, current_user: dict = Depends(get_current_user)):
     """Get scene audio (from cache or generated/saved folder) with waterfall fallbacks"""
     if not _verify_story_access(story_id, current_user, allow_public=True):
         raise HTTPException(status_code=404, detail="Story not found")
@@ -2461,7 +2583,7 @@ async def get_scene_audio(story_id: str, scene_num: int, current_user: dict = De
 # --- QUIZ COMPLETION ENDPOINT ---
 
 @app.post("/api/story/{story_id}/complete-quiz")
-async def mark_quiz_complete(
+def mark_quiz_complete(
     story_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -2515,5 +2637,5 @@ async def mark_quiz_complete(
         raise
     except Exception as e:
         logger.error(f"Error marking quiz complete: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to record quiz completion")
 

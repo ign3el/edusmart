@@ -180,6 +180,20 @@ export const getSharedStory = async (token) => {
 export const generateVideo = async (storyId) =>
   (await apiClient.post(`/api/story/${storyId}/video`)).data;
 
+// GPU pre-warm on upload INTENT (dropzone tap / drag-enter), before the file
+// picker even opens. The RunPod image + TTS workers take ~60s to cold-boot,
+// and the earliest existing trigger (extract-text, after the file is picked)
+// leaves them still booting when scene 0 needs them. Fire-and-forget: a
+// failure here costs nothing but the head start. Throttled client-side so a
+// fidgety tap doesn't spam the endpoint; the server debounces again.
+let _lastPrewarmAt = 0
+export const prewarmGeneration = () => {
+  const now = Date.now()
+  if (now - _lastPrewarmAt < 20000) return
+  _lastPrewarmAt = now
+  apiClient.post('/api/upload/prewarm').catch(() => {})
+}
+
 export const getVideoStatus = async (storyId) =>
   (await apiClient.get(`/api/story/${storyId}/video/status`)).data;
 

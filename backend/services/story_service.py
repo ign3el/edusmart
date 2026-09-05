@@ -6,10 +6,14 @@ logger = logging.getLogger(__name__)
 import json
 import base64
 import re
+import copy
+import difflib
 import time
 import io
 import wave
 import asyncio
+import threading
+import concurrent.futures
 import aiohttp
 import aiofiles
 import requests
@@ -41,6 +45,253 @@ _REFERENCE_DENOISE = float(os.getenv("REFERENCE_IMAGE_DENOISE", "0.85"))
 # Separate dial for the schnell backend (see IMAGE_BACKEND in config.py) -
 # dev's 0.85 was measured at 20 steps and may not hold at schnell's 4.
 _SCHNELL_REFERENCE_DENOISE = float(os.getenv("REFERENCE_IMAGE_DENOISE_SCHNELL", "0.85"))
+
+# Render knobs for the FLUX.1-dev path. These used to hang off is_mobile, and
+# main.py forces is_mobile=True for every story, so every scene shipped at
+# 512x512 with euler_ancestral - into a 1:1 player frame that is ~1100 device
+# pixels wide on a modern phone (2x+ upscale). Measured 2026-09-04 on the live
+# RunPod endpoint, warm worker, 15 steps: 512=7.8s, 768=13.3s, 1024=20.0s.
+# euler+beta instead of euler_ancestral+simple: ancestral samplers re-inject
+# noise each step, which fights FLUX's flow-matching and reads as grainy;
+# side by side at 512 the euler/beta render kept the face the prompt asked
+# for while the ancestral one turned the character away. Env-driven so the
+# cost/quality trade (RUNPOD_COST_AED_PER_IMAGE scales with pixels) is a
+# restart, not a rebuild.
+_IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "768"))
+_IMAGE_STEPS = int(os.getenv("IMAGE_STEPS", "15"))
+_IMAGE_SAMPLER = os.getenv("IMAGE_SAMPLER", "euler")
+_IMAGE_SCHEDULER = os.getenv("IMAGE_SCHEDULER", "beta")
+# FLUX.1-dev's distilled guidance. It was an invisible ComfyUI default (3.5)
+# with no node to set it; now explicit. Lower (2.5-3) is more painterly,
+# higher (4+) more literal.
+_FLUX_GUIDANCE = float(os.getenv("FLUX_GUIDANCE", "3.5"))
+
+# RunPod /runsync holds the request open until the job finishes (or ~90s),
+# so a 4s TTS job returns at 4s instead of on the next 2s poll tick. Anything
+# still running when runsync gives up is picked up by a 1s status poll.
+_RUNSYNC_WAIT_S = int(os.getenv("RUNPOD_RUNSYNC_WAIT_S", "90"))
+
+# Endpoint pre-warm. Both RunPod endpoints scale to zero, and measured cold
+# starts on 2026-09-04 were 72s (FLUX-dev fp8) and 82s (Chatterbox) - paid in
+# full by scene 0, AFTER the 15-20s LLM phase had already finished, because
+# nothing touched a GPU until the story text existed. prewarm_endpoints() fires
+# a throwaway job at each endpoint the moment an upload is accepted (and at the
+# confirm screen, which is earlier still), so the workers boot while the user
+# reads the confirm screen and the LLM writes the story. The job itself is
+# ~1-2s of GPU on a warm worker and is not counted against the spend cap or
+# api_usage: it is infrastructure, not a story asset. Debounced so a burst of
+# uploads doesn't queue a pile of no-op jobs.
+_PREWARM_DEBOUNCE_S = float(os.getenv("RUNPOD_PREWARM_DEBOUNCE_S", "20"))
+_last_prewarm_at = 0.0
+
+# MPEG Layer III bitrate tables (kbps), indexed by the 4-bit bitrate field.
+_MP3_BITRATES_V1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+_MP3_BITRATES_V2L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+
+
+def _audio_duration_s(audio_bytes: bytes) -> float:
+    """Best-effort clip length for the TTS log line. WAV from the header; MP3
+    from the first frame header's bitrate (CBR - which is what both TTS
+    engines emit: 64 kbps mono, measured). Replaces a size/176KB guess that
+    assumed 44.1 kHz stereo PCM and logged a 29s clip as "~1.3s". 0.0 when
+    the format is not recognised - this is a log estimate, never a decision."""
+    try:
+        if audio_bytes[:4] == b"RIFF":
+            with wave.open(io.BytesIO(audio_bytes)) as w:
+                return w.getnframes() / float(w.getframerate() or 1)
+        pos = 0
+        if audio_bytes[:3] == b"ID3" and len(audio_bytes) >= 10:
+            pos = 10 + ((audio_bytes[6] & 0x7F) << 21 | (audio_bytes[7] & 0x7F) << 14
+                        | (audio_bytes[8] & 0x7F) << 7 | (audio_bytes[9] & 0x7F))
+        end = min(len(audio_bytes) - 4, pos + 4096)
+        while pos < end:
+            b1, b2, b3 = audio_bytes[pos], audio_bytes[pos + 1], audio_bytes[pos + 2]
+            if b1 == 0xFF and (b2 & 0xE0) == 0xE0 and (b2 & 0x06) == 0x02:
+                table = _MP3_BITRATES_V1L3 if ((b2 >> 3) & 0x03) == 3 else _MP3_BITRATES_V2L3
+                kbps = table[b3 >> 4]
+                if kbps:
+                    return (len(audio_bytes) - pos) * 8 / (kbps * 1000.0)
+            pos += 1
+    except Exception:
+        pass
+    return 0.0
+
+
+def _prewarm_workflow(use_schnell: bool) -> dict:
+    # Smallest thing that forces the checkpoint into VRAM: a 256px,
+    # 1-step render. Output is discarded. Two graphs because the two backends
+    # ship as different loaders on different worker images (see IMAGE_BACKEND
+    # in config.py) - a dev graph sent to the schnell endpoint just errors.
+    if use_schnell:
+        return {
+            "5": {"inputs": {"width": 256, "height": 256, "batch_size": 1}, "class_type": "EmptyLatentImage"},
+            "6": {"inputs": {"text": "warm up", "clip": ["11", 0]}, "class_type": "CLIPTextEncode"},
+            "8": {"inputs": {"samples": ["13", 0], "vae": ["10", 0]}, "class_type": "VAEDecode"},
+            "9": {"inputs": {"filename_prefix": "prewarm", "images": ["8", 0]}, "class_type": "SaveImage"},
+            "10": {"inputs": {"vae_name": "ae.safetensors"}, "class_type": "VAELoader"},
+            "11": {"inputs": {"clip_name1": "t5xxl_fp8_e4m3fn.safetensors", "clip_name2": "clip_l.safetensors",
+                              "type": "flux"}, "class_type": "DualCLIPLoader"},
+            "12": {"inputs": {"unet_name": "flux1-schnell.safetensors", "weight_dtype": "fp8_e4m3fn"},
+                   "class_type": "UNETLoader"},
+            "13": {"inputs": {"noise": ["25", 0], "guider": ["22", 0], "sampler": ["16", 0], "sigmas": ["17", 0],
+                              "latent_image": ["5", 0]}, "class_type": "SamplerCustomAdvanced"},
+            "16": {"inputs": {"sampler_name": "euler"}, "class_type": "KSamplerSelect"},
+            "17": {"inputs": {"scheduler": "sgm_uniform", "steps": 1, "denoise": 1.0, "model": ["12", 0]},
+                   "class_type": "BasicScheduler"},
+            "22": {"inputs": {"model": ["12", 0], "conditioning": ["6", 0]}, "class_type": "BasicGuider"},
+            "25": {"inputs": {"noise_seed": 1}, "class_type": "RandomNoise"},
+        }
+    return {
+        "6": {"inputs": {"text": "warm up", "clip": ["30", 1]}, "class_type": "CLIPTextEncode"},
+        "33": {"inputs": {"text": "", "clip": ["30", 1]}, "class_type": "CLIPTextEncode"},
+        "8": {"inputs": {"samples": ["31", 0], "vae": ["30", 2]}, "class_type": "VAEDecode"},
+        "9": {"inputs": {"filename_prefix": "prewarm", "images": ["8", 0]}, "class_type": "SaveImage"},
+        "27": {"inputs": {"width": 256, "height": 256, "batch_size": 1}, "class_type": "EmptyLatentImage"},
+        "30": {"inputs": {"ckpt_name": "flux1-dev-fp8.safetensors"}, "class_type": "CheckpointLoaderSimple"},
+        "31": {"inputs": {"seed": 1, "steps": 1, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
+                          "denoise": 1.0, "model": ["30", 0], "positive": ["6", 0], "negative": ["33", 0],
+                          "latent_image": ["27", 0]}, "class_type": "KSampler"},
+    }
+
+
+def _prewarm_jobs() -> Optional[tuple[dict, list]]:
+    """Debounce + job list shared by the async and sync pre-warm entry points.
+    Returns None when nothing should be sent (debounced, no key, nothing on)."""
+    global _last_prewarm_at
+    now = time.time()
+    if now - _last_prewarm_at < _PREWARM_DEBOUNCE_S:
+        return None
+    _last_prewarm_at = now
+
+    api_key = os.getenv("RUNPOD_KEY")
+    if not api_key:
+        return None
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    jobs = []
+    if app_config.get_flag("image_generation_enabled", default=True):
+        use_schnell = Config.IMAGE_BACKEND == "flux-schnell"
+        flux_ep = os.getenv("RUNPOD_ENDPOINT_ID_FLUX_SCHNELL" if use_schnell else "RUNPOD_ENDPOINT_ID_FLUX")
+        if flux_ep:
+            jobs.append((f"https://api.runpod.ai/v2/{flux_ep}/run",
+                         {"input": {"workflow": _prewarm_workflow(use_schnell)}}))
+    if Config.TTS_ENGINE == "chatterbox":
+        cb_ep = os.getenv("RUNPOD_ENDPOINT_ID_CHATTERBOX")
+        if cb_ep:
+            jobs.append((f"https://api.runpod.ai/v2/{cb_ep}/run",
+                         {"input": {"text": "Hello.", "voice": "af_sarah", "speed": 1.0, "repetition_penalty": 1.3}}))
+    return (headers, jobs) if jobs else None
+
+
+def prewarm_endpoints_sync() -> None:
+    """Thread-safe, fire-and-forget pre-warm for callers that are not on the
+    event loop - process_file_to_story runs under asyncio.to_thread. Re-fired
+    at the start of every story attempt and every self-review so the workers
+    stay alive across a text phase that measured 1-3 minutes on a real
+    document (2026-09-04): a single pre-warm at upload had long expired by the
+    time scene 0 asked for a GPU, and both cold starts landed on the user
+    anyway. Cost of keeping one schnell + one Chatterbox worker idle for the
+    text phase is ~0.1-0.15 AED/story - see PROJECT.md."""
+    prepared = _prewarm_jobs()
+    if not prepared:
+        return
+    headers, jobs = prepared
+
+    def _send():
+        for url, payload in jobs:
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=10)
+                logger.info(f"🔥 Pre-warm submitted to {url.split('/')[4]}: HTTP {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Pre-warm request failed ({url.split('/')[4]}): {e}")
+
+    threading.Thread(target=_send, name="runpod-prewarm", daemon=True).start()
+
+
+async def prewarm_endpoints() -> None:
+    """Fire-and-forget: submit a trivial job to the image and TTS endpoints so
+    their workers are booting before the story text exists. Never raises -
+    a failed pre-warm just means the cold start lands where it always did."""
+    prepared = _prewarm_jobs()
+    if not prepared:
+        return
+    headers, jobs = prepared
+    try:
+        async with aiohttp.ClientSession() as session:
+            for url, payload in jobs:
+                try:
+                    async with session.post(url, headers=headers, json=payload,
+                                            timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        logger.info(f"🔥 Pre-warm submitted to {url.split('/')[4]}: HTTP {resp.status}")
+                except Exception as e:
+                    logger.warning(f"Pre-warm request failed ({url.split('/')[4]}): {e}")
+    except Exception as e:
+        logger.warning(f"Pre-warm skipped: {e}")
+
+
+async def runpod_submit_and_wait(
+    session: "aiohttp.ClientSession",
+    endpoint_id: str,
+    headers: dict,
+    payload_input: dict,
+    total_timeout_s: float,
+    outcome: Optional[dict] = None,
+) -> Optional[dict]:
+    """POST /runsync, then fall back to a 1s /status poll if the job outlives
+    runsync's server-side wait. Returns the job's output dict, or None on
+    failure/timeout (already logged). Shared by every RunPod call made from
+    the async side of the app.
+
+    `outcome`, if passed, gets outcome["reason"] set on a None return:
+    "http" (endpoint rejected the request - retrying is pointless),
+    "job_failed" (worker-side FAILED/TIMED_OUT/CANCELLED - a fresh submit
+    lands on another worker), or "timeout" (our own budget ran out)."""
+    base = f"https://api.runpod.ai/v2/{endpoint_id}"
+    start = time.time()
+    if outcome is None:
+        outcome = {}
+    async with session.post(f"{base}/runsync?wait={_RUNSYNC_WAIT_S * 1000}", headers=headers,
+                            json={"input": payload_input},
+                            timeout=aiohttp.ClientTimeout(total=_RUNSYNC_WAIT_S + 30)) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            print(f"RunPod {endpoint_id[:6]} /runsync returned {resp.status}: {text[:120]}")
+            outcome["reason"] = "http"
+            return None
+        data = await resp.json()
+
+    status = data.get("status")
+    if status == "COMPLETED" and data.get("output") is not None:
+        return data["output"]
+    if status in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+        print(f"RunPod job failed: {str(data)[:200]}")
+        outcome["reason"] = "job_failed"
+        return None
+    request_id = data.get("id")
+    if not request_id:
+        print("RunPod response missing output/id")
+        return None
+
+    status_url = f"{base}/status/{request_id}"
+    while time.time() - start < total_timeout_s:
+        await asyncio.sleep(1)
+        try:
+            async with session.get(status_url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as s:
+                if s.status != 200:
+                    continue
+                sdata = await s.json()
+        except Exception as e:
+            logger.warning(f"RunPod status poll failed, retrying: {e}")
+            continue
+        st = sdata.get("status")
+        if st == "COMPLETED" and sdata.get("output") is not None:
+            return sdata["output"]
+        if st in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+            print(f"RunPod job failed: {str(sdata)[:200]}")
+            outcome["reason"] = "job_failed"
+            return None
+    print(f"RunPod job {request_id} did not complete within {total_timeout_s:.0f}s")
+    outcome["reason"] = "timeout"
+    return None
 
 
 @contextlib.asynccontextmanager
@@ -112,6 +363,22 @@ _TOPUP_DOC_CHARS = 3000
 # model swap is a config change, not a redeploy.
 _STORY_MODEL = Config.LLM_STORY_MODEL
 
+# Gemini request hedging. Probed 2026-09-04 from inside the backend container:
+# gemini-3.5-flash-lite answers a one-word prompt in ~1s, but roughly one call
+# in four stalls for ~30s and then returns the identical output (same token
+# counts, thoughts_token_count=None - so this is NOT the model thinking, it is
+# a transport/server-side stall). In a real story run that showed up as 51s
+# and 45s Gemini calls against a 6-13s norm. A hedge fires a duplicate request
+# once the first has been in flight longer than these thresholds and takes
+# whichever returns first; the straggler is discarded. Costs one extra request
+# (counted in api_usage) only on the stalled minority of calls. The story call
+# gets a longer fuse because its 16K-token output legitimately takes 8-13s.
+_GEMINI_HEDGE_S = float(os.getenv("GEMINI_HEDGE_S", "12"))
+_GEMINI_STORY_HEDGE_S = float(os.getenv("GEMINI_STORY_HEDGE_S", "20"))
+# 16 workers: each hedged call may briefly hold two threads, and a stalled
+# straggler holds one for up to ~35s after the winner returned.
+_gemini_hedge_pool = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="gemini-hedge")
+
 # Input cap for the Gemini story path. Not a rate-limit workaround - Gemini has
 # ~1M tokens of room - but a guard on latency and cost so one enormous upload
 # cannot dominate. ~120K chars is roughly 30K tokens, comfortably more than any
@@ -143,7 +410,24 @@ MAX_STORY_ATTEMPTS = 3
 STORY_MIN_COVERAGE = 100.0
 # hallucination score is already (100 - failure_rate), so >=98 means a
 # failure rate under 2%, matching the "hallucination <2%" requirement.
+# In practice, on a normal 8-scene + 10-question story (18 checkable units)
+# ONE flagged claim scores 94, so this gate is "zero unsupported claims".
+# That is the intent - but it only works if the flags are trustworthy, so
+# _score_story drops any claim the reviewer flags that is actually present
+# near-verbatim in the source document (measured 2026-09-04: a document
+# with its own factual error got the same verbatim sentence flagged on 3
+# consecutive attempts, 6 reviews, costing ~100s and a full regen loop for
+# a story that was faithful to its source all along).
 STORY_MIN_HALLUCINATION_SCORE = 98.0
+# A flagged claim is treated as supported-by-document (whatever its
+# real-world truth) when it is an exact normalised substring of the source,
+# or when some source sentence scores at least this difflib ratio AND
+# contains every word of the claim. The word-subset condition is what keeps
+# the filter precise: swapping one noun in a 15-word sentence still scores
+# ~0.95 on ratio alone (measured), and a changed fact must never be
+# whitelisted. Paraphrases therefore stay with the reviewer, whose prompt
+# carries the document-fidelity rule - this filter is only the backstop.
+_CLAIM_VERBATIM_RATIO = float(os.getenv("STORY_CLAIM_VERBATIM_RATIO", "0.85"))
 STORY_MIN_FAITHFULNESS = 95.0
 STORY_MIN_CITATION_ACCURACY = 95.0
 
@@ -308,6 +592,9 @@ class StoryService:
         exhausted, same as the single-key behavior this replaces.
         """
         model = kwargs.get("model")
+        # Popped once, before the loop: a quota-triggered retry on the fallback
+        # key must not forward it into generate_content, which rejects it.
+        hedge_after = kwargs.pop("hedge_after", _GEMINI_HEDGE_S)
         last_err = None
         for _ in range(2):
             # Re-read both slots on every call (not cached in a list at
@@ -321,7 +608,7 @@ class StoryService:
             # pool. Labels stay human ("gemini-primary"), never the key itself.
             key_label = "gemini-primary" if idx == 0 else "gemini-fallback"
             try:
-                result = clients[idx].models.generate_content(**kwargs)
+                result = self._generate_hedged(clients[idx], kwargs, hedge_after, model, key_label)
                 api_usage.record("gemini", model, key_label, ok=True)
                 return result
             except Exception as e:
@@ -336,6 +623,35 @@ class StoryService:
                     continue
                 raise
         raise last_err
+
+    def _generate_hedged(self, client, kwargs: dict, hedge_after: float, model, key_label: str):
+        """generate_content with a hedge (see _GEMINI_HEDGE_S). hedge_after <= 0
+        disables it. Whichever request finishes first wins; if the winner
+        failed, the other is still awaited before giving up, so a hedge can
+        only ever make a call faster or equal, never introduce a new failure."""
+        if hedge_after <= 0:
+            return client.models.generate_content(**kwargs)
+        first = _gemini_hedge_pool.submit(client.models.generate_content, **kwargs)
+        done, _ = concurrent.futures.wait([first], timeout=hedge_after)
+        if done:
+            return first.result()
+        print(f"⏳ Gemini ({model}) stalled >{hedge_after:.0f}s - firing hedge request")
+        # The hedge is a second billable request even though only one answer
+        # is used; counted so the panel's RPD view stays honest.
+        api_usage.record("gemini", model, key_label, ok=True)
+        second = _gemini_hedge_pool.submit(client.models.generate_content, **kwargs)
+        pending = {first, second}
+        last_err: Optional[BaseException] = None
+        while pending:
+            done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                try:
+                    result = fut.result()
+                    print(f"⏳ Gemini ({model}) hedge resolved by {'original' if fut is first else 'hedge'} request")
+                    return result
+                except BaseException as e:  # noqa: BLE001 - re-raised below
+                    last_err = e
+        raise last_err  # type: ignore[misc]
 
     # Vision reading recovers content rendered as design graphics - charts,
     # infographics, text drawn as vector paths - that pypdf/python-docx/
@@ -865,6 +1181,7 @@ class StoryService:
         model: Optional[str] = None,
         max_output_tokens: int = 16000,
         temperature: float = 0.6,
+        hedge_after: Optional[float] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """One JSON-mode Gemini call. Returns (text, error) - exactly one is set.
 
@@ -885,6 +1202,7 @@ class StoryService:
                     "max_output_tokens": max_output_tokens,
                     "temperature": temperature,
                 },
+                hedge_after=_GEMINI_HEDGE_S if hedge_after is None else hedge_after,
             )
             if response and response.text:
                 print(f"✓ Gemini ({use_model}) responded in {time.time() - started:.2f}s")
@@ -905,7 +1223,7 @@ class StoryService:
         # Generous token budget because Gemini's per-minute budget is 250K, not
         # 8000 - the completion no longer has to be rationed against the
         # prompt. A 20-question quiz plus 10 scenes needs room.
-        return self._gemini_json_call(prompt, max_output_tokens=16000, temperature=0.6)
+        return self._gemini_json_call(prompt, max_output_tokens=16000, temperature=0.6, hedge_after=_GEMINI_STORY_HEDGE_S)
 
     def _try_groq_story(self, instructions: str, text_content: str) -> Optional[str]:
         """One attempt at the Groq story call. Returns text, or None if not configured/empty."""
@@ -1021,7 +1339,9 @@ class StoryService:
             "not a full sentence.\n\n"
             f"DOCUMENT TEXT:\n{doc}"
         )
-        text, error = self._gemini_json_call(prompt, max_output_tokens=2000, temperature=0.2)
+        # Normally ~3s; a hedge at 6s costs one cheap duplicate call and saves
+        # ~6s on the ~1-in-3 transport stalls measured 2026-09-04.
+        text, error = self._gemini_json_call(prompt, max_output_tokens=2000, temperature=0.2, hedge_after=6)
         if not text:
             if error:
                 print(f"⚠ Checklist extraction failed ({error}); continuing without one")
@@ -1419,6 +1739,40 @@ OUTPUT: Valid JSON array of {questions_needed} question objects ONLY (no extra t
         "matching the exact schema requested. No markdown, no commentary."
     )
 
+    @staticmethod
+    def _norm_for_match(s: str) -> str:
+        s = s.lower()
+        s = re.sub(r"[^a-z0-9\u0600-\u06ff\u0900-\u097f ]+", " ", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    @classmethod
+    def _claim_in_source(cls, claim: str, text_content: str, doc_sentences: list[str]) -> bool:
+        """True when `claim` appears near-verbatim in the source document.
+
+        Exact normalised-substring first (cheap, catches the common case of
+        the model quoting the document), then best difflib ratio against
+        the document's individual sentences. `doc_sentences` is precomputed
+        once per review by the caller. Used by _score_story to discard
+        reviewer flags that contradict the reviewer's own brief - a claim
+        that IS in the document cannot be "not supported by the document".
+        """
+        c = cls._norm_for_match(claim)
+        if len(c) < 12:
+            return False
+        if c in cls._norm_for_match(text_content):
+            return True
+        c_words = set(c.split())
+        lo, hi = len(c) * 0.6, len(c) * 1.6
+        for s in doc_sentences:
+            if not (lo <= len(s) <= hi):
+                continue
+            if not c_words <= set(s.split()):
+                continue
+            m = difflib.SequenceMatcher(None, c, s)
+            if m.quick_ratio() >= _CLAIM_VERBATIM_RATIO and m.ratio() >= _CLAIM_VERBATIM_RATIO:
+                return True
+        return False
+
     def _score_story(self, story_json: dict, checklist: list[str], text_content: str) -> dict:
         """Judge one generated attempt against the source document.
 
@@ -1480,6 +1834,7 @@ SOURCE DOCUMENT:
 For each checklist item, decide whether it is reflected somewhere in the scenes or quiz ("covered") or not ("missing").
 For each quiz question whose "source" is "extracted", decide whether its document_section citation is actually verifiable in the source document ("verified") or not ("unverified").
 List any specific claim in the scenes or quiz (a narrative_text sentence, an "explanation", or a "why_correct") that states something NOT supported by the source document - an invented or hallucinated fact. Quote the claim exactly or near-exactly.
+IMPORTANT: "supported" means PRESENT IN THE SOURCE DOCUMENT. A claim that the document itself states is SUPPORTED even if it is scientifically or factually wrong - the document is the only ground truth here. Do NOT use outside knowledge, and do NOT flag a sentence because you believe the document is mistaken. Your job is document fidelity, not fact-checking the document.
 Also give a 0-100 faithfulness score for how well the story's content as a whole matches the document's actual content and meaning, independent of wording.
 
 Output ONLY this JSON object, no markdown, no extra text:
@@ -1506,6 +1861,26 @@ Output ONLY this JSON object, no markdown, no extra text:
         checklist_status = result.get("checklist_status") or []
         citation_status = result.get("citation_status") or []
         unsupported_claims = [str(c) for c in (result.get("unsupported_claims") or []) if str(c).strip()]
+
+        # Deterministic backstop for the reviewer: anything it flagged that
+        # is actually in the document is supported by definition (see the
+        # comment above STORY_MIN_HALLUCINATION_SCORE). Logged loudly rather
+        # than silently, because a verbatim-but-flagged sentence usually
+        # means the DOCUMENT contains an error worth telling the teacher
+        # about - the app stays faithful to the upload either way.
+        if unsupported_claims:
+            doc_sentences = [
+                self._norm_for_match(s)
+                for s in re.split(r"(?<=[.!?])\s+|\n+", text_content[:_STORY_MAX_DOC_CHARS])
+            ]
+            doc_sentences = [s for s in doc_sentences if len(s) >= 12]
+            kept: list[str] = []
+            for claim in unsupported_claims:
+                if self._claim_in_source(claim, text_content, doc_sentences):
+                    print(f"📄 Reviewer flag dropped - claim is verbatim in the source document (document error?): {claim[:160]}")
+                else:
+                    kept.append(claim)
+            unsupported_claims = kept
 
         total_checklist = len(checklist_status)
         covered = sum(1 for c in checklist_status if isinstance(c, dict) and c.get("status") == "covered")
@@ -1546,6 +1921,124 @@ Output ONLY this JSON object, no markdown, no extra text:
             "uncited_questions": uncited_questions,
         }
 
+    def _patch_unsupported_claims(self, story_json: dict, claims: list[str], text_content: str) -> Optional[dict]:
+        """Rewrite ONLY the text fields carrying judge-flagged claims, against
+        the document, and return a patched deep copy - or None when no claim
+        could be located or the model returned nothing usable.
+
+        This exists because a full regen is the wrong tool for a story that is
+        otherwise clean: on a real grade-10 chemistry document (2026-09-04)
+        attempt 1 cleared coverage/faithfulness/citations and failed only
+        hallucination on ONE wrong formula, the two full regens that followed
+        cost ~100s, and attempt 3 reproduced attempt 2's wrong claim verbatim
+        despite it being named in the feedback. Rewriting the flagged
+        sentences is two small calls and cannot invent errors elsewhere.
+
+        Each claim is matched to the single field whose sentences resemble it
+        most (exact substring first, then difflib), so the judge's "exact or
+        near-exact" quoting does not have to be byte-exact. The model gets the
+        whole field, not just the sentence, so the rewrite stays coherent.
+        """
+        import copy
+        import difflib
+
+        def _sentences(t: str) -> list[str]:
+            return [s for s in re.split(r"(?<=[.!?])\s+", t) if s.strip()]
+
+        def _match(claim: str, text: str) -> float:
+            if claim in text:
+                return 1.0
+            cl = claim.lower()
+            return max((difflib.SequenceMatcher(None, cl, s.lower()).ratio() for s in _sentences(text)), default=0.0)
+
+        candidates: list[tuple[str, str]] = []
+        for i, s in enumerate(story_json.get("scenes") or []):
+            if isinstance(s, dict):
+                for key in ("narrative_text", "check_for_understanding"):
+                    if isinstance(s.get(key), str) and s[key].strip():
+                        candidates.append((f"scenes[{i}].{key}", s[key]))
+        for i, q in enumerate(story_json.get("quiz") or []):
+            if isinstance(q, dict):
+                for key in ("question_text", "explanation", "why_correct"):
+                    if isinstance(q.get(key), str) and q[key].strip():
+                        candidates.append((f"quiz[{i}].{key}", q[key]))
+
+        flagged: dict[str, list[str]] = {}
+        for claim in claims:
+            best_id, best = None, 0.0
+            for fid, text in candidates:
+                r = _match(claim, text)
+                if r > best:
+                    best_id, best = fid, r
+            if best_id and best >= 0.5:
+                flagged.setdefault(best_id, []).append(claim)
+        if not flagged:
+            print("🩹 Targeted patch skipped: no flagged claim could be located in the story text")
+            return None
+
+        field_text = dict(candidates)
+        started = time.time()
+        claim_lines = "\n".join(f'- [{fid}] "{c}"' for fid, cs in flagged.items() for c in cs)
+        payload = json.dumps({"fields": [{"id": fid, "text": field_text[fid]} for fid in flagged]}, ensure_ascii=False)
+        prompt = f"""You are correcting an educational story for children so that it contains ONLY facts supported by the source document.
+
+A reviewer flagged these claims as NOT supported by the document:
+{claim_lines}
+
+These are the exact text fields containing them:
+{payload}
+
+For each field, return the corrected text:
+- Fix each flagged claim using ONLY information stated in the document. If the document does not cover it, delete that sentence.
+- Change nothing else: keep every other sentence, the characters, the tone, and approximately the same length.
+- Do not add any new facts. Do not mention the document or the correction.
+- Never return an empty text for a field.
+
+SOURCE DOCUMENT:
+{text_content[:_STORY_MAX_DOC_CHARS]}
+
+Output ONLY this JSON object, no markdown:
+{{"fields": [{{"id": "...", "text": "..."}}]}}"""
+
+        # Normally ~1s (measured 1.0-1.2s); one real stall cost 14s.
+        text, error = self._gemini_json_call(prompt, max_output_tokens=4000, temperature=0.1, hedge_after=5)
+        if not text:
+            print(f"🩹 Targeted patch failed ({error or 'empty response'}); falling back to full regen")
+            return None
+        try:
+            result = json.loads(text)
+            returned = result.get("fields") if isinstance(result, dict) else None
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            returned = None
+        if not isinstance(returned, list):
+            print("🩹 Targeted patch returned unparseable JSON; falling back to full regen")
+            return None
+
+        patched = copy.deepcopy(story_json)
+        spliced = 0
+        for item in returned:
+            if not isinstance(item, dict):
+                continue
+            fid, new_text = item.get("id"), item.get("text")
+            if fid not in flagged or not isinstance(new_text, str) or not new_text.strip():
+                continue
+            m = re.match(r"^(scenes|quiz)\[(\d+)\]\.(\w+)$", fid)
+            if not m:
+                continue
+            coll, idx, key = m.group(1), int(m.group(2)), m.group(3)
+            target = (patched.get(coll) or [])
+            if idx < len(target) and isinstance(target[idx], dict):
+                target[idx][key] = new_text.strip()
+                spliced += 1
+        if not spliced:
+            print("🩹 Targeted patch returned no usable field; falling back to full regen")
+            return None
+        print(
+            f"🩹 Targeted patch: {sum(len(v) for v in flagged.values())} claim(s) -> "
+            f"{spliced}/{len(flagged)} field(s) rewritten in {time.time() - started:.2f}s"
+        )
+        return patched
+
     def _build_regen_feedback(self, calibration_issues: list[str], scores: dict) -> str:
         """Targeted feedback block for the next attempt, naming exactly what
         the previous one got wrong - not a generic 'try harder'. Empty string
@@ -1580,6 +2073,7 @@ Output ONLY this JSON object, no markdown, no extra text:
         grade_level: str,
         user_id=None,
         quiz_size: int = DEFAULT_QUIZ_SIZE,
+        on_draft: Optional[Callable[[dict], None]] = None,
     ) -> tuple[Optional[dict], Optional[dict]]:
         """Generate a story+quiz from a document.
 
@@ -1608,6 +2102,14 @@ Output ONLY this JSON object, no markdown, no extra text:
         (best-of-N, tie-broken by the overall average). There is no human
         review step anywhere in this pipeline, so this method always returns
         a story rather than looping indefinitely.
+
+        on_draft, if given, is called ONCE with a deep copy of the first
+        structurally valid attempt BEFORE it is scored - i.e. ~12s (one
+        self-review) before this method can return, more if a patch or regen
+        follows. main.py uses it to start scene 0's image + narration
+        speculatively; it re-checks the draft's scene 0 against the final
+        story before using either asset. Called from this worker thread, so
+        the callback must be thread-safe and must not block.
         """
         try:
             with open(file_path, "rb") as f:
@@ -1682,6 +2184,26 @@ GROUNDING RULES (apply to every scene and every quiz answer/explanation):
   GOOD (grounded observation, no invented science): "Leo notices the meal is missing important nutrients."
 - Every quiz "why_correct" explanation must be traceable to something the document actually says, not to general knowledge about the topic."""
 
+            # Concrete, checkable form of the cognitive-level target for the
+            # bands that forbid bare recall (_check_grade_calibration's
+            # detector counts questions WITHOUT a reasoning cue, so the quota
+            # is phrased in exactly those cues). Measured 2026-09-04: with
+            # only the descriptive "do not fall below it" rule, a grade-10
+            # quiz came back 8/10 recall on 3 of 3 attempts.
+            if grade_spec.get("forbid_bare_recall"):
+                _reasoning_min = max(1, -(-quiz_size * 6 // 10))  # ceil(60%)
+                reasoning_quota_rule = (
+                    f"- REASONING QUOTA: at least {_reasoning_min} of the {quiz_size} questions MUST require "
+                    "reasoning, not lookup - each of those must ask WHY something happens, to COMPARE or "
+                    "find the DIFFERENCE between two things, to PREDICT what WOULD HAPPEN if a condition "
+                    "changed, to EXPLAIN how or why a process works, or to pick the BEST/MOST LIKELY "
+                    "option among plausible alternatives - and must contain that cue word explicitly. "
+                    f"At most {quiz_size - _reasoning_min} may be plain recall. Every answer must still "
+                    "be derivable from the document alone.\n"
+                )
+            else:
+                reasoning_quota_rule = ""
+
             unified_prompt = f"""You are creating an educational story for {grade_spec['descriptor']} from a source document.
 
 LANGUAGE (CRITICAL): The source document is in {language_name}. Write EVERY piece of output text in {language_name} - title, description, learning_outcome, key_points, every scene's narrative_text and check_for_understanding, every character description, and the entire quiz (question_text, options, explanation, why_correct). Do not silently translate to English if {language_name} is not English. The ONE exception is every image_prompt field: always write image_prompt in English regardless of the story's language, since the image generator only reliably understands English prompts.
@@ -1724,7 +2246,7 @@ QUIZ REQUIREMENTS (MANDATORY):
 - Do not write one question per scene. Scenes that recap or summarise earlier scenes contribute NO new question.
 - Every question must match the quiz cognitive level and vocabulary specified in the grade-level target above - do not exceed it even if the source document uses harder language.
 - Equally, do not fall BELOW it. For an upper-grade cognitive target, "What are the major food groups?" is a failure: it is bare recall. Ask instead for comparison, justification, or evaluation between plausible alternatives drawn from the document.
-- Every question must support scoring and review.
+{reasoning_quota_rule}- Every question must support scoring and review.
 - Each question object must include:
   - question_text
   - options
@@ -1789,18 +2311,37 @@ HARD RULES:
                 more = f" (+{len(items) - n} more)" if len(items) > n else ""
                 return (", ".join(shown) + more) if shown else "none"
 
+            # Independent gates, not a blended average - see the comment
+            # above STORY_MIN_COVERAGE for why. gates_passed is also what
+            # best-of-N ranks on below.
+            def _gates_of(sc: dict) -> dict:
+                return {
+                    "coverage": sc["coverage"] >= STORY_MIN_COVERAGE,
+                    "hallucination": sc["hallucination"] >= STORY_MIN_HALLUCINATION_SCORE,
+                    "faithfulness": sc["faithfulness"] >= STORY_MIN_FAITHFULNESS,
+                    "citation_accuracy": sc["citation_accuracy"] >= STORY_MIN_CITATION_ACCURACY,
+                }
+
             try:
                 best_result: Optional[dict] = None
                 best_quality_scores: Optional[dict] = None
                 best_rank = (-1, -1.0)  # (gates_passed, overall) - see best-of-N comment below
                 regen_feedback = ""
                 attempt = 0
+                draft_sent = False
+                # (gates, unsupported_claims, missing_items) of the previous
+                # attempt - see the "identical failure" stop below.
+                prev_failure_sig: Optional[tuple] = None
 
                 for attempt in range(1, MAX_STORY_ATTEMPTS + 1):
                     # Both the document budget and the provider choice live in
                     # _call_story_model: Gemini takes the whole document, the
                     # Groq fallback takes a much smaller slice because its
                     # 8000 tokens-per-minute tier cannot accept more.
+                    # Keep the GPU workers alive through the text phase - see
+                    # prewarm_endpoints_sync. Debounced, so this is a no-op
+                    # most of the time.
+                    prewarm_endpoints_sync()
                     content = self._call_story_model(
                         f"{unified_prompt}{regen_feedback}", text_content
                     )
@@ -1903,17 +2444,18 @@ HARD RULES:
                     # and, together with the accuracy scoring below, drives
                     # whether another attempt is worth spending.
                     calibration_issues = self._check_grade_calibration(json_obj, grade_level)
+                    prewarm_endpoints_sync()
+                    if on_draft is not None and not draft_sent:
+                        draft_sent = True
+                        try:
+                            draft = copy.deepcopy(json_obj)
+                            draft["detected_language"] = detected_lang
+                            on_draft(draft)
+                        except Exception as draft_err:
+                            print(f"⚡ on_draft callback failed (ignored): {draft_err}")
                     scores = self._score_story(json_obj, checklist, text_content)
 
-                    # Independent gates, not a blended average - see the
-                    # comment above STORY_MIN_COVERAGE for why. gates_passed
-                    # is also what best-of-N ranks on below.
-                    gates = {
-                        "coverage": scores["coverage"] >= STORY_MIN_COVERAGE,
-                        "hallucination": scores["hallucination"] >= STORY_MIN_HALLUCINATION_SCORE,
-                        "faithfulness": scores["faithfulness"] >= STORY_MIN_FAITHFULNESS,
-                        "citation_accuracy": scores["citation_accuracy"] >= STORY_MIN_CITATION_ACCURACY,
-                    }
+                    gates = _gates_of(scores)
                     gates_passed = sum(gates.values())
 
                     print(
@@ -1926,6 +2468,37 @@ HARD RULES:
                         + f"\n  unsupported_claims: {_truncated(scores['unsupported_claims'])}"
                         + f"\n  uncited_questions: {_truncated(scores['uncited_questions'])}"
                     )
+
+                    # Hallucination as the ONLY failing gate means the story is
+                    # otherwise clean and a handful of sentences are wrong -
+                    # patch those in place and re-judge instead of regenerating
+                    # everything (rationale + measurements in
+                    # _patch_unsupported_claims). Any other gate failing still
+                    # goes through the full regen path below. The patched
+                    # version replaces this attempt only if it scores at least
+                    # as well; best-of-N and the regen feedback then see the
+                    # patched story, never the discarded one.
+                    if (
+                        gates_passed == 3 and not gates["hallucination"]
+                        and scores["unsupported_claims"] and self._gemini_client
+                    ):
+                        patched = self._patch_unsupported_claims(json_obj, scores["unsupported_claims"], text_content)
+                        if patched is not None:
+                            p_valid, p_errors = self._validate_story_json(patched)
+                            if not p_valid:
+                                print(f"🩹 Targeted patch discarded - structure invalid after splice: {p_errors}")
+                            else:
+                                p_scores = self._score_story(patched, checklist, text_content)
+                                p_gates = _gates_of(p_scores)
+                                p_passed = sum(p_gates.values())
+                                print(
+                                    f"🩹 Attempt {attempt} re-scored after patch - "
+                                    f"hallucination={p_scores['hallucination']:.0f} overall={p_scores['overall']:.0f} "
+                                    f"gates_passed={p_passed}/4"
+                                    + f"\n  unsupported_claims: {_truncated(p_scores['unsupported_claims'])}"
+                                )
+                                if (p_passed, p_scores["overall"]) >= (gates_passed, scores["overall"]):
+                                    json_obj, scores, gates, gates_passed = patched, p_scores, p_gates, p_passed
 
                     rank = (gates_passed, scores["overall"])
                     if rank > best_rank:
@@ -1945,6 +2518,27 @@ HARD RULES:
                     # wrong claim that best-of-N then had to discard.
                     if gates_passed == 4:
                         break
+
+                    # Regenerating only helps when the failure is a dice roll.
+                    # Two consecutive attempts failing on the SAME gates with
+                    # the SAME flagged claims / missing items is not a dice
+                    # roll - it is a property of this document (or of the
+                    # reviewer), and a third pass will reproduce it while
+                    # costing ~50s and two more Gemini calls. Measured
+                    # 2026-09-04: 3/3 attempts scored 98/98/98 with one
+                    # identical flagged sentence each time.
+                    failure_sig = (
+                        tuple(sorted(k for k, v in gates.items() if not v)),
+                        tuple(sorted(scores["unsupported_claims"])),
+                        tuple(sorted(scores["missing_items"])),
+                    )
+                    if prev_failure_sig is not None and failure_sig == prev_failure_sig:
+                        print(
+                            f"⏹ Attempt {attempt} failed identically to attempt {attempt - 1} "
+                            f"(gates {list(failure_sig[0])}) - another regen cannot change it; stopping"
+                        )
+                        break
+                    prev_failure_sig = failure_sig
 
                     if attempt < MAX_STORY_ATTEMPTS:
                         regen_feedback = self._build_regen_feedback(calibration_issues, scores)
@@ -2018,13 +2612,13 @@ HARD RULES:
 
         grade_spec = resolve_grade_spec(grade_level)
 
-        # Build comprehensive, high-quality prompt (adjust for mobile)
-        if is_mobile:
-            quality_keywords = "masterpiece, best quality, sharp focus, clean linework, vibrant colors"
-            safety_constraints = "[SAFETY] Family-friendly, age-appropriate"
-        else:
-            quality_keywords = "masterpiece, best quality, high resolution, sharp focus, detailed faces, clean linework, professional digital art, vibrant colors, clear features, well-proportioned anatomy"
-            safety_constraints = "[SAFETY] Family-friendly, age-appropriate, fully clothed characters, wholesome educational content"
+        # Prompt is prose, not SD1.5 tag soup. FLUX's T5 encoder reads
+        # sentences; "masterpiece, best quality, ..." tags spend tokens nudging
+        # it toward the generic look. The negative prompt that used to sit
+        # alongside was a no-op - KSampler at cfg 1.0 never evaluates it, and
+        # FLUX.1-dev has no CFG negative at all - so it is gone, along with the
+        # "distorted -> clear" word scrubbing that only ever touched it.
+        #
         # Style complexity scales with grade, not device - a KG-1 story and a
         # Grade 10 story rendered on the same phone should still look
         # different, per grade_bands.TIER_SPECS. Subject adds WHAT the
@@ -2038,34 +2632,24 @@ HARD RULES:
         subject_style = resolve_subject_spec(subject)["image_style"]
         style_guide = f"{grade_spec['image_style']}. {subject_style}" if subject_style else grade_spec["image_style"]
 
-        # Combine image description with scene narrative for better alignment
-        # The prompt (image_description) should already be detailed, but we ensure it matches the scene
         combined_description = prompt
-        
-        # If scene_text is provided and prompt seems too short/vague, enhance it
         if scene_text and len(prompt.split()) < 15:
             print(f"⚠ Warning: Short image description detected. Enhancing with scene context.")
             combined_description = f"{prompt}. Story context: {scene_text[:200]}"
-        
-        # Build enhanced prompt with clear priority hierarchy.
-        #
-        # Order matters: the style clause used to sit in front of "MAIN VISUAL",
-        # and FLUX anchored on the concrete subject description instead - so a
-        # Grade 10 story whose image_prompt said "3D animated scene" rendered as a
-        # cartoon no matter what style_guide asked for. The story prompt now writes
-        # image_prompt in the grade's visual register (see GRADE-LEVEL TARGET in
-        # process_file_to_story), and the style guide is repeated AFTER the subject
-        # so it is the last thing read rather than the first thing forgotten.
+
+        # Order matters: the style clause used to sit only in front of the
+        # subject, and FLUX anchored on the concrete subject description
+        # instead - so a Grade 10 story whose image_prompt said "3D animated
+        # scene" rendered as a cartoon no matter what style_guide asked for.
+        # Style is stated first AND repeated last, so it is the last thing
+        # read rather than the first thing forgotten.
         enhanced_prompt = (
-            f"{quality_keywords}. {style_guide}. {safety_constraints}. "
-            f"MAIN VISUAL: {combined_description}. "
-            f"STYLE (applies to the whole image): {style_guide}"
+            f"{style_guide.rstrip('.')}. "
+            f"{combined_description.strip().rstrip('.')}. "
+            "Clean linework, vibrant colors, sharp focus, well-proportioned characters with clear, "
+            "expressive faces. Family-friendly and age-appropriate. "
+            f"The whole image is rendered as: {style_guide}"
         )
-        
-        # Remove problematic terms
-        enhanced_prompt = enhanced_prompt.replace("distorted", "clear")
-        enhanced_prompt = enhanced_prompt.replace("blurry", "sharp")
-        enhanced_prompt = enhanced_prompt.replace("ugly", "beautiful")
 
         # Use ComfyUI FLUX endpoint for high-quality image generation
         use_schnell = Config.IMAGE_BACKEND == "flux-schnell"
@@ -2078,7 +2662,6 @@ HARD RULES:
             env_name = "RUNPOD_ENDPOINT_ID_FLUX_SCHNELL" if use_schnell else "RUNPOD_ENDPOINT_ID_FLUX"
             print(f"{env_name} or RUNPOD_KEY not set; cannot generate image")
             return None
-
         # Simple spend guard (estimates). Reset monthly and block when over cap.
         cap_aed = float(os.getenv("RUNPOD_MONTHLY_CAP_AED", "25"))
         est_cost_per_image = float(os.getenv("RUNPOD_COST_AED_PER_IMAGE", "0.02"))  # FLUX is slightly more expensive
@@ -2151,16 +2734,23 @@ HARD RULES:
                     seed_value = int(seed_env)
                 except ValueError:
                     pass
-        
-        # Mobile optimization: adjust dimensions and sampling
-        width = 512 if is_mobile else 768
-        height = 512 if is_mobile else 768
+        # Varied per scene. Cross-scene consistency comes from the reference
+        # image (scene 0's pixels at _REFERENCE_DENOISE), not from the noise
+        # seed - and one seed against one reference latent made every scene
+        # inherit scene 0's composition and pose. story_seed still anchors the
+        # sequence so a retry of the same scene reproduces it.
+        base_seed = seed_value if seed_value else 42
+        scene_seed = (base_seed + (scene_num or 0)) % (2 ** 32)
+
+        # Resolution/steps are env knobs (see _IMAGE_SIZE), not an is_mobile
+        # split - is_mobile is forced True for every story anyway.
+        width = height = _IMAGE_SIZE
 
         if use_schnell:
             # schnell is a distilled 4-step model - not a "fewer steps of the
-            # same thing" knob like dev's is_mobile steps split. It ships on a
-            # different public worker-comfyui image using unet/dual-clip/vae
-            # loaders instead of a single fp8 checkpoint (see IMAGE_BACKEND in
+            # same thing" knob like dev's step count. It ships on a different
+            # public worker-comfyui image using unet/dual-clip/vae loaders
+            # instead of a single fp8 checkpoint (see IMAGE_BACKEND in
             # config.py), so it needs its own node graph, not a ckpt_name swap.
             workflow = {
                 "5": {
@@ -2177,7 +2767,7 @@ HARD RULES:
                 },
                 "9": {
                     "inputs": {
-                        "filename_prefix": "flux_schnell_mobile" if is_mobile else "flux_schnell",
+                        "filename_prefix": "flux_schnell",
                         "images": ["8", 0]
                     },
                     "class_type": "SaveImage"
@@ -2226,7 +2816,7 @@ HARD RULES:
                     "class_type": "BasicGuider"
                 },
                 "25": {
-                    "inputs": {"noise_seed": seed_value if seed_value else 42},
+                    "inputs": {"noise_seed": scene_seed},
                     "class_type": "RandomNoise"
                 }
             }
@@ -2256,14 +2846,10 @@ HARD RULES:
                     "image": base64.b64encode(reference_image).decode(),
                 }]
         else:
-            steps = 15 if is_mobile else 20
-            sampler = "euler_ancestral" if is_mobile else "euler"
-
-            # Negative prompt to avoid common AI image issues
-            negative_prompt = "blurry, distorted, ugly, bad anatomy, bad proportions, extra limbs, malformed hands, duplicate faces, low quality, worst quality, deformed, mutated, disfigured, poorly drawn, bad art, amateur"
-
-            # ComfyUI workflow for FLUX.1-dev
-            # This is a standard text-to-image workflow structure for FLUX
+            # ComfyUI workflow for FLUX.1-dev. Node "33" is an empty negative
+            # because KSampler requires the input; at cfg 1.0 it is never run.
+            # Node "35" makes the distilled guidance an explicit, tunable value
+            # instead of ComfyUI's silent 3.5 default.
             workflow = {
                 "6": {
                     "inputs": {
@@ -2271,6 +2857,10 @@ HARD RULES:
                         "clip": ["30", 1]  # Clip output from checkpoint loader
                     },
                     "class_type": "CLIPTextEncode"
+                },
+                "35": {
+                    "inputs": {"guidance": _FLUX_GUIDANCE, "conditioning": ["6", 0]},
+                    "class_type": "FluxGuidance"
                 },
                 "8": {
                     "inputs": {
@@ -2281,7 +2871,7 @@ HARD RULES:
                 },
                 "9": {
                     "inputs": {
-                        "filename_prefix": "flux_mobile_output" if is_mobile else "flux_output",
+                        "filename_prefix": "flux_output",
                         "images": ["8", 0]
                     },
                     "class_type": "SaveImage"
@@ -2302,14 +2892,14 @@ HARD RULES:
                 },
                 "31": {
                     "inputs": {
-                        "seed": seed_value if seed_value else 42,
-                        "steps": steps,
+                        "seed": scene_seed,
+                        "steps": _IMAGE_STEPS,
                         "cfg": 1.0,
-                        "sampler_name": sampler,
-                        "scheduler": "simple",
+                        "sampler_name": _IMAGE_SAMPLER,
+                        "scheduler": _IMAGE_SCHEDULER,
                         "denoise": 1.0,
                         "model": ["30", 0],
-                        "positive": ["6", 0],
+                        "positive": ["35", 0],
                         "negative": ["33", 0],
                         "latent_image": ["27", 0]
                     },
@@ -2317,8 +2907,8 @@ HARD RULES:
                 },
                 "33": {
                     "inputs": {
-                        "text": negative_prompt,
-                        "clip": ["30", 1]  # Clip output from checkpoint loader
+                        "text": "",
+                        "clip": ["30", 1]
                     },
                     "class_type": "CLIPTextEncode"
                 }
@@ -2364,53 +2954,39 @@ HARD RULES:
                     "image": base64.b64encode(reference_image).decode(),
                 }]
 
-        url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        # One submitted job = one billable image request. Counted at submit
-        # rather than on success so a run that fails downstream still shows up -
-        # RunPod bills for the attempt, so hiding it would understate the cost.
+        # One submitted job = one billable image request. Counted on the
+        # outcome of the whole job now that runsync reports it in one go.
         image_model = "flux-schnell" if use_schnell else "flux"
 
         try:
-            timeout_seconds = 90 if is_mobile else 120  # Mobile generates faster
+            # Cold start measured at 72s (2026-09-04) plus up to ~20s of
+            # render plus queueing behind sibling scenes when the endpoint's
+            # workers are all busy. Generous on purpose: a timeout here is a
+            # scene lost, and a scene lost is a refund.
+            timeout_seconds = int(os.getenv("RUNPOD_IMAGE_TIMEOUT_S", "240"))
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json={"input": payload_input}, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        api_usage.record("runpod-image", image_model, "runpod", ok=False)
-                        print(f"RunPod FLUX returned {resp.status}: {text[:120]}")
-                        return None
-                    api_usage.record("runpod-image", image_model, "runpod", ok=True)
-                    data = await resp.json()            # If synchronous output is returned directly
-                
-                if data.get("status") == "COMPLETED" and data.get("output"):
-                    output = data.get("output")
-                # Otherwise poll status endpoint
-                elif data.get("id"):
-                    request_id = data["id"]
-                    status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{request_id}"
-                    output = None
-                    max_polls = 30 if is_mobile else 40  # Mobile should be faster
-                    for _ in range(max_polls):
-                        await asyncio.sleep(2)
-                        async with session.get(status_url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as status_resp:
-                                if status_resp.status != 200:
-                                    continue
-                                status_data = await status_resp.json()
-                                if status_data.get("status") == "COMPLETED" and status_data.get("output"):
-                                    output = status_data.get("output")
-                                    break
-                        
-                        if status_data.get("status") in {"FAILED", "CANCELLED"}:
-                            print(f"RunPod job failed: {status_data}")
-                            return None
-                else:
-                    print("RunPod response missing output/id")
-                    return None
+                outcome: dict = {}
+                output = await runpod_submit_and_wait(session, endpoint_id, headers, payload_input, timeout_seconds, outcome=outcome)
+                api_usage.record("runpod-image", image_model, "runpod", ok=output is not None)
+                # One retry, only for a worker-side failure: a job that hung
+                # until the endpoint's executionTimeout (measured 2026-09-04:
+                # 123s on one worker, then FAILED, scene shipped with no
+                # image) is that worker's problem, and a fresh submit lands
+                # on a different warm worker in ~15s. An HTTP rejection or
+                # our own budget running out is not retried - it would just
+                # fail the same way.
+                if output is None and outcome.get("reason") == "job_failed":
+                    print(f"↻ RunPod image job for scene {scene_num} failed worker-side - retrying once")
+                    outcome = {}
+                    output = await runpod_submit_and_wait(session, endpoint_id, headers, payload_input, timeout_seconds, outcome=outcome)
+                    api_usage.record("runpod-image", image_model, "runpod", ok=output is not None)
+            if output is None:
+                return None
 
             image_bytes = None
 
@@ -2505,11 +3081,9 @@ HARD RULES:
             if image_bytes:
                 # Usage is now reserved atomically before the call (see the
                 # locked check-and-reserve block above), not counted here.
-                mode_str = "mobile" if is_mobile else "desktop"
-                # Get image dimensions (assuming PNG header)
-                resolution = "1024x1024" if not is_mobile else "512x512"
                 elapsed = time.time() - start_time
-                print(f"✓ Image generated in {elapsed:.2f}s via RunPod FLUX/ComfyUI ({mode_str}) | Size: {len(image_bytes):,} bytes | Resolution: {resolution}")
+                recipe = "schnell euler/sgm_uniform x4" if use_schnell else f"dev {_IMAGE_SAMPLER}/{_IMAGE_SCHEDULER} x{_IMAGE_STEPS}"
+                print(f"✓ Image generated in {elapsed:.2f}s via RunPod FLUX/ComfyUI (scene {scene_num}) | Size: {len(image_bytes):,} bytes | Resolution: {width}x{height} | {recipe}")
                 return image_bytes
 
             print("RunPod FLUX/ComfyUI output could not be parsed")
@@ -2580,7 +3154,7 @@ HARD RULES:
             # occupying a slot no other scene could use. Outside, every task
             # sleeps concurrently and merely queues for its slot later, which is
             # all the stagger was ever meant to do.
-            await asyncio.sleep(i * 0.5)
+            await asyncio.sleep(i * 0.1)
             async with semaphore:
                 logger.info(f"🎨 Starting image generation for scene {scene_num}...")
                 img_bytes = await self.generate_image(
@@ -2636,9 +3210,10 @@ HARD RULES:
         
         return images
 
-    # TTS generation removed - now handled by external Chatterbox service via HTTP
-    # See services/chatterbox_client.py for TTS implementation
-    
+    # Per-scene TTS is generated below via services/kokoro_client.py's
+    # generate_tts_async, the single place voice -> engine (Piper/
+    # Chatterbox/Kokoro) routing is decided.
+
     # ==================== PROGRESSIVE TTS GENERATION ====================
     
     async def generate_progressive_tts(
@@ -2671,47 +3246,55 @@ HARD RULES:
         total_scenes = len(scenes)
         print(f"🎤 Starting progressive TTS generation for {total_scenes} scenes (batch_size={batch_size})")
 
-        for i in range(0, total_scenes, batch_size):
-            batch = scenes[i:i+batch_size]
-            batch_num = i // batch_size + 1
+        # Semaphore fan-out instead of gather-per-batch. The old loop waited
+        # for the whole batch before requesting the next one, so a single slow
+        # scene (Chatterbox exec times were measured 2026-09-04 at 6-17s per
+        # scene, with cold-start outliers of 80s) idled the other batch_size-1
+        # slots until it landed. Now every finish immediately frees a slot for
+        # the next scene, and the publish/progress bookkeeping happens per
+        # scene as before.
+        slots = asyncio.Semaphore(max(1, batch_size))
+        completed = 0
+        successes = 0
+        lock = asyncio.Lock()
 
-            # Generate batch in parallel
-            tasks = [
-                self._generate_and_cache_tts(
-                    story_id,
-                    i + idx + 1,  # Scene 0 already done, so scenes 1-N
-                    scene['narrative_text'],
-                    voice=voice,
-                    max_threads=max_threads_per_tts,
-                    grade_level=grade_level
-                )
-                for idx, scene in enumerate(batch)
-            ]
-            
-            # Run batch concurrently
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Count successes
-            successes = sum(1 for r in results if r is True)
+        async def run_one(scene_index: int, scene: dict) -> None:
+            nonlocal completed, successes
+            scene_num = scene_index + 1  # Scene 0 already done, so scenes 1-N
+            async with slots:
+                try:
+                    result = await self._generate_and_cache_tts(
+                        story_id,
+                        scene_num,
+                        scene['narrative_text'],
+                        voice=voice,
+                        max_threads=max_threads_per_tts,
+                        grade_level=grade_level
+                    )
+                except Exception as e:
+                    print(f"⚠ TTS for scene {scene_num} raised: {e}")
+                    result = False
 
             # Publish every finished scene the instant it lands. Without this the
             # caller only marked scenes completed after the ENTIRE story's TTS
             # finished, so /api/status kept reporting "1/N ready" and progressive
             # playback never actually progressed (confirmed in production
             # 2026-07-25: scene 1 audio existed 51s before the UI was told).
-            if on_scene_ready:
-                for idx, result in enumerate(results):
-                    if result is True:
-                        try:
-                            await on_scene_ready(i + idx + 1)
-                        except Exception as cb_error:
-                            print(f"⚠ on_scene_ready failed for scene {i + idx + 1}: {cb_error}")
-            
-            # Update progress
-            completed = min(i + batch_size, total_scenes)
-            await self._update_tts_status(story_id, completed, total_scenes)
-            
-            print(f"✓ TTS batch {batch_num}/{(total_scenes + batch_size - 1) // batch_size} complete: {successes}/{len(batch)} scenes successful")
+            if result is True and on_scene_ready:
+                try:
+                    await on_scene_ready(scene_num)
+                except Exception as cb_error:
+                    print(f"⚠ on_scene_ready failed for scene {scene_num}: {cb_error}")
+
+            async with lock:
+                completed += 1
+                if result is True:
+                    successes += 1
+                done_now = completed
+            await self._update_tts_status(story_id, done_now, total_scenes)
+
+        await asyncio.gather(*(run_one(i, scene) for i, scene in enumerate(scenes)))
+        print(f"✓ Progressive TTS complete: {successes}/{total_scenes} scenes successful")
     
     async def _generate_and_cache_tts(
         self,
@@ -2760,27 +3343,24 @@ HARD RULES:
                 # at once still queue against one shared ceiling instead of
                 # each opening its own batch.
                 async with tts_governor.slot():
-                    if voice == "ar_teacher":
-                        # Arabic voice: route to the self-hosted Piper service, not Kokoro
-                        from services.piper_client import piper_tts
-                        audio_bytes = await piper_tts.generate_audio(text, speed=tts_speed, silence=0.3)
-                    else:
-                        # Use the original working kokoro_client
-                        from services.kokoro_client import generate_tts
-
-                        audio_bytes = await asyncio.to_thread(
-                            generate_tts,
-                            text=text,
-                            voice=voice,
-                            speed=tts_speed
-                        )
+                    # kokoro_client.generate_tts_async is the one place voice
+                    # -> engine routing is decided (Piper/Chatterbox/Kokoro) -
+                    # see its docstring for why this replaced a hand-copied branch.
+                    from services.kokoro_client import generate_tts_async
+                    from config import Config
+                    audio_bytes = await generate_tts_async(text=text, voice=voice, speed=tts_speed)
 
                 if audio_bytes:
                     # Cache audio
                     await self._cache_audio(story_id, scene_num, audio_bytes)
                     elapsed = time.time() - start_time
-                    duration_seconds = len(audio_bytes) / (176 * 1024)
-                    engine = "Piper" if voice == "ar_teacher" else "Kokoro"
+                    duration_seconds = _audio_duration_s(audio_bytes)
+                    if voice == "ar_teacher":
+                        engine = "Piper"
+                    elif voice in {"hf_alpha", "hf_beta", "hm_omega", "hm_psi"} or Config.TTS_ENGINE == "chatterbox":
+                        engine = "Chatterbox"
+                    else:
+                        engine = "Kokoro"
                     print(f"✓ Audio for Scene {scene_num} generated in {elapsed:.2f}s via {engine} | Story: {story_id[:8]}... | Size: {len(audio_bytes):,} bytes | Duration: ~{duration_seconds:.1f}s")
                     return True
 
