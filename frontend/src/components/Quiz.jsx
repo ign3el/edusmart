@@ -83,7 +83,7 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
     setReviewMode(false);
   };
 
-  const handleAnswer = (option) => {
+  const handleAnswer = (option, index) => {
     if (selectedOption !== null) return; // Prevent double clicking
 
     setSelectedOption(option);
@@ -92,7 +92,15 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
     const correctAnswer = currentQ.correct_answer || currentQ.answer;
     const questionText = currentQ.question_text || currentQ.question;
 
-    const selectedLetter = letterOf(option);
+    // Derive the selected letter from the option's position in the array,
+    // same as the review screen's per-option "Correct" pill does - NOT from
+    // parsing the option's own text. Backend validation only guarantees
+    // options is a 4-item array and correct_answer is a bare A-D letter; it
+    // never guarantees each option string is itself prefixed with "B. " etc,
+    // so letterOf(option) silently returned null (-> always "wrong", score
+    // stuck at 0) whenever the backend omitted that prefix, even though the
+    // index-based review pill kept showing the right answer correctly.
+    const selectedLetter = String.fromCharCode(65 + index);
     const correctLetter = letterOf(correctAnswer);
 
     const correct = selectedLetter !== null && selectedLetter === correctLetter;
@@ -315,7 +323,7 @@ const Quiz = ({ questions, onComplete, onClose, onBackToStory, storyId }) => {
             {options.map((option, index) => (
               <motion.button
                 key={index}
-                onClick={() => handleAnswer(option)}
+                onClick={() => handleAnswer(option, index)}
                 className={`option-btn ${selectedOption === option
                   ? (isCorrect ? 'correct' : 'wrong')
                   : ''
