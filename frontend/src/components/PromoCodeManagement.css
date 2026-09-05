@@ -75,6 +75,14 @@
   padding: 0.85rem 1rem;
 }
 
+.promo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
 .promo-row.inactive {
   opacity: 0.5;
 }
@@ -104,6 +112,37 @@
   font-size: 0.8rem;
   color: var(--ink-1, #e6e9f2);
   white-space: nowrap;
+}
+
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge, rgba(148,163,184,0.12));
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  color: var(--ink-1, #e6e9f2);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.icon-btn.danger {
+  color: #ff8a8a;
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: rgba(255, 82, 82, 0.12);
+  border-color: rgba(255, 82, 82, 0.3);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .modal-overlay {
@@ -188,7 +227,8 @@
   .promo-code {
     grid-column: 1 / -1;
   }
-  .toggle-btn {
+  .promo-actions {
     grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 }

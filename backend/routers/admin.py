@@ -1102,3 +1102,51 @@ async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest, cur
         details=update.dict(exclude_unset=True),
     )
     return {"success": True, "message": "Promo code updated"}
+
+@router.post("/promo-codes/{code}/reset-redemptions")
+def admin_reset_promo_redemptions(code: str, current_user: dict = Depends(get_admin_user)):
+    """Clears every redemption record for this code so it can be redeemed again,
+    including by users who already used it. Raising max_redemptions via the
+    update endpoint doesn't do this on its own - _validate_promo blocks a
+    repeat redemption per-user off the promo_redemptions rows themselves,
+    independent of the cap."""
+    code = code.strip().upper()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT times_redeemed FROM promo_codes WHERE code = %s", (code,))
+        promo = cursor.fetchone()
+        if not promo:
+            raise HTTPException(status_code=404, detail="Promo code not found")
+
+    with get_db_cursor(commit=True) as cursor:
+        cursor.execute("DELETE FROM promo_redemptions WHERE code = %s", (code,))
+        cleared = cursor.rowcount
+        cursor.execute("UPDATE promo_codes SET times_redeemed = 0 WHERE code = %s", (code,))
+
+    audit_log.record(
+        actor_user_id=current_user["id"], action="reset_promo_redemptions",
+        target_type="promo_code", target_id=code,
+        details={"redemptions_cleared": cleared, "times_redeemed_was": promo["times_redeemed"]},
+    )
+    return {"success": True, "message": "Promo code reset", "redemptions_cleared": cleared}
+
+@router.delete("/promo-codes/{code}")
+def admin_delete_promo_code(code: str, current_user: dict = Depends(get_admin_user)):
+    """promo_redemptions.code has ON DELETE CASCADE (see database.py), so this
+    also wipes the code's redemption history - that's captured in the audit
+    details since the rows themselves won't survive the cascade."""
+    code = code.strip().upper()
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT times_redeemed FROM promo_codes WHERE code = %s", (code,))
+        promo = cursor.fetchone()
+        if not promo:
+            raise HTTPException(status_code=404, detail="Promo code not found")
+
+    with get_db_cursor(commit=True) as cursor:
+        cursor.execute("DELETE FROM promo_codes WHERE code = %s", (code,))
+
+    audit_log.record(
+        actor_user_id=current_user["id"], action="delete_promo_code",
+        target_type="promo_code", target_id=code,
+        details={"times_redeemed": promo["times_redeemed"]},
+    )
+    return {"success": True, "message": "Promo code deleted"}
