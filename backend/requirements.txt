@@ -1,23 +1,27 @@
+# Pinned 2026-09-03 to the exact versions running in the live container
+# (`pip freeze` on edusmart-backend-blue). Previously 17 of these were `>=`,
+# so two builds of the same commit could ship different dependency trees and
+# a rebuild was never a true reproduction of a rollback tag.
 fastapi==0.115.14
-uvicorn[standard]>=0.30.0
+uvicorn[standard]==0.52.1
 python-multipart==0.0.6
-google-genai>=0.2.0
-groq>=0.4.0
+google-genai==2.17.0
+groq==1.6.0
 python-dotenv==1.0.0
-aiofiles>=23.2.1
+aiofiles==25.1.0
 python-docx==1.1.0
 python-pptx==0.6.23
-requests>=2.31.0
-httpx>=0.27.0
-mysql-connector-python>=9.5.0
-PyJWT>=2.10.0
-python-jose[cryptography]>=3.5.0
-passlib>=1.7.4
-bcrypt>=4.0.0
-fastapi-mail>=1.6.1
-email-validator>=2.0.0
-langdetect>=1.0.9
-pypdf>=4.0.0
-pymupdf>=1.24.0
-aiohttp>=3.9.0
+requests==2.34.2
+httpx==0.28.1
+mysql-connector-python==26.7.0
+PyJWT==2.13.0
+python-jose[cryptography]==3.5.0
+passlib==1.7.4
+bcrypt==5.0.0
+fastapi-mail==1.6.2
+email-validator==2.3.0
+langdetect==1.0.9
+pypdf==6.15.0
+pymupdf==1.28.0
+aiohttp==3.14.3
 stripe==15.3.1
