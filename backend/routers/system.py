@@ -45,14 +45,14 @@ def _read_status_file(filename: str) -> Optional[dict]:
 
 
 @router.get("/config")
-async def get_config():
+def get_config():
     """Active provider/model config per subsystem - already redacted, no
     secrets: Config.get_info() reports backend names and model strings only."""
     return Config.get_info()
 
 
 @router.get("/deploy-status")
-async def get_deploy_status():
+def get_deploy_status():
     """Which color is live per service, written by deploy.sh after each
     deploy (status/deploy_status.json, read-only bind mount - this route
     cannot trigger a deploy, only report the last one)."""
@@ -63,7 +63,7 @@ async def get_deploy_status():
 
 
 @router.get("/backup-status")
-async def get_backup_status():
+def get_backup_status():
     """Last offsite backup outcome, written by scripts/backup.sh."""
     data = _read_status_file("backup_status.json")
     if data is None:
@@ -72,7 +72,7 @@ async def get_backup_status():
 
 
 @router.get("/health")
-async def get_system_health():
+def get_system_health():
     """Concurrency + queue + vision budget (same internals as the public
     /api/health) plus RunPod AED spend, so cost sits next to utilisation in
     one call for the admin dashboard."""
@@ -85,7 +85,7 @@ async def get_system_health():
 
 
 @router.get("/rate-limits")
-async def get_rate_limits():
+def get_rate_limits():
     """Current in-process rate-limit buckets. Per-container: only whichever
     color is currently active has live data here (see routers/auth.py -
     RateLimiter is in-process by design, revisit only if Redis is running)."""
@@ -93,7 +93,7 @@ async def get_rate_limits():
 
 
 @router.get("/content-review")
-async def get_content_review(limit: int = Query(50, ge=1, le=200)):
+def get_content_review(limit: int = Query(50, ge=1, le=200)):
     """Failed generations with a human-readable reason, for spotting patterns
     without digging through logs. Reuses the same job_state SQLite access as
     GET /api/admin/db/job_state/table/{table_name}."""
@@ -121,7 +121,7 @@ async def get_content_review(limit: int = Query(50, ge=1, le=200)):
 
 
 @router.get("/audit-log")
-async def get_audit_log(
+def get_audit_log(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     actor_user_id: Optional[int] = None,

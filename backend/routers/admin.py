@@ -160,7 +160,7 @@ def get_db_connection():
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
 @router.get("/db/job_state/tables", dependencies=[Depends(get_admin_user)])
-async def get_job_state_db_tables():
+def get_job_state_db_tables():
     """
     Returns a list of table names from the job_state.db SQLite database.
     Only accessible by admin users.
@@ -180,7 +180,7 @@ async def get_job_state_db_tables():
     return {"tables": tables}
 
 @router.get("/db/job_state/table/{table_name}", dependencies=[Depends(get_admin_user)])
-async def get_job_state_db_table_content(table_name: str):
+def get_job_state_db_table_content(table_name: str):
     """
     Returns the content of a specified table from the job_state.db SQLite database.
     Performs a security check on the table name to prevent SQL injection.
@@ -208,7 +208,7 @@ async def get_job_state_db_table_content(table_name: str):
     return {"table_name": table_name, "content": content}
 
 @router.post("/migrate-saved-stories", dependencies=[Depends(get_admin_user)])
-async def migrate_saved_stories():
+def migrate_saved_stories():
     """
     Admin endpoint to scan saved_stories folder and create database entries
     for stories that exist on disk but not in the database.
@@ -326,7 +326,7 @@ async def migrate_saved_stories():
     }
 
 @router.get("/users", dependencies=[Depends(get_admin_user)])
-async def list_users():
+def list_users():
     """List all users with their story counts"""
     try:
         with get_db_cursor() as cursor:
@@ -354,10 +354,10 @@ async def list_users():
         }
     except Exception as e:
         logger.error(f"List users failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.get("/users/{user_id}", dependencies=[Depends(get_admin_user)])
-async def get_user_details(user_id: int):
+def get_user_details(user_id: int):
     """Get detailed user info including their stories"""
     try:
         with get_db_cursor() as cursor:
@@ -393,10 +393,10 @@ async def get_user_details(user_id: int):
         raise
     except Exception as e:
         logger.error(f"Get user details failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.put("/users/{user_id}")
-async def update_user(user_id: int, update: UserUpdateRequest, current_user: dict = Depends(get_admin_user)):
+def update_user(user_id: int, update: UserUpdateRequest, current_user: dict = Depends(get_admin_user)):
     """Update user fields: status flags, username/email, or password."""
     try:
         updates = []
@@ -464,10 +464,10 @@ async def update_user(user_id: int, update: UserUpdateRequest, current_user: dic
         raise
     except Exception as e:
         logger.error(f"Update user failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.post("/users", dependencies=[Depends(get_admin_user)])
-async def create_user(payload: UserCreateRequest):
+def create_user(payload: UserCreateRequest):
     """Admin-created user account. Defaults to verified since an admin is vouching for it."""
     try:
         if UserOperations.get_by_email(payload.email) or UserOperations.get_by_username(payload.username):
@@ -502,10 +502,10 @@ async def create_user(payload: UserCreateRequest):
         raise
     except Exception as e:
         logger.error(f"Create user failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.delete("/users/{user_id}")
-async def delete_user(user_id: int, current_user: dict = Depends(get_admin_user)):
+def delete_user(user_id: int, current_user: dict = Depends(get_admin_user)):
     """Delete user and all their stories"""
     try:
         with get_db_cursor(commit=True) as cursor:
@@ -555,10 +555,10 @@ async def delete_user(user_id: int, current_user: dict = Depends(get_admin_user)
         raise
     except Exception as e:
         logger.error(f"Delete user failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.get("/usage/rpd", dependencies=[Depends(get_admin_user)])
-async def api_usage_rpd(days: int = 3):
+def api_usage_rpd(days: int = 3):
     """Requests-per-day per model per key.
 
     Exists because Gemini's free tier meters RPD per model *per Cloud project*,
@@ -573,7 +573,7 @@ async def api_usage_rpd(days: int = 3):
 
 
 @router.get("/stories/all", dependencies=[Depends(get_admin_user)])
-async def list_all_stories():
+def list_all_stories():
     """List ALL stories - both saved and unsaved (generated only)"""
     try:
         # Get saved stories from MySQL
@@ -670,10 +670,10 @@ async def list_all_stories():
         }
     except Exception as e:
         logger.error(f"List all stories failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.delete("/stories/{story_id}")
-async def delete_story(story_id: str, current_user: dict = Depends(get_admin_user)):
+def delete_story(story_id: str, current_user: dict = Depends(get_admin_user)):
     """Delete a story (saved or generated)"""
     try:
         deleted_from = []
@@ -736,10 +736,10 @@ async def delete_story(story_id: str, current_user: dict = Depends(get_admin_use
         raise
     except Exception as e:
         logger.error(f"Delete story failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 @router.post("/stories/{story_id}/cancel")
-async def cancel_story(story_id: str, current_user: dict = Depends(get_admin_user)):
+def cancel_story(story_id: str, current_user: dict = Depends(get_admin_user)):
     """Mark a stuck/hung generation job as failed and refund its credit."""
     try:
         conn = get_db_connection()
@@ -776,7 +776,7 @@ async def cancel_story(story_id: str, current_user: dict = Depends(get_admin_use
         raise
     except Exception as e:
         logger.error(f"Cancel story failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 class RetryResult(BaseModel):
     scenes_queued: int
@@ -940,7 +940,7 @@ async def retry_story(story_id: str, current_user: dict = Depends(get_admin_user
 
 
 @router.put("/stories/{story_id}", dependencies=[Depends(get_admin_user)])
-async def update_story(story_id: str, update: StoryUpdateRequest):
+def update_story(story_id: str, update: StoryUpdateRequest):
     """Update story metadata"""
     try:
         updated = False
@@ -976,11 +976,11 @@ async def update_story(story_id: str, update: StoryUpdateRequest):
         raise
     except Exception as e:
         logger.error(f"Update story failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 # --- Credit grants (support/comp cases) ---
 
 @router.post("/users/{user_id}/grant-credits")
-async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest, current_user: dict = Depends(get_admin_user)):
+def admin_grant_credits(user_id: int, payload: GrantCreditsRequest, current_user: dict = Depends(get_admin_user)):
     """Admin-only credit adjustment. Logged in credit_transactions ('admin_grant') like every other credit change."""
     if payload.amount == 0:
         raise HTTPException(status_code=400, detail="amount must be non-zero")
@@ -1003,14 +1003,14 @@ async def admin_grant_credits(user_id: int, payload: GrantCreditsRequest, curren
 # --- Subscription plans (hot-editable pricing - no deploy needed to change these) ---
 
 @router.get("/plans", dependencies=[Depends(get_admin_user)])
-async def admin_list_plans():
+def admin_list_plans():
     """All plans including inactive ones, for the Manage Plans admin tab."""
     with get_db_cursor() as cursor:
         cursor.execute("SELECT * FROM subscription_plans ORDER BY sort_order")
         return {"success": True, "plans": cursor.fetchall()}
 
 @router.put("/plans/{tier_key}")
-async def admin_update_plan(tier_key: str, update: PlanUpdateRequest, current_user: dict = Depends(get_admin_user)):
+def admin_update_plan(tier_key: str, update: PlanUpdateRequest, current_user: dict = Depends(get_admin_user)):
     """Edit a plan's price/credits/active state/copy. Takes effect on the very next request - no deploy."""
     updates = []
     values = []
@@ -1046,13 +1046,13 @@ async def admin_update_plan(tier_key: str, update: PlanUpdateRequest, current_us
 # --- Promo codes / discount vouchers (also hot-editable, no deploy needed) ---
 
 @router.get("/promo-codes", dependencies=[Depends(get_admin_user)])
-async def admin_list_promo_codes():
+def admin_list_promo_codes():
     with get_db_cursor() as cursor:
         cursor.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
         return {"success": True, "promo_codes": cursor.fetchall()}
 
 @router.post("/promo-codes")
-async def admin_create_promo_code(payload: PromoCodeCreateRequest, current_user: dict = Depends(get_admin_user)):
+def admin_create_promo_code(payload: PromoCodeCreateRequest, current_user: dict = Depends(get_admin_user)):
     code = payload.code.strip().upper()
     try:
         with get_db_cursor(commit=True) as cursor:
@@ -1075,7 +1075,7 @@ async def admin_create_promo_code(payload: PromoCodeCreateRequest, current_user:
     return {"success": True, "code": code}
 
 @router.put("/promo-codes/{code}")
-async def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest, current_user: dict = Depends(get_admin_user)):
+def admin_update_promo_code(code: str, update: PromoCodeUpdateRequest, current_user: dict = Depends(get_admin_user)):
     code = code.strip().upper()
     updates = []
     values = []

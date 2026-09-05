@@ -43,14 +43,14 @@ class AnnouncementUpdateRequest(BaseModel):
 
 
 @admin_router.get("")
-async def list_announcements():
+def list_announcements():
     with get_db_cursor() as cursor:
         cursor.execute("SELECT * FROM announcements ORDER BY created_at DESC")
         return {"items": cursor.fetchall()}
 
 
 @admin_router.post("")
-async def create_announcement(payload: AnnouncementCreateRequest, current_user: dict = Depends(get_admin_user)):
+def create_announcement(payload: AnnouncementCreateRequest, current_user: dict = Depends(get_admin_user)):
     with get_db_cursor(commit=True) as cursor:
         cursor.execute(
             """INSERT INTO announcements (message, severity, is_active, starts_at, ends_at, created_by)
@@ -70,7 +70,7 @@ async def create_announcement(payload: AnnouncementCreateRequest, current_user: 
 
 
 @admin_router.put("/{announcement_id}")
-async def update_announcement(announcement_id: int, payload: AnnouncementUpdateRequest, current_user: dict = Depends(get_admin_user)):
+def update_announcement(announcement_id: int, payload: AnnouncementUpdateRequest, current_user: dict = Depends(get_admin_user)):
     fields = payload.dict(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -97,7 +97,7 @@ async def update_announcement(announcement_id: int, payload: AnnouncementUpdateR
 
 
 @public_router.get("/api/announcements/active")
-async def get_active_announcement():
+def get_active_announcement():
     """No auth - public banner endpoint. Returns the single currently-active
     announcement within its start/end window, or null if none."""
     with get_db_cursor() as cursor:

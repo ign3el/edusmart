@@ -64,7 +64,7 @@ async def generate_video(story_id: str, user: User = Depends(get_current_user)):
 
 
 @router.get("/api/story/{story_id}/video/status")
-async def get_video_status(story_id: str, user: User = Depends(get_current_user)):
+def get_video_status(story_id: str, user: User = Depends(get_current_user)):
     _own_story_or_404(story_id, user)
     state = job_manager.get_video_status(story_id)
     if not state:
@@ -78,7 +78,7 @@ async def get_video_status(story_id: str, user: User = Depends(get_current_user)
 
 
 @router.get("/api/story/{story_id}/video")
-async def download_video(story_id: str, user: User = Depends(get_current_user)):
+def download_video(story_id: str, user: User = Depends(get_current_user)):
     story = _own_story_or_404(story_id, user)
     state = job_manager.get_video_status(story_id)
     if not state or state["status"] != "completed":

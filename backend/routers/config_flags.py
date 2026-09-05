@@ -22,12 +22,12 @@ class ConfigFlagUpdateRequest(BaseModel):
 
 
 @router.get("")
-async def list_config_flags():
+def list_config_flags():
     return {"items": app_config.get_all()}
 
 
 @router.put("/{key}")
-async def update_config_flag(key: str, update: ConfigFlagUpdateRequest, current_user: dict = Depends(get_admin_user)):
+def update_config_flag(key: str, update: ConfigFlagUpdateRequest, current_user: dict = Depends(get_admin_user)):
     try:
         app_config.set_flag(key, update.config_value, updated_by=current_user["id"])
     except KeyError:
