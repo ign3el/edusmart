@@ -13,12 +13,91 @@ Product renamed from "EduSmart" to "LearnTale" in every user-facing string (page
 | Backend | Python FastAPI (single `uvicorn main:app`, no multi-worker). Story generation runs through a durable SQLite-backed queue with a fixed worker pool - see Concurrency & Scaling |
 | Story generation | **Gemini `gemini-3.5-flash-lite`** (primary), Groq `openai/gpt-oss-120b` (fallback on Gemini 503). See *LLM model split* below — this choice is load-bearing, not incidental |
 | Page/image reading (vision) | **Gemini `gemini-3.1-flash-lite`** — deliberately a *different* model from story generation |
-| Images | RunPod ComfyUI (FLUX.1-dev), with a monthly AED spend cap |
-| TTS (English) | Self-hosted Kokoro-82M (`kokoro-tts:8880` container), reached via two parallel client wrappers |
-| TTS (Arabic) | A hosted Piper-compatible endpoint (`TTS_API_URL`) — **only reachable from the admin TTS-test tool and the voice-preview endpoint, not from the actual story-generation pipeline** (see Known Issues) |
+| Images | RunPod `edusmart-flux1-schnell` (ComfyUI worker template, FLUX.1-schnell, Apache 2.0) with a monthly AED spend cap; FLUX.1-dev endpoint kept at 0 workers for A/B only. Scenes are stored as **WebP** since 2026-09-05 |
+| TTS (all languages) | Chatterbox Multilingual on RunPod Flash (`runpod-kokoro-test/chatterbox_worker.py`, currently v10) — English, Hindi and Arabic (`ar_teacher`) all go through `kokoro_client.generate_tts_async` → `chatterbox_client.py`. The local Kokoro container and the Piper `TTS_API_URL` path are legacy fallbacks, only used if `TTS_ENGINE != chatterbox` |
 | Main DB | MySQL — users, saved stories |
 | Job-tracking DB | SQLite (`db_data/job_state.db`, Docker named volume) — in-progress/generated story state |
 | Mobile | PWA (service worker, install prompt, offline story storage via IndexedDB/localStorage) |
+
+## Media pipeline speed/visual pass (2026-09-04, backend `20260904_020929`)
+
+Measured directly against the RunPod endpoints before changing anything (host python lacks `requests` — run bench scripts inside `edusmart-backend:latest`):
+
+| | cold (boot + first exec) | warm |
+|---|---|---|
+| FLUX.1-dev fp8 | 72s (9 + 61) | 512² 7.8s · **768² 13.3s** · 1024² 20.0s (euler/beta, 15 steps) |
+| Chatterbox | 82s (28 + 52) | 6–17s per scene (per-sentence chunked) |
+
+Story text (Gemini) takes 15–20s, so the first playable scene was ~100s cold vs ~35s warm. The pass attacks the cold start and the per-request overhead, and moves the render to 768² (the player frame is 1:1 up to `min(56dvh, 600px)` — 512 was being upscaled 2×+ on a OnePlus 15).
+
+What changed (`services/story_service.py`, `services/chatterbox_client.py`, `main.py`, `routers/upload.py`):
+- **Pre-warm** — `prewarm_endpoints()` fires a 256px/1-step FLUX job and a one-word Chatterbox job on `/api/upload/extract-text` (file picked) and both `generation_queue.submit` sites (story confirmed). Debounced 30s (`RUNPOD_PREWARM_DEBOUNCE_S`), fire-and-forget, not counted against the spend cap. Log line: `🔥 Pre-warm submitted to <endpoint>`.
+- **`/runsync` everywhere** — `runpod_submit_and_wait()` (async, images) and `chatterbox_client.generate_tts` (sync, TTS) POST `/runsync?wait=90000` (`RUNPOD_RUNSYNC_WAIT_S`) and only fall back to a 1s `/status` poll if the job outlives the wait. The old `/run` + 2s poll cost 1–2s of pure polling per scene.
+- **Render knobs are env, not `is_mobile`** (`main.py` forces `is_mobile=True` for every story anyway): `IMAGE_SIZE=768`, `IMAGE_STEPS=15`, `IMAGE_SAMPLER=euler`, `IMAGE_SCHEDULER=beta`, `FLUX_GUIDANCE=3.5` (explicit `FluxGuidance` node "35" instead of ComfyUI's silent default), `RUNPOD_IMAGE_TIMEOUT_S=240`. `euler_ancestral/simple` at 512 turned characters away from camera in the side-by-side; euler/beta at 768 gave the best faces.
+- **Prompt is prose** — the `masterpiece, best quality…` tag soup and the negative prompt are gone (FLUX at cfg 1.0 never evaluates the negative; T5 reads sentences). Style guide first and repeated last, as before.
+- **Seed varies per scene** — `(story_seed + scene_num) % 2**32`. Cross-scene consistency comes from the reference image (denoise 0.85), and one seed against one reference latent made every scene inherit scene 0's pose.
+- **TTS fan-out** — `generate_progressive_tts` is a semaphore (`batch_size` slots) instead of gather-per-batch, so one slow scene no longer idles the other slots. Stagger between image submits dropped 0.5s → 0.1s.
+- `.env`: `RUNPOD_COST_AED_PER_IMAGE` 0.015 → 0.03 so the 25 AED monthly cap math matches the ~2× billable seconds at 768².
+
+Verified from inside the live container: pre-warm HTTP 200 on both endpoints; a real `_generate_image_unbounded` call returned a 768×768 PNG (719 KB) in 14.8s; `generate_tts` returned 42 KB MP3 in 4.8s via runsync.
+
+Still manual (RunPod console — REST PATCH is not something the agent can do): `edusmart-flux1-schnell` max workers 2 → **3**, idle timeout 10 → 45s; `ComfyUI 5.5.1` (FLUX-dev) max workers → **0** (kept for A/B only, see licensing below); `chatterbox-tts-v7` idle timeout 15 → 45s. Account quota is 5 workers (schnell 3 + Chatterbox 2).
+
+**schnell vs dev A/B (2026-09-04, finally run — config.py asked for it on 2026-08-04):** same prompt/seed, both 768², scene 1 conditioned on each model's scene 0. schnell warm 5.0s / 7.6s with reference (cold 43s) vs dev 13.3s / 16.7s (cold 72s); schnell ~4–5× cheaper. Character consistency held on BOTH (the "unverified at 4 steps" worry is cleared — denoise 0.85 works on schnell). Visual: schnell is flat vector-cartoon and generic with anatomy slips (toothed baleen whale); dev is painterly with real lighting and better faces. **Decision (same day, backend `20260904_032313`): schnell is the production default.** FLUX.1-dev's published license is non-commercial and LearnTale sells credits; schnell is Apache 2.0. `.env`: `IMAGE_BACKEND=flux-schnell`, `IMAGE_SIZE=1024` (now passed through docker-compose.yml), `RUNPOD_COST_AED_PER_IMAGE=0.008`. 1024² on schnell measured via the app path: scene 0 8.2s, reference-conditioned scenes 10–15s, outfit/hair consistency held on 2 of 3 seeds (one drifted the outfit — acceptable; 768 was 7–8s and slightly tighter). Pre-warm has its own schnell graph (`_prewarm_workflow(use_schnell)`). The dev endpoint (`ComfyUI 5.5.1`) is kept for A/B only — 0 workers in the console; do not flip back to it for a paid product without a BFL commercial license.
+
+### Real-story benchmark + text-phase fixes (2026-09-04, backend `20260904_135851`)
+
+First real story after the schnell switch (grade-10 chemistry PDF, 9 scenes, story `93f09b4a`, from the phone) was **180s to first playable scene, 294s fully generated** — the media fixes above were real but invisible, because everything in front of them was slow:
+
+| phase | measured | why |
+|---|---|---|
+| checklist | 5.9s | fine |
+| attempt 1 story + review | 51.2s + 45.0s | Gemini stalls (see below) — normal is 6–13s |
+| attempt 2 / 3 | 12.9+6.0s / 27.4+6.2s | full regens for ONE wrong formula each; attempt 3 repeated attempt 2's error verbatim |
+| text phase total | 161s | nothing touched a GPU yet |
+| scene 0 image / TTS | 17.6s / 19.1s | both **cold** — the upload-time pre-warm had expired 2+ minutes earlier |
+| scenes 1–8 images | 10–36s, one 105s | queued on 2 workers, scene 3 hit a second cold start |
+| scenes 1–8 TTS | 27–38s, one 94s | Chatterbox v7 is ~1× realtime on ~29s clips |
+
+Root causes and what changed:
+- **Gemini stalls are transport, not thinking.** Probed inside the container: `gemini-3.5-flash-lite` answers a one-word prompt in ~1s but ~1 in 4 calls stalls ~30s and returns the *identical* output (`thoughts_token_count=None`, same token counts). IPv6 is unreachable instantly (not a Happy-Eyeballs delay). So `thinking_config` was not the fix; **hedged requests** are: `_generate_hedged` fires a duplicate once a call is in flight >`GEMINI_HEDGE_S` (12s; story call `GEMINI_STORY_HEDGE_S` 20s) and takes the first to return. Extra request is counted in `api_usage`. Log: `⏳ Gemini (...) stalled >12s - firing hedge request` / `hedge resolved by original|hedge request`.
+- **Targeted patch instead of full regen** when hallucination is the *only* failing gate (`_patch_unsupported_claims`): each flagged claim is located to its field (exact substring, else difflib ≥0.5 against sentences), the model rewrites just those fields against the document, the result is re-validated + re-scored, and replaces the attempt only if it scores ≥ the original. Other gate failures still take the full-regen path. Log: `🩹 Targeted patch: N claim(s) -> M/K field(s) rewritten` then `🩹 Attempt n re-scored after patch`.
+- **Pre-warm re-fires inside the text phase** — `prewarm_endpoints_sync()` (thread-based; `process_file_to_story` runs under `to_thread`) at the start of every story attempt and every self-review, debounce 30s → 20s (`RUNPOD_PREWARM_DEBOUNCE_S`). Cost: one schnell + one Chatterbox worker kept idle for the text phase ≈ **0.1–0.15 AED/story** — accepted so scene 0 never pays a cold start again.
+- **TTS log `Duration:` was wrong** (`bytes / 176KB` assumed 44.1 kHz stereo PCM; engines emit 64 kbps mono MP3 — a 29s clip logged as `~1.3s`). `_audio_duration_s` now reads the WAV header or the first MP3 frame's bitrate (29.06s vs ffprobe 28.99s on the real clip).
+
+Tests: 83 passed (`test_story_model_split`, `test_grade_calibration`, `test_quiz_quality`, `test_quiz_sizing`, `test_vision_extraction`, `test_question_capacity`) — pytest is not in the image; run with `docker run --rm -v $PWD/services/story_service.py:/app/services/story_service.py:ro -v $PWD/tests:/app/tests:ro -e GEMINI_API_KEY=fake -e GROQ_API_KEY=fake --entrypoint sh edusmart-backend:latest -c 'pip install -q pytest && python -m pytest -q tests/...'`.
+
+Expected after this batch (to be confirmed on the next real story): text phase ~30–60s, first playable ~50–80s, full ~120–150s. Still open, in order: confirm the RunPod console changes above actually happened (the log pattern says images were still on 2 workers), `chatterbox-tts-v8` sentence grouping (`/www/wwwroot/runpod-kokoro-test/chatterbox_worker.py`, new endpoint ID in `.env`, A/B vs v7), then WebP delivery (Pillow 12 is in the image).
+
+### Batch 3: gate fixes, draft-overlap media, parallel scene-0 TTS (2026-09-04, backend `20260904_143756` → `20260904_145934`, frontend `20260904_150016`)
+
+Re-run after batch 2 (story `5d0edb40`) was **190s / 314s — no better**: all 3 attempts failed on the same single claim. The document itself contains a factual error (chemistry notes: NaHCO₃ decomposition "releases hydrogen"), the reviewer flagged the story for repeating it verbatim, and the gate math (`hallucination = 100 - claims/(scenes+quiz)*100`, threshold 98) makes ONE flag on 18 units fatal. User target: **first scene in 30–50s**.
+
+What changed (`services/story_service.py`, `services/kokoro_client.py`, `main.py`; backups in `.audit_backups/pipeline_20260904/`):
+- **Verbatim-in-source filter** — reviewer flags whose text is in the document (normalised substring, or same word-set + difflib ≥ `STORY_CLAIM_VERBATIM_RATIO` 0.85 against a document sentence) are dropped: `📄 Reviewer flag dropped - claim is verbatim in the source document`. Reviewer prompt now says explicitly that "supported" means present in the document, not scientifically true.
+- **Identical-failure stop** — an attempt failing with the same gates + same claims + same missing items as the previous one ends the loop (`⏹ ... stopping`) instead of burning a third regen.
+- **Draft media overlap** — `process_file_to_story(on_draft=...)` hands the attempt's story to `main.py` BEFORE self-review; scene-0 image + TTS start immediately (`⚡ ... started from draft, overlapping self-review`) and are reused if the reviewed story's scene-0 prompt/narration/voice are unchanged (`reusing the job started from the draft`), else cancelled and redone.
+- **Scene-0 TTS in 2 parallel Chatterbox jobs** (`generate_tts_async(parallel_chunks=2)`): sentence-boundary split with a midpoint rule (`_split_balanced`), joined losslessly with ffmpeg concat (`-c copy`), whole-text fallback on any failure. `TTS_PARALLEL_MIN_CHARS` 160.
+- **Truncation guard** — cold Chatterbox workers returned early-EOS audio (27.8 chars/s vs normal 16–24). Any Chatterbox result faster than `TTS_MAX_CHARS_PER_S` (25 × speed) is regenerated once and the longer take kept (`⚠ Chatterbox audio looks truncated`).
+- **Image job-failed retry** (`↻ RunPod image job ... retrying once`), checklist/patch hedges 6s/5s, reasoning quota in the story prompt (60% of quiz must carry a WHY/COMPARE/PREDICT cue — run still came back 7/10 recall; not solved).
+- **Pre-warm on intent** — `POST /api/upload/prewarm` (auth, 60/h/user) fired from `FileUpload.jsx` on dropzone tap/drag-enter, before the file picker; ~30s earlier than extract-text.
+
+Result (story `edcc5873`): attempt 1 passed 4/4, text phase **38s** (was 163s), first playable **91s**, full 216s. The remaining 50s is GPU cold start (image 64s, TTS 58–68s cold vs 8–20s warm) — RunPod idle timeouts are 45s and the workers had gone cold. Two levers left: the intent pre-warm above, and a longer idle timeout in the RunPod console (idle GPU is billed — user's call).
+
+**Voice bug found the same day (not batch 3's doing):** every "female" story sounded male. Pitch analysis of `runpod-kokoro-test/voice_refs/*.wav` and of live v7 output: `af_bella/af_heart/af_nicole/af_sky/bf_emma` clips were male readers, `bm_george` female (Phase 3 sourced by article topic, gender unverified). Fix = pitch-verified replacements + `chatterbox-tts-v8` (see `voice_refs/SOURCES.md` Phase 4). After the v8 endpoint ID lands in `.env`, purge `outputs/audio_cache/` — it never invalidates on voice change.
+
+**Chatterbox v8 → v9 (2026-09-04/05).** v8 (`f7ha2ctd86y43p`, backend `20260904_181630`) confirmed the gender fix live (female voices 172–246 Hz, bm_george 111 Hz) but exposed a cold-start bug: the worker loaded the model lazily inside the first request, so the ~100 s checkpoint download counted as execution time against a 120 s execution timeout — fresh workers in slower datacentres died at 121 s (`executionTimeout exceeded`) and threw the download away. v9 (`u57u446wpdigkv`, backend `20260905_002058`): `_preload_at_boot()` loads the model + all 17 voice conditionings during worker init (env-guarded — `flash build` exec_module()s the file on the host), `execution_timeout_ms=300_000`, `idle_timeout=120` (user's cost call; both were first set in the console on v8). Also normalized the 4 quietest refs to −20 dB (`SOURCES.md` Phase 5) — `af_sarah` output had been −35 dB. RunPod quota is 5 workers account-wide (schnell 3 + chatterbox 2), so every rename deploy requires deleting the old endpoint first (~5 min TTS outage). `.env` in this dir (not `backend/.env`) is what compose reads for `RUNPOD_ENDPOINT_ID_CHATTERBOX`. Truncated takes still occur (~1 in 3 on some voices) — the `kokoro_client` guard regenerates them.
+
+**Open-items batch (2026-09-05, backend `20260905_154824` → see deploy log for the final tag).** Four things, all found while closing out the v9 work:
+
+- **Scene images are WebP now.** ComfyUI hands back 1024² PNGs of ~1 MB; a 9-scene story was pushing ~9 MB of pictures to a phone. `story_media.encode_scene_image()` re-encodes any `.png` passed to `storage_manager.save_file()` at WebP q82 (`SCENE_IMAGE_WEBP_QUALITY`) — measured 955 KB → 63 KB on a real scene, 16×. A decode failure logs and stores the PNG unchanged, so this can never turn a finished scene into a failed one. **Nothing needed migrating**: readers resolve by the stored `image_url` or by glob, `resolve_scene_file` already tolerated any extension, and `sniff_media_type` now recognises WebP/PNG/JPEG so the `Content-Type` follows the bytes. Old PNG stories still play. Three `main.py` spots that hardcoded `.png` were fixed (scene-URL reconstruction, saved-story fallback scan, ZIP export) — the ZIP now names the entry after the real file, same bug class as the `.wav`-named-mp3 one above it.
+- **Stale narration after a retry.** `/api/story/{id}/scene/{n}/audio` serves `outputs/audio_cache/audio_{story_id}_{n}.mp3` before the story folder, and that key has no voice or attempt in it — a regenerated story could play the *previous* attempt's audio for any scene that failed the second time, and scenes past the new scene count kept serving narration that no longer existed (24 h TTL). `generate_progressive_tts()` now unlinks that story's cache files before it starts.
+- **Chatterbox v10 — per-sentence truncation guard.** The worker already splits on sentence boundaries; the ~1-in-3 truncations were Chatterbox stopping early on *one* sentence. The backend's `TTS_MAX_CHARS_PER_S` guard only sees the finished scene, so one bad sentence cost a full-scene regeneration (2× GPU, ~6 s). `_generate_sentence()` applies the same 25 chars/s test per sentence and re-runs only that sentence (≤2 retries, longest take wins, ~1 s). The response carries `regenerated_sentences`; `chatterbox_client.py` logs it as `regen=N`, so `docker logs … | grep regen=` gives the real per-voice truncation rate. **v10 is a full rewrite of `chatterbox_worker.py`** (v9 had hit the 3-patch limit), otherwise byte-identical in behaviour.
+- **Schnell cold start is not fixable in code.** `edusmart-flux1-schnell` is a RunPod *hub template* (`worker-comfyui`), not a Flash worker — there is no file to add a preload to, and FlashBoot is already on. Measured 2026-09-05: resume after a long idle = 6.8 s delay + **58.7 s execution** (ComfyUI reloads the model; the snapshot is taken before it), versus 1.5 s warm. The only lever is the console idle timeout (45 s today) — raising it to 120 s trades idle GPU cost for not paying that 59 s between stories. Not changed; user's cost call.
+
+**Share / video buttons** were gated on `savedStoryId` (story saved to library). Now shown once the story is fully generated; on an unsaved story the tap opens Save first and then the requested modal (`StoryPlayer.jsx` `openOrSaveFirst`).
+
+Tests: 171 pass with the docker one-liner above plus `-v $PWD/services/kokoro_client.py:/app/services/kokoro_client.py:ro`; `test_promo_crud` / `test_video_generation` need MySQL (pre-existing).
 
 ## User-chosen quiz size + capacity check (2026-08-03, `20260803_205230`)
 
@@ -734,18 +813,24 @@ duplicated across near-identical call sites, fixed in one and not the others.
 Concurrency was tested at 3 scenes; a real multi-scene story (5-10 scenes)
 generating in production hasn't been watched end-to-end yet. Watch the first
 few real stories after this deploy, and watch RunPod's account-wide worker
-quota - ComfyUI (3) + kokoro-tts (2) already equals the account's 5-worker
-cap, so there is no headroom for a third GPU workload without asking RunPod
-to raise it.
+quota - **flux-schnell (3) + chatterbox (2) equals the account's 5-worker
+cap** (the kokoro and FLUX-dev endpoints are gone / at 0), so there is no
+headroom for a third GPU workload without asking RunPod to raise it, and
+every Chatterbox rename deploy must delete the previous version first.
 
-### GPU tier / execution timeout: console is ground truth, not this repo
+### GPU tier / execution timeout: where the truth lives now (updated 2026-09-05)
 
-The RunPod Flash SDK used by `runpod-kokoro-test/kokoro_worker.py` exposes no
-Secure/Pro-vs-Community-cloud toggle, and `execution_timeout_ms` was observed
-not to apply on an in-place `flash deploy` update. Both were set by hand in
-the RunPod console (24GB non-Pro tier, 120s execution timeout) and are **not**
-guaranteed to survive a future `flash deploy` of that project. If the kokoro
-endpoint is ever redeployed, re-check both in the console afterward.
+Historically both were console-only (the Flash SDK exposed no tier toggle and
+`execution_timeout_ms` was seen not to apply on an in-place `flash deploy`).
+Since Chatterbox v9 every deploy is a *rename* (fresh endpoint), and the
+worker file carries `idle_timeout=120` / `execution_timeout_ms=300_000` /
+`flashboot=True` / `GpuGroup.ADA_24` - verified applied on v9 via the
+endpoint's reported config. Still re-check the console after any deploy; if
+the file and the console disagree, the console is what is running.
+
+The schnell image endpoint is a RunPod hub template, not Flash - its config
+(idle 45 s, execution 120 s, FlashBoot on, 3 workers, QUEUE_DELAY 4) is
+console-only.
 
 ---
 
