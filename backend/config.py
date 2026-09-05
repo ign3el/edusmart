@@ -97,6 +97,34 @@ class Config:
     # e.g. while actively debugging the RunPod path.
     TTS_RUNPOD_FALLBACK_TO_CPU = os.getenv("TTS_RUNPOD_FALLBACK_TO_CPU", "true").lower() == "true"
 
+    # "kokoro" (default) or "chatterbox" (Chatterbox Multilingual, MIT
+    # licensed - chosen over XTTS-v2 specifically to avoid XTTS's CPML
+    # commercial-use license risk). Governs the synthesis engine for every
+    # voice, including ar_teacher (Nour) - under "chatterbox" Arabic is
+    # cloned from Piper's own current output rather than staying on Piper's
+    # dedicated Arabic model; see services/kokoro_client.py::generate_tts_async,
+    # the single place voice routing is decided. The 4 Hindi voices (hf_alpha/hf_beta/hm_omega/
+    # hm_psi) only exist under "chatterbox" - they have no Kokoro equivalent,
+    # so they stay non-functional under the "kokoro" default exactly as they
+    # already were before this flag existed. Flip to "kokoro" for an instant
+    # rollback if Chatterbox misbehaves - no redeploy needed, Kokoro's
+    # worker code is kept (undeployed) in runpod-kokoro-test/kokoro_worker.py
+    # and can be redeployed if ever needed.
+    TTS_ENGINE = os.getenv("TTS_ENGINE", "kokoro").lower()
+
+    # voice_id -> set of user_ids allowed to use it. Admins are always
+    # implicitly allowed regardless of this list (see
+    # services/kokoro_client.py::is_voice_allowed). Private voices are cloned
+    # from a real person's reference audio (see runpod-kokoro-test/voice_refs)
+    # and are deliberately NOT added to the public TeacherCard.jsx catalog -
+    # this dict is the enforcement point that keeps them off-limits even to a
+    # caller who guesses the voice_id directly. Extend by adding an id here
+    # and redeploying the backend - no DB table needed for a single-digit
+    # allowlist.
+    PRIVATE_VOICES: dict[str, set[int]] = {
+        "saba": {520},
+    }
+
     # "flux-dev" (default, RUNPOD_ENDPOINT_ID_FLUX, 20/15 steps) or
     # "flux-schnell" (RUNPOD_ENDPOINT_ID_FLUX_SCHNELL, 4 steps, ~4-5x cheaper
     # per image - measured 2026-08-04). Different endpoint AND different

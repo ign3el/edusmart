@@ -142,65 +142,53 @@ async def tts_preview(
     if not _rate_limiter.check(f"tts-preview:{current_user['id']}", max_attempts=20, window_seconds=3600):
         raise HTTPException(status_code=429, detail="Too many preview requests. Please wait before trying again.")
 
-    try:
-        # Determine endpoint based on voice
-        if request.voice.startswith('ar_'):
-            # Arabic - use Piper endpoint
-            endpoint = f"{TTS_API_URL}/tts"
-            payload = {
-                "text": request.text,
-                "speaker_id": request.voice
-            }
-            outgoing_headers = {
-                'Content-Type': 'application/json',
-                'TTS_API_KEY': TTS_API_KEY
-            }
-        else:
-            # English and others - prefer local Kokoro first to avoid external auth/cors issues
-            try:
-                from services.kokoro_client import generate_tts
-                from services.concurrency import tts_governor
-                # generate_tts is a blocking requests.post with a 90 second
-                # timeout. Called bare from an async endpoint it stalls the
-                # event loop for the entire process - one user previewing a
-                # voice froze every other user's request until it returned.
-                # Every other call site already offloads it the same way.
-                #
-                # It also shares the story pipeline's TTS governor: previews
-                # hit the same CPU-bound Kokoro container, and a few users
-                # clicking through voices should queue behind narration rather
-                # than compete with it.
-                async with tts_governor.slot():
-                    audio_bytes = await asyncio.to_thread(
-                        generate_tts,
-                        text=request.text,
-                        voice=request.voice,
-                        speed=float(request.speed or 1.0)
-                    )
-                if audio_bytes:
-                    return Response(
-                        content=audio_bytes,
-                        media_type="audio/mpeg",
-                        headers={
-                            "Content-Disposition": "inline; filename=preview.mp3"
-                        }
-                    )
-            except Exception as local_exc:
-                logger.warning(f"Local Kokoro TTS preview failed: {local_exc}")
+    from services.kokoro_client import is_voice_allowed
+    if not is_voice_allowed(request.voice, current_user):
+        raise HTTPException(status_code=403, detail="Voice not available for this account")
 
-            # Fallback to hosted OpenAI-compatible endpoint
-            endpoint = f"{TTS_API_URL}/v1/audio/speech"
-            payload = {
-                "model": "kokoro",
-                "input": request.text,
-                "voice": request.voice,
-                "response_format": "mp3",
-                "speed": request.speed
-            }
-            outgoing_headers = {
-                'Content-Type': 'application/json',
-                'TTS_API_KEY': TTS_API_KEY
-            }
+    try:
+        # Primary path: the same dispatcher the real generation pipeline uses
+        # (services/kokoro_client.py::generate_tts_async - Piper for Arabic,
+        # Chatterbox or Kokoro for everything else depending on Config.TTS_ENGINE,
+        # including the 4 Hindi voices that only exist under Chatterbox). Only
+        # falls through to the external hosted endpoint below if this fails.
+        try:
+            from services.kokoro_client import generate_tts_async
+            from services.concurrency import tts_governor
+            # Shares the story pipeline's TTS governor: previews hit the same
+            # backend the real narration does, and a few users clicking
+            # through voices should queue behind narration rather than
+            # compete with it.
+            async with tts_governor.slot():
+                audio_bytes = await generate_tts_async(
+                    text=request.text,
+                    voice=request.voice,
+                    speed=float(request.speed or 1.0)
+                )
+            if audio_bytes:
+                return Response(
+                    content=audio_bytes,
+                    media_type="audio/mpeg",
+                    headers={
+                        "Content-Disposition": "inline; filename=preview.mp3"
+                    }
+                )
+        except Exception as local_exc:
+            logger.warning(f"Local TTS preview failed: {local_exc}")
+
+        # Fallback to hosted OpenAI-compatible endpoint
+        endpoint = f"{TTS_API_URL}/v1/audio/speech"
+        payload = {
+            "model": "kokoro",
+            "input": request.text,
+            "voice": request.voice,
+            "response_format": "mp3",
+            "speed": request.speed
+        }
+        outgoing_headers = {
+            'Content-Type': 'application/json',
+            'TTS_API_KEY': TTS_API_KEY
+        }
 
         # Make request to external TTS API
         async with httpx.AsyncClient(timeout=30.0) as client:

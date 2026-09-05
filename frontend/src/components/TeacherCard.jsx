@@ -6,6 +6,7 @@ import {
   Shield, Crown, Sparkles, Award, ScrollText, Moon, Smile, Target, BookMarked
 } from 'lucide-react';
 import { useDialog } from '../context/DialogContext';
+import { useAuth } from '../context/AuthContext';
 import './TeacherCard.css';
 
 const TEACHERS = [
@@ -155,6 +156,30 @@ const TEACHERS = [
   }
 ];
 
+// Cloned from a real person's voice (Ariba), not shipped in the public
+// TEACHERS catalog above - conditionally appended in TeacherCard below, only
+// for admins and the allow-listed account (user_id 520 - the account this is
+// gated to belongs to Ariba's mother Saba, not Ariba herself, who has no
+// separate login; the id/config key below stays "saba" as a technical
+// identifier for that reason and to avoid an unrelated RunPod redeploy - only
+// the user-visible name/sample text needed to say "Ariba"). Server-side
+// enforcement (services/kokoro_client.py::is_voice_allowed, called from every
+// TTS entry point) is the actual gate; this is just keeping it out of the UI
+// for everyone else. Deliberately has no frontend/public/voice-samples/*.mp3
+// file - that directory is served by nginx with no auth check, so a static
+// preview file would leak the audio to anyone who guesses the URL. Preview
+// falls through to the authenticated live /api/upload/tts-preview path
+// instead (see the staticCheck HEAD request in playSample below).
+const SABA_TEACHER = {
+  id: "saba",
+  name: "Ariba",
+  personality: "Family Voice",
+  description: "A private cloned voice, available to select accounts only",
+  lang: "en",
+  sample: "Hi there! I'm Ariba. Let me take you on an amazing learning adventure!",
+  Icon: Heart
+};
+
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const gridVariants = {
@@ -230,6 +255,13 @@ function TeacherCardItem({ teacher, isActive, isPlaying, onSelect, onPlay }) {
 
 function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage = "en" }) {
   const { alert: showAlert } = useDialog();
+  const { user } = useAuth();
+  // Matches Config.PRIVATE_VOICES["saba"] in backend/config.py - kept in sync
+  // by hand, same as DEFAULT_VOICE_BY_LANGUAGE's own noted frontend/backend
+  // duplication. This only controls whether the card is shown; the backend
+  // check is what actually matters.
+  const canUseSabaVoice = Boolean(user?.is_admin || user?.id === 520);
+  const availableTeachers = canUseSabaVoice ? [...TEACHERS, SABA_TEACHER] : TEACHERS;
   const [playingVoice, setPlayingVoice] = useState(null);
   const [audioCache, setAudioCache] = useState({});
   // The sample used to be a bare local `new Audio(...)` inside playSample, so
@@ -265,7 +297,7 @@ function TeacherCard({ activeVoice = "af_sarah", onVoiceSelect, detectedLanguage
   }, []);
 
   // Filter teachers based on detected language
-  const filteredTeachers = TEACHERS.filter(teacher => {
+  const filteredTeachers = availableTeachers.filter(teacher => {
     if (detectedLanguage === 'ar') {
       return teacher.lang === 'ar';
     }

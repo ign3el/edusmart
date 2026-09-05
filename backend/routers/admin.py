@@ -16,7 +16,6 @@ from database_models import User, StoryOperations, UserOperations
 from database import get_db_cursor
 from auth import get_password_hash
 import mysql.connector
-from services.kokoro_client import generate_tts
 from services.grade_bands import resolve_grade_spec
 from services import api_usage
 from routers.billing import refund_credit
@@ -119,23 +118,21 @@ async def get_admin_user(current_user: User = Depends(get_current_user)):
 async def test_tts(request: TtsTestRequest):
     """
     Allows admins to test the TTS service actually used in production
-    (Kokoro for standard voices, Piper for "ar_teacher") with custom text
-    and settings. Streams back a WAV audio file.
+    (Piper for "ar_teacher", Chatterbox or Kokoro for everything else depending on
+    Config.TTS_ENGINE) with custom text and settings. Streams back an audio
+    file.
     """
     try:
-        if request.voice == "ar_teacher":
-            # Same client the real generation pipeline uses - keeps this test
-            # tool honest about what production actually does.
-            from services.piper_client import piper_tts
-            audio_bytes = await piper_tts.generate_audio(request.text, speed=request.speed, silence=0.3)
-        else:
-            # Route to Kokoro TTS (Port 8880) for others
-            audio_bytes = await asyncio.to_thread(
-                generate_tts,
-                text=request.text,
-                voice=request.voice,
-                speed=request.speed
-            )
+        # Same dispatcher the real generation pipeline uses (see
+        # services/kokoro_client.py::generate_tts_async) - keeps this test
+        # tool honest about what production actually does, and stays correct
+        # automatically as new voices/engines are added there.
+        from services.kokoro_client import generate_tts_async
+        audio_bytes = await generate_tts_async(
+            text=request.text,
+            voice=request.voice,
+            speed=request.speed
+        )
 
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="TTS generation failed, received no audio data.")
@@ -143,7 +140,7 @@ async def test_tts(request: TtsTestRequest):
         return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/wav")
     except Exception as e:
         logger.error(f"Error in TTS test endpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error - see backend logs")
 
 
 # --- Database Viewer for job_state.db ---
@@ -856,8 +853,13 @@ async def _run_retry(story_id: str, scenes: list) -> None:
 
         if scene.get("needs_audio"):
             try:
-                audio = await asyncio.to_thread(
-                    generate_tts, scene["text"], "af_sarah", resolve_grade_spec(grade_level)["tts_speed"]
+                # Routed through the same dispatcher as primary generation
+                # (services/kokoro_client.py::generate_tts_async) so a retry
+                # respects Config.TTS_ENGINE the same way the original
+                # generation did, instead of silently always using Kokoro.
+                from services.kokoro_client import generate_tts_async
+                audio = await generate_tts_async(
+                    text=scene["text"], voice="af_sarah", speed=resolve_grade_spec(grade_level)["tts_speed"]
                 )
                 if audio:
                     url = storage_manager.save_file(story_id, f"scene_{idx}.mp3", audio, in_saved=False)

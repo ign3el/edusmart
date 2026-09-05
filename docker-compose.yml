@@ -98,6 +98,9 @@ x-backend-common: &backend-common
     - RUNPOD_MONTHLY_CAP_AED=${RUNPOD_MONTHLY_CAP_AED:-25}
     - RUNPOD_COST_AED_PER_IMAGE=${RUNPOD_COST_AED_PER_IMAGE:-0.02}
     - RUNPOD_ENDPOINT_ID_KOKORO=${RUNPOD_ENDPOINT_ID_KOKORO:-}
+    - RUNPOD_ENDPOINT_ID_CHATTERBOX=${RUNPOD_ENDPOINT_ID_CHATTERBOX:-}
+    # "kokoro" (default) or "chatterbox" - see config.py TTS_ENGINE.
+    - TTS_ENGINE=${TTS_ENGINE:-kokoro}
     # "flux-dev" (default) or "flux-schnell" - see config.py IMAGE_BACKEND.
     - IMAGE_BACKEND=${IMAGE_BACKEND:-flux-dev}
     # Text-generation provider/model switches - see config.py LLM_BACKEND.
