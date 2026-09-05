@@ -73,6 +73,10 @@ admin_token.txt
 # Local edit backups
 *.bak
 *.bak.*
+*.bak_*
+# Pre-change snapshots taken before an audit/deploy edit - working copies of
+# tracked files, kept only so a bad edit can be reverted locally.
+.audit_backups/
 
 # Ad-hoc DB dumps / removed-env snapshots taken before migrations - these can
 # contain password hashes and other user data, never belong in git history.
@@ -80,3 +84,10 @@ backups/
 frontend/.palette-backup-*/
 frontend/.visual-backup-*/
 frontend/public/.icons-backup-*/
+
+# Runtime state written by deploy.sh / scripts/backup.sh and read back by
+# routers/system.py - per-machine, never the same in two checkouts.
+status/
+
+# Scratch audio the admin TTS test tool used to leave behind.
+backend/temp_audio_*.mp3
