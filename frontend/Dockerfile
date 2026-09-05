@@ -6,8 +6,10 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies. `npm ci`, not `npm install`: install treats the
+# lockfile as advisory and may rewrite it, so two builds of one commit could
+# ship different trees. ci fails loudly if package.json and the lock disagree.
+RUN npm ci
 
 # Copy source code
 COPY . .

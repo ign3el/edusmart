@@ -88,7 +88,11 @@ unset MYSQL_PWD
 
 # 3. job_state Docker named volume (job_state.db, runpod_usage.json, hash_cache.json).
 log "Archiving edusmart_backend_db volume..."
-docker run --rm -v edusmart_backend_db:/vol -v "$WORKDIR:/backup" alpine \
+# --platform is mandatory: the host is arm64 and an amd64 alpine:latest got
+# cached locally, which made every run since 2026-08-29 die with
+# "exec /bin/tar: exec format error" before anything reached offsite.
+docker run --rm --platform linux/arm64 \
+  -v edusmart_backend_db:/vol -v "$WORKDIR:/backup" alpine:3.20 \
   tar czf /backup/job_state_volume.tar.gz -C /vol . \
   || fail "volume archive failed"
 
