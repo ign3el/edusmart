@@ -12,6 +12,10 @@ from auth import get_password_hash, verify_password, generate_secure_token
 
 logger = logging.getLogger(__name__)
 
+# Hashed once at import with the same cost factor as real passwords, so a
+# login against a missing account costs the same wall-clock as a wrong password.
+_DUMMY_HASH = get_password_hash("login-timing-equaliser")
+
 # Use Dict instead of TypedDict to avoid required field errors
 User = Dict[str, Any]
 
@@ -90,30 +94,37 @@ class UserOperations:
         """Authenticates a user by email and password. Returns the user object if successful."""
         user = UserOperations.get_by_email(email)
         if not user:
+            # Burn a bcrypt round anyway. Returning immediately made an
+            # unknown address answer ~250ms faster than a wrong password,
+            # which is a usable account-enumeration oracle.
+            verify_password(password, _DUMMY_HASH)
             return None
-        
+
         # A social-only account has no password hash. bcrypt raises on None,
         # which would turn a wrong-form login into a 500 on a public endpoint
         # and leak the fact that the account exists.
         if not user.get('password_hash'):
+            verify_password(password, _DUMMY_HASH)
             return None
 
         if not verify_password(password, user['password_hash']):
             return None
-            
+
         return user
-    
+
     @staticmethod
     def authenticate_by_username(username: str, password: str) -> Optional[User]:
         """Authenticates a user by username and password. Returns the user object if successful."""
         user = UserOperations.get_by_username(username)
         if not user:
+            verify_password(password, _DUMMY_HASH)
             return None
-        
+
         # A social-only account has no password hash. bcrypt raises on None,
         # which would turn a wrong-form login into a 500 on a public endpoint
         # and leak the fact that the account exists.
         if not user.get('password_hash'):
+            verify_password(password, _DUMMY_HASH)
             return None
 
         if not verify_password(password, user['password_hash']):

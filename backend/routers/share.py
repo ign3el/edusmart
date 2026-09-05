@@ -42,8 +42,16 @@ public_router = APIRouter(prefix="/api/share", tags=["Sharing - Public"])
 # An unauthenticated endpoint that answers "does this token exist?" is a
 # guessing surface. 256 bits of entropy makes guessing hopeless on its own, but
 # throttling keeps a scanner from turning the route into free CPU and log noise.
+#
+# Two budgets. The story-JSON lookup is the guessing surface and stays tight.
+# Media is NOT: every request there carries a token that already resolved (or
+# 404s before it costs anything), and one page load of a 10-scene story fires
+# ~20 media requests - a classroom behind one NAT hit the old shared 60/min on
+# the second open and saw "broken images".
 SHARE_LOOKUP_MAX_ATTEMPTS = 60
 SHARE_LOOKUP_WINDOW_SECONDS = 60
+SHARE_MEDIA_MAX_ATTEMPTS = 600
+SHARE_MEDIA_WINDOW_SECONDS = 60
 
 # A story folder holds more than the story: metadata.json records the source
 # document's path, grade level and internal ids, and older folders still carry
@@ -72,20 +80,24 @@ def _share_url(token: str) -> str:
     return f"{FRONTEND_URL}/s/{token}"
 
 
-def _resolve_token_or_404(token: str, request: Request) -> dict:
+def _resolve_token_or_404(token: str, request: Request, *, media: bool = False) -> dict:
     """Look up a share token, throttled per IP. 404 - never 403 - for a bad
     token: distinguishing "wrong" from "revoked" would confirm which tokens
     once existed."""
     ip = client_ip(request)
-    if not _rate_limiter.check(
-        f"share:{ip}",
-        max_attempts=SHARE_LOOKUP_MAX_ATTEMPTS,
-        window_seconds=SHARE_LOOKUP_WINDOW_SECONDS,
-    ):
+    if media:
+        key, max_attempts, window = (
+            f"share-media:{ip}", SHARE_MEDIA_MAX_ATTEMPTS, SHARE_MEDIA_WINDOW_SECONDS
+        )
+    else:
+        key, max_attempts, window = (
+            f"share:{ip}", SHARE_LOOKUP_MAX_ATTEMPTS, SHARE_LOOKUP_WINDOW_SECONDS
+        )
+    if not _rate_limiter.check(key, max_attempts=max_attempts, window_seconds=window):
         raise HTTPException(
             status_code=429,
             detail="Too many requests. Please slow down.",
-            headers={"Retry-After": str(SHARE_LOOKUP_WINDOW_SECONDS)},
+            headers={"Retry-After": str(window)},
         )
 
     story = StoryOperations.get_story_by_share_token(token)
@@ -183,7 +195,7 @@ def _share_media_url(token: str, raw_url: Optional[str], story_id: str, idx: int
 # --- Owner-side: create, inspect, revoke -----------------------------------
 
 @owner_router.get("/api/story/{story_id}/share")
-async def get_share_state(story_id: str, user: User = Depends(get_current_user)):
+def get_share_state(story_id: str, user: User = Depends(get_current_user)):
     state = StoryOperations.get_share_token(story_id, user)
     if state is None:
         raise HTTPException(status_code=404, detail="Story not found or not yours.")
@@ -196,7 +208,7 @@ async def get_share_state(story_id: str, user: User = Depends(get_current_user))
 
 
 @owner_router.post("/api/story/{story_id}/share")
-async def create_share(
+def create_share(
     story_id: str,
     payload: ShareCreateRequest = ShareCreateRequest(),
     user: User = Depends(get_current_user),
@@ -211,7 +223,7 @@ async def create_share(
 
 
 @owner_router.delete("/api/story/{story_id}/share")
-async def revoke_share(story_id: str, user: User = Depends(get_current_user)):
+def revoke_share(story_id: str, user: User = Depends(get_current_user)):
     if not StoryOperations.revoke_share_token(story_id, user):
         raise HTTPException(status_code=404, detail="Story not found or not yours.")
     logger.info(f"Share link revoked for story {story_id} by user {user.get('id')}")
@@ -221,21 +233,21 @@ async def revoke_share(story_id: str, user: User = Depends(get_current_user)):
 # --- Public-side: no authentication anywhere below --------------------------
 
 @public_router.get("/{token}")
-async def get_shared_story(token: str, request: Request):
+def get_shared_story(token: str, request: Request):
     """The shared story itself. No auth: the token is the credential."""
     story = _resolve_token_or_404(token, request)
     return _public_story_payload(story)
 
 
 @public_router.api_route("/{token}/media/{filename:path}", methods=["GET", "HEAD"])
-async def get_shared_media(token: str, filename: str, request: Request):
+def get_shared_media(token: str, filename: str, request: Request):
     """Scene image/audio for a shared story.
 
     Resolution goes through the same helper the authenticated media route uses,
     so a story that plays for its owner also plays for a visitor - no second
     filename-matching implementation to drift out of sync.
     """
-    story = _resolve_token_or_404(token, request)
+    story = _resolve_token_or_404(token, request, media=True)
 
     if not story_media.is_safe_filename(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")

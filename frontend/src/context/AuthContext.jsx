@@ -70,9 +70,7 @@ export const AuthProvider = ({ children }) => {
 
   // Resend verification email function
   const resendVerificationEmail = useCallback(async (email) => {
-    const response = await apiClient.post('/api/auth/resend-verification', null, {
-      params: { email },
-    });
+    const response = await apiClient.post('/api/auth/resend-verification', { email });
     return response.data;
   }, []);
 

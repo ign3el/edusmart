@@ -18,16 +18,36 @@ logger = logging.getLogger(__name__)
 
 # --- Rate Limiter ---
 class RateLimiter:
+    # Keys are scanner IPs and every email string ever tried at /login. They
+    # used to live forever (timestamps were trimmed, keys never were), which is
+    # an unbounded leak in a single long-lived process. Sweep idle keys
+    # periodically; the longest window in use is MAIL_RATE_WINDOW_SECONDS.
+    SWEEP_INTERVAL_SECONDS = 300
+    MAX_KEY_AGE_SECONDS = 3600 * 2
+
     def __init__(self):
         self.attempts = defaultdict(list)  # ip -> [timestamps]
-    
+        self._last_sweep = time.time()
+
+    def _sweep(self, now: float) -> None:
+        if now - self._last_sweep < self.SWEEP_INTERVAL_SECONDS:
+            return
+        self._last_sweep = now
+        cutoff = now - self.MAX_KEY_AGE_SECONDS
+        stale = [k for k, ts in self.attempts.items() if not ts or ts[-1] < cutoff]
+        for k in stale:
+            del self.attempts[k]
+
     def check(self, key: str, max_attempts: int = 5, window_seconds: int = 60) -> bool:
         """Returns True if allowed, False if rate limited"""
         now = time.time()
-        self.attempts[key] = [t for t in self.attempts[key] if now - t < window_seconds]
-        if len(self.attempts[key]) >= max_attempts:
+        self._sweep(now)
+        recent = [t for t in self.attempts[key] if now - t < window_seconds]
+        if len(recent) >= max_attempts:
+            self.attempts[key] = recent
             return False
-        self.attempts[key].append(now)
+        recent.append(now)
+        self.attempts[key] = recent
         return True
 
     def snapshot(self, window_seconds: int = 3600) -> list:
@@ -442,26 +462,34 @@ def read_users_me(current_user: User = Depends(get_current_user)):
         is_admin=current_user['is_admin']
     )
 
+class ResendVerificationRequest(BaseModel):
+    """Body, not query string: an email in the URL lands in nginx, Cloudflare
+    and browser-history logs."""
+    email: EmailStr
+
+
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
-def resend_verification_email(email: EmailStr, http_request: Request):
+def resend_verification_email(body: ResendVerificationRequest, http_request: Request):
     """
     Resends the verification email. Has a 3-minute cooldown to prevent abuse.
     """
+    email = body.email
     # The cooldown below is keyed on user id, so it does nothing against a caller
     # cycling through addresses - one send each, unlimited. This is the per-IP
     # budget that actually bounds outbound volume.
     _guard_mail_rate(http_request, 'resend', MAIL_RATE_MAX_ATTEMPTS)
 
+    generic = {"message": "If this email is registered, a verification link has been sent."}
+
     user = UserOperations.get_by_email(email)
     if not user:
         # Don't reveal whether email exists for security
-        return {"message": "If this email is registered, a verification link has been sent."}
-    
+        return generic
+
     if user['is_verified']:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is already verified"
-        )
+        # Same body as the unknown-address case: a distinct "already verified"
+        # error confirmed which addresses hold an account.
+        return generic
     
     # Check cooldown (3 minutes)
     cooldown_seconds = UserOperations.check_verification_cooldown(user['id'])
@@ -476,7 +504,7 @@ def resend_verification_email(email: EmailStr, http_request: Request):
         UserOperations.track_verification_email_sent(user['id'])
         send_verification_email(email, token)
         logger.info(f"Verification email resent to {email}")
-        return {"message": "Verification email sent successfully"}
+        return generic
     except Exception as e:
         logger.error(f"Failed to resend verification email: {e}")
         raise HTTPException(
