@@ -70,6 +70,29 @@ const StoryPlayer = forwardRef(({
 }, ref) => {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showVideoModal, setShowVideoModal] = useState(false)
+  // Share and video need a saved story (a DB id to point the link/render at).
+  // Rather than hide both buttons until the reader finds Save in the drawer,
+  // tapping either on an unsaved story opens the Save flow and remembers which
+  // action was wanted; once savedStoryId lands, that modal opens by itself.
+  const [pendingAfterSave, setPendingAfterSave] = useState(null)
+  useEffect(() => {
+    if (!savedStoryId || !pendingAfterSave) return
+    if (pendingAfterSave === 'share') setShowShareModal(true)
+    if (pendingAfterSave === 'video') setShowVideoModal(true)
+    setPendingAfterSave(null)
+  }, [savedStoryId, pendingAfterSave])
+  const openOrSaveFirst = (kind) => {
+    if (savedStoryId) {
+      if (kind === 'share') setShowShareModal(true)
+      else setShowVideoModal(true)
+      return
+    }
+    setPendingAfterSave(kind)
+    onSave?.()
+  }
+  // Buttons appear once there is either a saved id or a save action on offer
+  // (App.jsx only hands over onSave when the story is fully generated).
+  const canShareOrExport = !shareMode && (savedStoryId || !!onSave)
   const [currentScene, setCurrentScene] = useState(initialScene)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showQuiz, setShowQuiz] = useState(false)
@@ -784,21 +807,21 @@ const StoryPlayer = forwardRef(({
             four entries already exist elsewhere: Save and Download in the app
             drawer, Quiz as the button below, Restart as New Story. */}
         {/* Sharing needs a saved story to point at, and an owner to authorise
-            the call - so it appears only once the story has been saved, and
-            never on the public view. */}
-        {!shareMode && savedStoryId && (
+            the call - never shown on the public view. On an unsaved story the
+            tap routes through Save first (see openOrSaveFirst). */}
+        {canShareOrExport && (
           <button
             className="icon-btn"
-            onClick={() => setShowShareModal(true)}
+            onClick={() => openOrSaveFirst('share')}
             aria-label="Share this story"
           >
             <Share2 size={18} />
           </button>
         )}
-        {!shareMode && savedStoryId && (
+        {canShareOrExport && (
           <button
             className="icon-btn"
-            onClick={() => setShowVideoModal(true)}
+            onClick={() => openOrSaveFirst('video')}
             aria-label="Create a video of this story"
           >
             <Video size={18} />
