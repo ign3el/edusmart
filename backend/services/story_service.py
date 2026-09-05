@@ -1,4 +1,5 @@
 import os
+import glob
 import logging
 import fcntl
 import contextlib
@@ -3245,6 +3246,19 @@ HARD RULES:
         """
         total_scenes = len(scenes)
         print(f"🎤 Starting progressive TTS generation for {total_scenes} scenes (batch_size={batch_size})")
+
+        # Drop any audio_cache/ files a previous attempt of this story left
+        # behind. /api/story/{id}/scene/{n}/audio serves the cache before the
+        # story folder, and the cache is keyed by story id + scene number only:
+        # a retried attempt with different text (or a different voice) would
+        # otherwise play the old take for any scene that fails this time round,
+        # and scene numbers beyond this attempt's count would keep serving
+        # narration that no longer exists. Cheap - it is a handful of unlinks.
+        try:
+            for stale in glob.glob(os.path.join("outputs", "audio_cache", f"audio_{story_id}_*.mp3")):
+                os.remove(stale)
+        except OSError as e:
+            print(f"⚠ Could not clear audio cache for {story_id}: {e}")
 
         # Semaphore fan-out instead of gather-per-batch. The old loop waited
         # for the whole batch before requesting the next one, so a single slow

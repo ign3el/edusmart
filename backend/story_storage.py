@@ -116,11 +116,17 @@ class StoryStorageManager:
             URL path to access the file
         """
         story_dir = self.get_story_path(story_id, in_saved)
-        
+
         if not os.path.exists(story_dir):
             logger.error(f"Story folder does not exist: {story_dir}")
             raise FileNotFoundError(f"Story {story_id} not found")
-        
+
+        # Scene PNGs from the image worker are stored as WebP (~16x smaller);
+        # callers keep asking for "scene_N.png" and get back the URL of what
+        # was actually written, which is what they store in scene.image_url.
+        from services.story_media import encode_scene_image
+        filename, content = encode_scene_image(filename, content)
+
         file_path = os.path.join(story_dir, filename)
         
         # Check if file already exists and handle versioning

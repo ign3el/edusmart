@@ -28,6 +28,41 @@ def is_safe_filename(filename: str) -> bool:
     return not (".." in filename or filename.startswith("/") or "\\" in filename)
 
 
+# Scene images arrive from ComfyUI as 1024² PNGs of ~1 MB each, so a 9-scene
+# story pushed ~9 MB of pictures to the phone. Re-encoded as WebP at this
+# quality the same scene measured 63 KB (2026-09-05, 16x smaller) with no
+# visible difference on a 6" screen. Lossless is pointless here - the source
+# is a diffusion render, not line art.
+SCENE_IMAGE_WEBP_QUALITY = int(os.getenv("SCENE_IMAGE_WEBP_QUALITY", "82"))
+
+
+def encode_scene_image(filename: str, content: bytes) -> tuple[str, bytes]:
+    """Re-encode a freshly generated scene image as WebP.
+
+    Returns the (filename, bytes) that should actually be written. Only
+    `.png` inputs are touched - anything else (audio, mp4, an already-WebP
+    file, a PNG that Pillow cannot parse) passes through unchanged, so a
+    decoder hiccup can never turn a finished scene into a failed one. Old
+    stories on disk keep their PNGs; every reader resolves by the stored URL
+    or a glob, not by assuming the extension.
+    """
+    if not filename.lower().endswith(".png"):
+        return filename, content
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(io.BytesIO(content)) as im:
+            if im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGB")
+            out = io.BytesIO()
+            im.save(out, format="WEBP", quality=SCENE_IMAGE_WEBP_QUALITY, method=4)
+        return filename[:-4] + ".webp", out.getvalue()
+    except Exception as e:  # noqa: BLE001 - keep the scene, lose the saving
+        logger.warning(f"WebP encode of {filename} failed, storing PNG: {e}")
+        return filename, content
+
+
 def sniff_media_type(path) -> str:
     """Media type from the file's leading bytes rather than its extension.
 
@@ -39,6 +74,12 @@ def sniff_media_type(path) -> str:
             head = fh.read(12)
     except OSError:
         return ""
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "audio/wav"
     # MP3 is either an ID3 tag or a raw frame sync (0xFF 0xEx/0xFx).

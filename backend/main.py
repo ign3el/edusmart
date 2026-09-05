@@ -1587,9 +1587,13 @@ def get_story_status(story_id: str, current_user: dict = Depends(get_current_use
                     # Try to find image file if missing
                     if not s.get("image_url"):
                         # Try multiple image file patterns
+                        # webp first: everything generated since 2026-09-05
+                        # is stored that way (see story_media.encode_scene_image).
                         image_patterns = [
+                            f"scene_{scene_index}.webp",
                             f"scene_{scene_index}.png",
                             f"scene_{scene_index}.jpg",
+                            f"*_scene_{scene_index}.webp",
                             f"*_scene_{scene_index}.png",
                             f"*_scene_{scene_index}.jpg"
                         ]
@@ -1752,6 +1756,15 @@ def get_story_status(story_id: str, current_user: dict = Depends(get_current_use
                 while True:
                     scene_found = False
                     
+                    # Images are webp since 2026-09-05, png before; take the
+                    # first that exists so both eras of saved stories load.
+                    image_stem = f"{job_id}_scene_{scene_index}" if job_id else f"scene_{scene_index}"
+                    image_file = f"{image_stem}.webp"
+                    image_path = os.path.join(story_dir, image_file)
+                    if not os.path.exists(image_path):
+                        image_file = f"{image_stem}.png"
+                        image_path = os.path.join(story_dir, image_file)
+
                     if job_id:
                         audio_file = f"{job_id}_scene_{scene_index}.mp3"
                         audio_path = os.path.join(story_dir, audio_file)
@@ -2357,19 +2370,22 @@ def export_job(job_id: str, current_user: dict = Depends(get_current_user)):
             if scene["audio_url"]:
                 audio_path = scene["audio_url"].replace("/api/outputs/", "outputs/")
             audio_ext = os.path.splitext(audio_path)[1].lower() or ".mp3"
+            # Same rule for the image: webp since 2026-09-05, png before.
+            img_path = ""
+            if scene["image_url"]:
+                img_path = scene["image_url"].replace("/api/outputs/", "outputs/")
+            image_ext = os.path.splitext(img_path)[1].lower() or ".png"
 
             scene_data = {
                 "text": scene["text"],
-                "image_url": f"scene_{idx}.png",
+                "image_url": f"scene_{idx}{image_ext}",
                 "audio_url": f"scene_{idx}{audio_ext}"
             }
             story_data["scenes"].append(scene_data)
 
             # Add image file
-            if scene["image_url"]:
-                img_path = scene["image_url"].replace("/api/outputs/", "outputs/")
-                if os.path.exists(img_path):
-                    zip_file.write(img_path, f"scene_{idx}.png")
+            if img_path and os.path.exists(img_path):
+                zip_file.write(img_path, f"scene_{idx}{image_ext}")
 
             # Add audio file
             if audio_path and os.path.exists(audio_path):
