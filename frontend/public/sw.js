@@ -5,6 +5,9 @@ const CACHE_VERSION = 'build-20260809200033';
 const APP_SHELL_CACHE = `edusmart-shell-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `edusmart-runtime-${CACHE_VERSION}`;
 
+// API paths that must never land in Cache Storage - see Strategy 2.
+const NO_CACHE_API = /^\/api\/(auth|billing|admin|status|share|system|announcements)(\/|$)/;
+
 // App Shell: Core files needed to render the UI
 const APP_SHELL_FILES = [
   '/',
@@ -135,12 +138,18 @@ self.addEventListener('fetch', (event) => {
 
   // Strategy 2: Network-First for API calls (with fallback to cache)
   if (url.pathname.startsWith('/api/')) {
+    // Never persist these. auth/billing/admin are per-user and outlive logout
+    // in Cache Storage (next person on a shared tablet could read them
+    // offline); status polls carry a ?_=timestamp so every one was a fresh,
+    // never-pruned entry - hundreds per generation. None of them are useful
+    // offline anyway.
+    const cacheable = !NO_CACHE_API.test(url.pathname);
     event.respondWith(
       // Add timeout to fetch to prevent hanging
       Promise.race([
         fetch(request).then((response) => {
           // Cache successful API responses for offline fallback
-          if (response.status === 200) {
+          if (cacheable && response.status === 200) {
             const responseToCache = response.clone();
             caches.open(RUNTIME_CACHE).then((cache) => {
               cache.put(request, responseToCache).catch(err => {

@@ -112,6 +112,19 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem('auth_token');
     setToken(null);
     setUser(null);
+    // Wipe Cache Storage. The service worker caches story lists and scene
+    // media keyed without the token, so without this the next person on a
+    // shared device could read the previous account's stories offline.
+    // The shell/chunk caches refill on the next online page load through the
+    // normal fetch handlers; nothing user-visible is lost.
+    // Direct caches.delete rather than only postMessage:
+    // the SW may not be controlling this page yet (first load, hard reload).
+    if (typeof caches !== 'undefined') {
+      caches.keys()
+        .then((names) => Promise.all(names.map((n) => caches.delete(n))))
+        .catch(() => {});
+    }
+    navigator.serviceWorker?.controller?.postMessage({ type: 'CLEAR_CACHE' });
   }, []);
 
   // The value provided to consumers of the context
