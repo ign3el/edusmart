@@ -20,7 +20,12 @@ const HeroScene = lazy(() => import('./components/3d/HeroScene'));
 import SaveStoryModal from './components/SaveStoryModal'
 import SaveFeedbackModal from './components/SaveFeedbackModal'
 import LoadStory from './components/LoadStory'
-import OfflineManager from './components/OfflineManager'
+// Lazy, like AdminPanel below: OfflineManager statically imports JSZip, so a
+// plain import parked ~26 KB gz of ZIP machinery in the eager entry chunk for
+// a screen most sessions never open. Removing jszip from vite.config's
+// manualChunks alone did NOT fix that - Rollup just moved it into index-*.js,
+// because this import is what makes it reachable from the entry graph.
+const OfflineManager = lazy(() => import('./components/OfflineManager'));
 import UserProfile from './components/UserProfile'
 import ReuploadConfirmModal from './components/ReuploadConfirmModal'
 import UploadProgressOverlay from './components/UploadProgressOverlay'
@@ -1033,12 +1038,14 @@ function MainApp() {
           )}
 
           {step === 'offline' && (
-            <motion.div key="offline" className="step-container">
-              <OfflineManager 
-                onLoadOffline={handleLoadOffline}
-                onBack={() => navigateTo('home')}
-              />
-            </motion.div>
+            <Suspense fallback={<div className="loading-message">Loading Offline Manager...</div>}>
+              <motion.div key="offline" className="step-container">
+                <OfflineManager 
+                  onLoadOffline={handleLoadOffline}
+                  onBack={() => navigateTo('home')}
+                />
+              </motion.div>
+            </Suspense>
           )}
 
           {step === 'load' && (
