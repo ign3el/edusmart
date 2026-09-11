@@ -28,6 +28,31 @@ def is_safe_filename(filename: str) -> bool:
     return not (".." in filename or filename.startswith("/") or "\\" in filename)
 
 
+# A story folder holds scene_0.webp, scene_0.mp3 and sometimes scene_0.wav side
+# by side, all matching a bare `*scene_0*` glob. Before the 2026-09-11 PNG->WebP
+# backfill that never mattered, because the exact-match branch always won. Once
+# the .png files were gone, a request for the historical `scene_0.png` fell all
+# the way to the last-resort pattern and could resolve to the AUDIO file -
+# glob order decides, and video_service.py:182 asks for exactly that name
+# whenever a scene's stored image_url is missing or stale. ffmpeg would then be
+# handed an mp3 as the picture. Matching on media class keeps the waterfall's
+# usefulness (any image extension satisfies an image request) without letting it
+# cross from one kind of media to another.
+_MEDIA_CLASSES = {
+    "image": {".webp", ".png", ".jpg", ".jpeg", ".gif"},
+    "audio": {".mp3", ".wav", ".m4a", ".ogg"},
+    "video": {".mp4", ".webm", ".mov"},
+}
+
+
+def _media_class(filename: str) -> Optional[str]:
+    ext = os.path.splitext(filename)[1].lower()
+    for name, exts in _MEDIA_CLASSES.items():
+        if ext in exts:
+            return name
+    return None
+
+
 # Scene images arrive from ComfyUI as 1024² PNGs of ~1 MB each, so a 9-scene
 # story pushed ~9 MB of pictures to the phone. Re-encoded as WebP at this
 # quality the same scene measured 63 KB (2026-09-05, 16x smaller) with no
@@ -134,10 +159,15 @@ def resolve_scene_file(story_dir: Path, filename: str) -> Optional[Path]:
             if matches:
                 return Path(matches[0])
 
-    # Pattern 4: last resort - anything carrying this scene number.
+    # Pattern 4: last resort - anything carrying this scene number, restricted
+    # to the same media class as the request (see _MEDIA_CLASSES above). Sorted
+    # so the answer is stable across machines instead of filesystem-order luck.
     if "scene_" in filename:
         scene_match = filename.split("scene_")[-1].split(".")[0]
-        matches = glob.glob(str(story_dir / f"*scene_{scene_match}*"))
+        wanted = _media_class(filename)
+        matches = sorted(glob.glob(str(story_dir / f"*scene_{scene_match}*")))
+        if wanted:
+            matches = [m for m in matches if _media_class(m) == wanted]
         if matches:
             return Path(matches[0])
 
