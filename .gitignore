@@ -24,9 +24,17 @@ wheels/
 *.egg
 
 # Environment variables
+# Ignore every .env variant anywhere in the tree; only *.example / *.sample
+# templates are committed. A file is allowed back in solely because every
+# value in it is a placeholder.
 .env
-.env.local
-.env.*.local
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!.env.sample
+!**/.env.example
+!**/.env.sample
 
 # IDEs
 .vscode/
